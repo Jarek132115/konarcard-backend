@@ -49,7 +49,12 @@ const authenticateToken = (req, res, next) => {
 // POST /api/business-card/create_business_card (or update)
 // This route now requires authentication (authenticateToken middleware)
 router.post('/create_business_card', authenticateToken, upload, async (req, res) => {
+    // ADDED CONSOLE LOGS FOR DEBUGGING REQUEST BODY AND FILES
     console.log('businessCardRoutes.js: create_business_card route hit');
+    console.log('businessCardRoutes.js: Request body (text fields):', req.body);
+    console.log('businessCardRoutes.js: Request files (uploaded images):', req.files);
+    // END ADDED CONSOLE LOGS
+
     try {
         // User ID comes directly from the authenticated token payload (req.user.id)
         const userId = req.user.id;
@@ -219,7 +224,6 @@ router.get('/by_username/:username', async (req, res) => {
             return res.status(404).json({ message: 'User not found.' });
         }
 
-        // Find the business card associated with that user ID
         const card = await BusinessCard.findOne({ user: user._id });
         if (!card) {
             return res.status(404).json({ message: 'Business card not found for this user.' });
