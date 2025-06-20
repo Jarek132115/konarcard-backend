@@ -51,8 +51,8 @@ const authenticateToken = (req, res, next) => {
 router.post('/create_business_card', authenticateToken, upload, async (req, res) => {
     // ADDED CONSOLE LOGS FOR DEBUGGING REQUEST BODY AND FILES
     console.log('businessCardRoutes.js: create_business_card route hit');
-    console.log('businessCardRoutes.js: Request body (text fields):', req.body);
-    console.log('businessCardRoutes.js: Request files (uploaded images):', req.files);
+    console.log('businessCardRoutes.js: Request body (text fields):', JSON.stringify(req.body, null, 2));
+    console.log('businessCardRoutes.js: Request files (uploaded images):', JSON.stringify(req.files, null, 2));
     // END ADDED CONSOLE LOGS
 
     try {
@@ -109,18 +109,23 @@ router.post('/create_business_card', authenticateToken, upload, async (req, res)
         // Find the existing business card for the authenticated user to retain existing URLs if not updated
         const existingCard = await BusinessCard.findOne({ user: userId });
 
+        // Helper for S3 upload within this scope (userId is available)
+        const uploadFileToS3 = async (fileBuffer, folder, mimetype, bucketName, region) => {
+            const ext = path.extname(fileBuffer.originalname || '');
+            const key = `${folder}/${userId}/${uuidv4()}${ext}`; // Path includes user ID for organization
+            await s3.send(new PutObjectCommand({ Bucket: bucketName, Key: key, Body: fileBuffer.buffer, ContentType: mimetype }));
+            return `https://${bucketName}.s3.${region}.amazonaws.com/${key}`;
+        };
+
         // Handle cover photo upload or retention based on form data
         if (req.files?.cover_photo?.[0]) {
-            const coverFile = req.files.cover_photo[0];
-            const ext = path.extname(coverFile.originalname);
-            const key = `cover_photos/${userId}/${uuidv4()}${ext}`; // Use userId in path for organization
-            await s3.send(new PutObjectCommand({
-                Bucket: process.env.AWS_CARD_BUCKET_NAME,
-                Key: key,
-                Body: coverFile.buffer,
-                ContentType: coverFile.mimetype,
-            }));
-            coverPhotoUrl = `https://${process.env.AWS_CARD_BUCKET_NAME}.s3.${process.env.AWS_CARD_BUCKET_REGION}.amazonaws.com/${key}`;
+            coverPhotoUrl = await uploadFileToS3(
+                req.files.cover_photo[0],
+                'cover_photos',
+                req.files.cover_photo[0].mimetype,
+                process.env.AWS_CARD_BUCKET_NAME,
+                process.env.AWS_CARD_BUCKET_REGION
+            );
         } else if (cover_photo_removed === 'true') {
             coverPhotoUrl = ''; // User explicitly removed it from the form
         } else if (existingCard?.cover_photo) {
@@ -129,16 +134,13 @@ router.post('/create_business_card', authenticateToken, upload, async (req, res)
 
         // Handle avatar upload or retention
         if (req.files?.avatar?.[0]) {
-            const avatarFile = req.files.avatar[0];
-            const ext = path.extname(avatarFile.originalname);
-            const key = `avatars/${userId}/${uuidv4()}${ext}`; // Use userId in path for organization
-            await s3.send(new PutObjectCommand({
-                Bucket: process.env.AWS_CARD_BUCKET_NAME,
-                Key: key,
-                Body: avatarFile.buffer,
-                ContentType: avatarFile.mimetype,
-            }));
-            avatarUrl = `https://${process.env.AWS_CARD_BUCKET_NAME}.s3.${process.env.AWS_CARD_BUCKET_REGION}.amazonaws.com/${key}`;
+            avatarUrl = await uploadFileToS3(
+                req.files.avatar[0],
+                'avatars',
+                req.files.avatar[0].mimetype,
+                process.env.AWS_CARD_BUCKET_NAME,
+                process.env.AWS_CARD_BUCKET_REGION
+            );
         } else if (avatar_removed === 'true') {
             avatarUrl = ''; // User explicitly removed it
         } else if (existingCard?.avatar) {
@@ -148,36 +150,23 @@ router.post('/create_business_card', authenticateToken, upload, async (req, res)
         // Handle new work images upload and combine with existing ones
         if (req.files?.work_images && req.files.work_images.length > 0) {
             for (const file of req.files.work_images) {
-                const ext = path.extname(file.originalname);
-                const key = `work_images/${userId}/${uuidv4()}${ext}`; // Use userId in path for organization
-                await s3.send(new PutObjectCommand({
-                    Bucket: process.env.AWS_CARD_BUCKET_NAME,
-                    Key: key,
-                    Body: file.buffer,
-                    ContentType: file.mimetype,
-                }));
-                workImageUrls.push(`https://${process.env.AWS_CARD_BUCKET_NAME}.s3.${process.env.AWS_CARD_BUCKET_REGION}.amazonaws.com/${key}`);
+                const imageUrl = await uploadFileToS3(
+                    file,
+                    'work_images',
+                    file.mimetype,
+                    process.env.AWS_CARD_BUCKET_NAME,
+                    process.env.AWS_CARD_BUCKET_REGION
+                );
+                workImageUrls.push(imageUrl);
             }
         }
         // At this point, `workImageUrls` contains all URLs (retained existing + newly uploaded)
 
         // Prepare data for update/create operation
         const updateData = {
-            business_card_name,
-            page_theme,
-            style,
-            main_heading,
-            sub_heading,
-            bio,
-            job_title,
-            full_name,
-            works: workImageUrls, // Save the combined list of work image URLs
-            services: parsedServices,
-            reviews: parsedReviews,
-            cover_photo: coverPhotoUrl, // This will be the new URL, existing URL, or empty string
-            avatar: avatarUrl,         // This will be the new URL, existing URL, or empty string
-            contact_email,
-            phone_number,
+            business_card_name, page_theme, style, main_heading, sub_heading,
+            bio, job_title, full_name, works: workImageUrls, services: parsedServices, reviews: parsedReviews,
+            cover_photo: coverPhotoUrl, avatar: avatarUrl, contact_email, phone_number,
         };
 
         // Find and update/create the business card for the authenticated user
@@ -196,42 +185,47 @@ router.post('/create_business_card', authenticateToken, upload, async (req, res)
 
 // GET /api/business-card/my_card (Protected: fetches card for the authenticated user)
 router.get('/my_card', authenticateToken, async (req, res) => {
+    // ADDED LOGS FOR MY_CARD ROUTE
+    console.log('businessCardRoutes.js: my_card route hit (protected)');
+    console.log('businessCardRoutes.js: User ID from JWT for my_card:', req.user?.id); // Log the authenticated user ID
+
     try {
-        // User ID comes directly from the authenticated token
         const userId = req.user.id;
         const card = await BusinessCard.findOne({ user: userId });
 
-        // If no card is found for the authenticated user, return success with null data
-        // This tells the frontend that no card exists and it can prompt the user to create one.
         if (!card) {
+            console.log('businessCardRoutes.js: No business card found for user ID:', userId); // Log if no card
             return res.status(200).json({ data: null, message: "No business card found for this user. Please create one." });
         }
-        res.status(200).json({ data: card }); // Return the card data wrapped in a 'data' object
+        console.log('businessCardRoutes.js: Business card found for user ID:', userId, 'Card ID:', card._id); // Log if card found
+        res.status(200).json({ data: card });
     } catch (err) {
-        console.error('Error getting card by authenticated user ID:', err);
+        console.error('businessCardRoutes.js: Error getting card by authenticated user ID:', err);
         res.status(500).json({ error: 'Failed to fetch business card.' });
     }
 });
 
 // GET /api/business-card/by_username/:username (Public: fetches card for a public user profile)
 router.get('/by_username/:username', async (req, res) => {
+    console.log('businessCardRoutes.js: by_username route hit (public)'); // ADDED LOG
     try {
         const { username } = req.params;
-
-        // Find the user by username (case-insensitive and trimmed)
         const user = await User.findOne({ username: username.toLowerCase().trim() });
+
         if (!user) {
+            console.log('businessCardRoutes.js: User not found for username:', username);
             return res.status(404).json({ message: 'User not found.' });
         }
 
         const card = await BusinessCard.findOne({ user: user._id });
         if (!card) {
+            console.log('businessCardRoutes.js: Business card not found for username\'s user ID:', user._id);
             return res.status(404).json({ message: 'Business card not found for this user.' });
         }
-
-        res.status(200).json(card); // Return the card data directly for public display
+        console.log('businessCardRoutes.js: Public business card found for username:', username);
+        res.status(200).json(card);
     } catch (err) {
-        console.error('Error fetching business card by username:', err);
+        console.error('Error fetching business card by username (public):', err);
         res.status(500).json({ message: 'Internal server error fetching public profile.' });
     }
 });
