@@ -1,5 +1,7 @@
+// KONAR-NFC-LOCAL/backend/utils/uploadToS3.js
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
+// This utility function will now explicitly receive bucketName and region.
 const uploadToS3 = async (buffer, key, bucketName, region, contentType = 'image/png') => {
     const s3Client = new S3Client({
         region: region,

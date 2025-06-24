@@ -7,7 +7,16 @@ const { verificationEmailTemplate, passwordResetTemplate } = require('../utils/e
 const crypto = require('crypto');
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-const uploadToS3 = require('../utils/uploadToS3');
+const uploadToS3 = require('../utils/uploadToS3'); // This is the ONLY import for S3 upload utility
+
+// REMOVED DUPLICATE AWS S3 CLIENT IMPORTS (e.g., const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');)
+// REMOVED DUPLICATE UUID AND PATH IMPORTS (e.g., const { v4: uuidv4 } = require('uuid'); const path = require('path');)
+// REMOVED DUPLICATE DOTENV IMPORT (e.g., const dotenv = require('dotenv').config();)
+// REMOVED DUPLICATE AWS ENV VARS (e.g., BUCKET_NAME = process.env.BUCKET_NAME)
+// REMOVED DUPLICATE S3 CLIENT INSTANTIATION (e.g., const s3 = new S3Client(...);)
+// REMOVED MULTER SETUP IF IT WAS HERE (e.g., const storage = multer.memoryStorage(); const upload = multer({ storage: storage });)
+// REMOVED uploadAvatar FUNCTION (it used the old S3 setup, profile images are handled in businessCardRoutes.js)
+
 
 // TEST
 const test = (req, res) => {
@@ -37,8 +46,7 @@ const registerUser = async (req, res) => {
         const hashedPassword = await hashPassword(password);
 
         const slug = username.toLowerCase();
-        // IMPORTANT: Ensure this profileUrl uses your frontend domain (e.g., konarcard.com)
-        const profileUrl = `${process.env.CLIENT_URL}/u/${slug}`; // Use CLIENT_URL from env for dynamic setting
+        const profileUrl = `${process.env.CLIENT_URL}/u/${slug}`;
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 10 * 60 * 1000;
 
@@ -54,6 +62,7 @@ const registerUser = async (req, res) => {
             slug,
         });
 
+        // Use QRCode from `qrcode` import
         const qrBuffer = await QRCode.toBuffer(profileUrl, {
             width: 500,
             color: {
@@ -62,14 +71,14 @@ const registerUser = async (req, res) => {
             },
         });
 
-        // IMPORTANT: Ensure AWS_QR_BUCKET_NAME is correct in your Cloud Run Environment Variables
+        // Use the CENTRALIZED uploadToS3 utility
         const fileKey = `qr-codes/${user._id}.png`;
-        const qrCodeUrl = await uploadToS3(qrBuffer, fileKey, process.env.AWS_QR_BUCKET_NAME, process.env.AWS_QR_BUCKET_REGION);
+        const qrCodeUrl = await uploadToS3(qrBuffer, fileKey, process.env.AWS_QR_BUCKET_NAME, process.env.AWS_QR_BUCKET_REGION, 'image/png'); // Pass contentType
         user.qrCodeUrl = qrCodeUrl;
         await user.save();
 
         const html = verificationEmailTemplate(name, code);
-        // IMPORTANT: Ensure EMAIL_USER and EMAIL_PASS are correct in your Cloud Run Environment Variables
+        // Use the CENTRALIZED sendEmail utility
         await sendEmail({ email: email, subject: 'Verify Your Email', message: html });
 
         res.json({ success: true, message: 'Verification email sent' });
@@ -95,7 +104,7 @@ const verifyEmailCode = async (req, res) => {
         user.verificationCodeExpires = undefined;
         await user.save();
 
-        res.json({ success: true, message: 'Email verified successfully', user }); // Return user object upon verification
+        res.json({ success: true, message: 'Email verified successfully', user });
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: 'Verification failed' });
@@ -155,13 +164,11 @@ const loginUser = async (req, res) => {
             });
         }
 
-        // Generate JWT token
         const token = jwt.sign(
             { email: user.email, id: user._id, name: user.name },
             process.env.JWT_SECRET,
             {}
         );
-        // Return JWT token and user data in JSON response (NO COOKIES)
         res.json({ user, token });
     } catch (error) {
         console.log(error);
@@ -181,7 +188,7 @@ const forgotPassword = async (req, res) => {
         user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
         await user.save();
 
-        const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`; // Use CLIENT_URL
+        const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
         const html = passwordResetTemplate(user.name, resetLink);
         await sendEmail({ email: email, subject: 'Reset Your Password', message: html });
 
@@ -233,15 +240,10 @@ const getProfile = async (req, res) => {
             return res.json(null);
         }
 
-        // CRITICAL FIX: Ensure _id is correctly serialized and returned for frontend check
-        // Convert Mongoose document to plain JS object to ensure all properties are enumerable
         const userObject = user.toObject({ getters: true, virtuals: true });
-
-        // Explicitly set 'id' property as a copy of '_id'
-        // Frontend might be looking for 'id' instead of '_id' or expects both
         userObject.id = userObject._id;
 
-        res.status(200).json(userObject); // Return the plain object with _id and id
+        res.status(200).json(userObject);
 
     } catch (err) {
         console.error("Backend /profile error:", err);
@@ -251,7 +253,6 @@ const getProfile = async (req, res) => {
 
 // UPDATE PROFILE
 const updateProfile = async (req, res) => {
-    // Token now comes from req.user set by authenticateToken middleware
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
@@ -260,7 +261,7 @@ const updateProfile = async (req, res) => {
         const { name, email, bio, job_title } = req.body;
 
         const updatedUser = await User.findByIdAndUpdate(
-            req.user.id, // Use req.user.id
+            req.user.id,
             { name, email, bio, job_title },
             { new: true, runValidators: true }
         ).select('-password');
@@ -274,14 +275,12 @@ const updateProfile = async (req, res) => {
 
 // DELETE ACCOUNT
 const deleteAccount = async (req, res) => {
-    // Token now comes from req.user set by authenticateToken middleware
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
     try {
         await User.findByIdAndDelete(req.user.id);
-        // Do not clear cookie, as frontend handles token removal from localStorage
         res.json({ success: true, message: 'Account deleted successfully' });
     } catch (err) {
         console.error(err);
@@ -291,20 +290,18 @@ const deleteAccount = async (req, res) => {
 
 // LOGOUT
 const logoutUser = (req, res) => {
-    // No res.clearCookie('token') needed as frontend manages token in localStorage
     res.json({ message: 'Logged out successfully' });
 };
 
 // STRIPE: Subscribe
 const subscribeUser = async (req, res) => {
-    // Token now comes from req.user set by authenticateToken middleware
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
     try {
         const user = await User.findById(req.user.id);
-        if (!user) return res.status(404).json({ error: 'User not found' }); // Added check for user existence
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
@@ -313,8 +310,8 @@ const subscribeUser = async (req, res) => {
                 price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID,
                 quantity: 1,
             }],
-            success_url: `${process.env.CLIENT_URL}/success`, // Use CLIENT_URL
-            cancel_url: `${process.env.CLIENT_URL}/subscription`, // Use CLIENT_URL
+            success_url: `${process.env.CLIENT_URL}/success`,
+            cancel_url: `${process.env.CLIENT_URL}/subscription`,
             customer_email: user.email,
         });
 
@@ -327,14 +324,13 @@ const subscribeUser = async (req, res) => {
 
 // STRIPE: Cancel Subscription
 const cancelSubscription = async (req, res) => {
-    // Token now comes from req.user set by authenticateToken middleware
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
     try {
         const user = await User.findById(req.user.id);
-        if (!user) return res.status(404).json({ error: 'User not found' }); // Added check for user existence
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
         if (!user.stripeCustomerId) return res.status(400).json({ error: 'No subscription found' });
 
@@ -359,14 +355,13 @@ const cancelSubscription = async (req, res) => {
 
 // STRIPE: Check Subscription Status
 const checkSubscriptionStatus = async (req, res) => {
-    // Token now comes from req.user set by authenticateToken middleware
     if (!req.user || !req.user.id) {
-        return res.json({ active: false }); // No authenticated user, so no active subscription
+        return res.json({ active: false });
     }
 
     try {
         const user = await User.findById(req.user.id);
-        if (!user) return res.json({ active: false }); // User might have been deleted, no active sub
+        if (!user) return res.json({ active: false });
 
         res.json({ active: user?.isSubscribed || false });
     } catch (err) {
@@ -411,9 +406,9 @@ module.exports = {
     forgotPassword,
     resetPassword,
     getProfile,
-    logoutUser, // No longer clears cookie, just returns message
+    logoutUser,
     updateProfile,
-    deleteAccount, // No longer clears cookie
+    deleteAccount,
     subscribeUser,
     cancelSubscription,
     checkSubscriptionStatus,
