@@ -234,13 +234,14 @@ const getProfile = async (req, res) => {
         }
 
         // CRITICAL FIX: Ensure _id is correctly serialized and returned for frontend check
-        // Convert Mongoose document to plain JS object with getters/virtuals
-        const userResponse = user.toObject({ getters: true, virtuals: true });
-        // Explicitly add 'id' field if frontend expects it as 'id' not '_id'
-        // This ensures the frontend condition 'fetchedUser && fetchedUser._id' passes
-        userResponse.id = userResponse._id;
+        // Convert Mongoose document to plain JS object to ensure all properties are enumerable
+        const userObject = user.toObject({ getters: true, virtuals: true });
 
-        res.json(userResponse); // Return the plain object with _id and id
+        // Explicitly set 'id' property as a copy of '_id'
+        // Frontend might be looking for 'id' instead of '_id' or expects both
+        userObject.id = userObject._id;
+
+        res.status(200).json(userObject); // Return the plain object with _id and id
 
     } catch (err) {
         console.error("Backend /profile error:", err);
