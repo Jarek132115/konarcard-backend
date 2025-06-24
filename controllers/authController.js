@@ -220,18 +220,31 @@ const resetPassword = async (req, res) => {
 
 // PROFILE
 const getProfile = async (req, res) => {
-    // Token now comes from req.user set by authenticateToken middleware
     if (!req.user || !req.user.id) {
-        return res.json(null); // No authenticated user data
+        console.warn("Backend /profile: No req.user.id found from token.");
+        return res.json(null);
     }
 
     try {
-        // User data (id, email, name) is already in req.user from JWT
         const user = await User.findById(req.user.id).select('-password');
-        res.json(user);
+
+        if (!user) {
+            console.warn(`Backend /profile: User with ID ${req.user.id} not found in DB.`);
+            return res.json(null);
+        }
+
+        // CRITICAL FIX: Ensure _id is correctly serialized and returned for frontend check
+        // Convert Mongoose document to plain JS object with getters/virtuals
+        const userResponse = user.toObject({ getters: true, virtuals: true });
+        // Explicitly add 'id' field if frontend expects it as 'id' not '_id'
+        // This ensures the frontend condition 'fetchedUser && fetchedUser._id' passes
+        userResponse.id = userResponse._id;
+
+        res.json(userResponse); // Return the plain object with _id and id
+
     } catch (err) {
-        console.error("Error fetching profile:", err);
-        res.json(null);
+        console.error("Backend /profile error:", err);
+        res.status(500).json({ error: 'Failed to fetch user profile.' });
     }
 };
 
