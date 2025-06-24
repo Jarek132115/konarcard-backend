@@ -2,16 +2,14 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const BusinessCard = require('../models/BusinessCard');
-const User = require('../models/user');
+const User = require('../models/user'); 
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
-require('dotenv').config(); // Load environment variables
+require('dotenv').config(); 
 
 // Import the authentication middleware
 const authenticateToken = require('../middleware/authenticateToken');
-
-// Import the centralized uploadToS3 utility
-const uploadToS3 = require('../utils/uploadToS3'); // THIS IS THE CORRECT IMPORT FOR THE UTILITY
+const uploadToS3 = require('../utils/uploadToS3');
 
 // Multer setup (remains the same)
 const storage = multer.memoryStorage();
@@ -76,13 +74,14 @@ router.post('/create_business_card', authenticateToken, upload, async (req, res)
 
         const existingCard = await BusinessCard.findOne({ user });
 
-        // --- Handle Image Uploads and Removals ---
+        // --- Handle Image Uploads and Removals using the CENTRALIZED uploadToS3 utility ---
 
         // Handle cover photo
         if (req.files?.cover_photo?.[0]) {
             const coverFile = req.files.cover_photo[0];
             const ext = path.extname(coverFile.originalname);
             const key = `cover_photos/${user}/${uuidv4()}${ext}`; // User-specific folder in S3
+            // Call the imported uploadToS3 utility. Pass mimetype explicitly for ContentType.
             coverPhotoUrl = await uploadToS3(coverFile.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, coverFile.mimetype);
         } else if (cover_photo_removed === 'true') {
             coverPhotoUrl = ''; // Explicitly set to empty string if removed
@@ -96,6 +95,7 @@ router.post('/create_business_card', authenticateToken, upload, async (req, res)
             const avatarFile = req.files.avatar[0];
             const ext = path.extname(avatarFile.originalname);
             const key = `avatars/${user}/${uuidv4()}${ext}`; // User-specific folder in S3
+            // Call the imported uploadToS3 utility. Pass mimetype explicitly for ContentType.
             avatarUrl = await uploadToS3(avatarFile.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, avatarFile.mimetype);
         } else if (avatar_removed === 'true') {
             avatarUrl = ''; // Explicitly set to empty string if removed
@@ -109,6 +109,7 @@ router.post('/create_business_card', authenticateToken, upload, async (req, res)
             for (const file of req.files.work_images) {
                 const ext = path.extname(file.originalname);
                 const key = `work_images/${user}/${uuidv4()}${ext}`; // User-specific folder in S3
+                // Call the imported uploadToS3 utility. Pass mimetype explicitly for ContentType.
                 const imageUrl = await uploadToS3(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
                 workImageUrls.push(imageUrl);
             }
@@ -151,7 +152,6 @@ router.post('/create_business_card', authenticateToken, upload, async (req, res)
         res.status(200).json({ message: 'Business card saved successfully', data: updatedCard });
     } catch (err) {
         console.error('Create business card error:', err);
-        // Provide more detailed error in development, generic in production
         res.status(500).json({ message: 'Internal server error', error: err.message || 'Unknown error during save.' });
     }
 });
@@ -162,7 +162,6 @@ router.get('/my_card', authenticateToken, async (req, res) => {
     const userId = req.user.id;
 
     if (!userId) {
-        // This case should ideally not be hit if authenticateToken works correctly
         return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
     }
 
