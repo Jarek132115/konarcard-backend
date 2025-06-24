@@ -1,17 +1,16 @@
 const express = require('express');
-const dotenv = require('dotenv').config(); // Load environment variables from .env
+const dotenv = require('dotenv').config(); 
 const cors = require('cors');
 const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
-// REMOVED: const session = require('express-session'); // IMPORTANT: Removed session middleware
-const path = require('path'); // Only needed if serving static files or path manipulation, less critical for API-only
+const path = require('path'); 
 
 // Import routes
 const authRoutes = require('./routes/authRoutes');
 const checkoutRoutes = require('./routes/checkout');
-const webHookRoutes = require('./routes/webHook'); // Assuming webHook.js is a route file
+const webHookRoutes = require('./routes/webHook'); 
 const contactRoutes = require('./routes/contactRoutes');
-const businessCardRoutes = require('./routes/businessCardRoutes'); // Your new business card routes
+const businessCardRoutes = require('./routes/businessCardRoutes'); 
 
 const app = express();
 
@@ -23,11 +22,10 @@ mongoose.connect(process.env.MONGO_URL)
 // CORS Configuration (Crucial for live frontend communication)
 app.use(cors({
   origin: [
-    process.env.CLIENT_URL, // Use CLIENT_URL from .env (e.g., https://konarcard.com)
-    'https://www.konarcard.com', // Explicitly add www subdomain if applicable
-    // 'http://localhost:5173' // Keep for local development if needed, but remove for production if not accessing from local
+    process.env.CLIENT_URL, 
+    'https://www.konarcard.com', 
   ],
-  credentials: true, // Allow cookies (though not strictly needed for JWT, harmless if not causing issues)
+  credentials: true, 
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Explicitly allow methods
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cookie'], // Explicitly allow headers
 }));
