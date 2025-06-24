@@ -1,16 +1,16 @@
 const express = require('express');
-const dotenv = require('dotenv').config(); 
+const dotenv = require('dotenv').config();
 const cors = require('cors');
 const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
-const path = require('path'); 
+const path = require('path');
 
 // Import routes
 const authRoutes = require('./routes/authRoutes');
 const checkoutRoutes = require('./routes/checkout');
-const webHookRoutes = require('./routes/webHook'); 
+const webHookRoutes = require('./routes/webHook');
 const contactRoutes = require('./routes/contactRoutes');
-const businessCardRoutes = require('./routes/businessCardRoutes'); 
+const businessCardRoutes = require('./routes/businessCardRoutes');
 
 const app = express();
 
@@ -22,10 +22,11 @@ mongoose.connect(process.env.MONGO_URL)
 // CORS Configuration (Crucial for live frontend communication)
 app.use(cors({
   origin: [
-    process.env.CLIENT_URL, 
-    'https://www.konarcard.com', 
+    process.env.CLIENT_URL, // Ensure this ENV variable is set on Cloud Run to your frontend URL (e.g., 'https://konarcard.com')
+    'https://www.konarcard.com',
+    'https://konarcard.com', // Added: Explicitly allow the non-www version
   ],
-  credentials: true, 
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Explicitly allow methods
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cookie'], // Explicitly allow headers
 }));
@@ -34,8 +35,6 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' })); // Parse JSON bodies, increase limit for base64/large data
 app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Parse URL-encoded bodies, increase limit
 app.use(cookieParser());
-
-// REMOVED: app.use(session({...})); // IMPORTANT: Removed session middleware as we are using JWT
 
 // Route Middleware
 app.use('/', authRoutes); // Root path for auth routes
