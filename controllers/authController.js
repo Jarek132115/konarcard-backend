@@ -16,7 +16,6 @@ const test = (req, res) => {
 
 // REGISTER
 const registerUser = async (req, res) => {
-
     try {
         const { name, email, username, password, confirmPassword } = req.body;
 
@@ -38,7 +37,8 @@ const registerUser = async (req, res) => {
         const hashedPassword = await hashPassword(password);
 
         const slug = username.toLowerCase();
-        const profileUrl = `https://konar.com/u/${slug}`;
+        // IMPORTANT: Ensure this profileUrl uses your frontend domain (e.g., konarcard.com)
+        const profileUrl = `${process.env.CLIENT_URL}/u/${slug}`; // Use CLIENT_URL from env for dynamic setting
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 10 * 60 * 1000;
 
@@ -62,13 +62,15 @@ const registerUser = async (req, res) => {
             },
         });
 
+        // IMPORTANT: Ensure AWS_QR_BUCKET_NAME is correct in your Cloud Run Environment Variables
         const fileKey = `qr-codes/${user._id}.png`;
-        const qrCodeUrl = await uploadToS3(qrBuffer, fileKey);
+        const qrCodeUrl = await uploadToS3(qrBuffer, fileKey, process.env.AWS_QR_BUCKET_NAME, process.env.AWS_QR_BUCKET_REGION);
         user.qrCodeUrl = qrCodeUrl;
         await user.save();
 
         const html = verificationEmailTemplate(name, code);
-        await sendEmail(email, 'Verify Your Email', html);
+        // IMPORTANT: Ensure EMAIL_USER and EMAIL_PASS are correct in your Cloud Run Environment Variables
+        await sendEmail({ email: email, subject: 'Verify Your Email', message: html });
 
         res.json({ success: true, message: 'Verification email sent' });
     } catch (err) {
@@ -93,7 +95,7 @@ const verifyEmailCode = async (req, res) => {
         user.verificationCodeExpires = undefined;
         await user.save();
 
-        res.json({ success: true, message: 'Email verified successfully' });
+        res.json({ success: true, message: 'Email verified successfully', user }); // Return user object upon verification
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: 'Verification failed' });
@@ -117,7 +119,7 @@ const resendVerificationCode = async (req, res) => {
         await user.save();
 
         const html = verificationEmailTemplate(user.name, newCode);
-        await sendEmail(email, 'Your New Verification Code', html);
+        await sendEmail({ email: email, subject: 'Your New Verification Code', message: html });
 
         res.json({ success: true, message: 'Verification code resent' });
     } catch (err) {
@@ -145,7 +147,7 @@ const loginUser = async (req, res) => {
             await user.save();
 
             const html = verificationEmailTemplate(user.name, newCode);
-            await sendEmail(email, 'Verify Your Email', html);
+            await sendEmail({ email: email, subject: 'Verify Your Email', message: html });
 
             return res.json({
                 error: 'Please verify your email before logging in.',
@@ -153,15 +155,14 @@ const loginUser = async (req, res) => {
             });
         }
 
-        jwt.sign(
+        // Generate JWT token
+        const token = jwt.sign(
             { email: user.email, id: user._id, name: user.name },
             process.env.JWT_SECRET,
-            {},
-            (err, token) => {
-                if (err) throw err;
-                res.cookie('token', token).json(user);
-            }
+            {}
         );
+        // Return JWT token and user data in JSON response (NO COOKIES)
+        res.json({ user, token });
     } catch (error) {
         console.log(error);
         res.status(500).json({ error: 'Login failed' });
@@ -180,9 +181,9 @@ const forgotPassword = async (req, res) => {
         user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
         await user.save();
 
-        const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
+        const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`; // Use CLIENT_URL
         const html = passwordResetTemplate(user.name, resetLink);
-        await sendEmail(email, 'Reset Your Password', html);
+        await sendEmail({ email: email, subject: 'Reset Your Password', message: html });
 
         res.json({ success: true, message: 'Password reset email sent' });
     } catch (err) {
@@ -219,29 +220,33 @@ const resetPassword = async (req, res) => {
 
 // PROFILE
 const getProfile = async (req, res) => {
-    const { token } = req.cookies;
-    if (!token) return res.json(null);
+    // Token now comes from req.user set by authenticateToken middleware
+    if (!req.user || !req.user.id) {
+        return res.json(null); // No authenticated user data
+    }
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await User.findById(decoded.id).select('-password');
+        // User data (id, email, name) is already in req.user from JWT
+        const user = await User.findById(req.user.id).select('-password');
         res.json(user);
     } catch (err) {
+        console.error("Error fetching profile:", err);
         res.json(null);
     }
 };
 
 // UPDATE PROFILE
 const updateProfile = async (req, res) => {
-    try {
-        const { token } = req.cookies;
-        if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    // Token now comes from req.user set by authenticateToken middleware
+    if (!req.user || !req.user.id) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    try {
         const { name, email, bio, job_title } = req.body;
 
         const updatedUser = await User.findByIdAndUpdate(
-            decoded.id,
+            req.user.id, // Use req.user.id
             { name, email, bio, job_title },
             { new: true, runValidators: true }
         ).select('-password');
@@ -255,13 +260,15 @@ const updateProfile = async (req, res) => {
 
 // DELETE ACCOUNT
 const deleteAccount = async (req, res) => {
-    try {
-        const { token } = req.cookies;
-        if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    // Token now comes from req.user set by authenticateToken middleware
+    if (!req.user || !req.user.id) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        await User.findByIdAndDelete(decoded.id);
-        res.clearCookie('token').json({ success: true });
+    try {
+        await User.findByIdAndDelete(req.user.id);
+        // Do not clear cookie, as frontend handles token removal from localStorage
+        res.json({ success: true, message: 'Account deleted successfully' });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to delete account' });
@@ -270,18 +277,20 @@ const deleteAccount = async (req, res) => {
 
 // LOGOUT
 const logoutUser = (req, res) => {
-    res.clearCookie('token');
+    // No res.clearCookie('token') needed as frontend manages token in localStorage
     res.json({ message: 'Logged out successfully' });
 };
 
 // STRIPE: Subscribe
 const subscribeUser = async (req, res) => {
-    const { token } = req.cookies;
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    // Token now comes from req.user set by authenticateToken middleware
+    if (!req.user || !req.user.id) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await User.findById(decoded.id);
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'User not found' }); // Added check for user existence
 
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
@@ -290,8 +299,8 @@ const subscribeUser = async (req, res) => {
                 price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID,
                 quantity: 1,
             }],
-            success_url: req.body.returnUrl || 'http://localhost:5173/success',
-            cancel_url: 'http://localhost:5173/subscription',
+            success_url: `${process.env.CLIENT_URL}/success`, // Use CLIENT_URL
+            cancel_url: `${process.env.CLIENT_URL}/subscription`, // Use CLIENT_URL
             customer_email: user.email,
         });
 
@@ -304,12 +313,14 @@ const subscribeUser = async (req, res) => {
 
 // STRIPE: Cancel Subscription
 const cancelSubscription = async (req, res) => {
-    const { token } = req.cookies;
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    // Token now comes from req.user set by authenticateToken middleware
+    if (!req.user || !req.user.id) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await User.findById(decoded.id);
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'User not found' }); // Added check for user existence
 
         if (!user.stripeCustomerId) return res.status(400).json({ error: 'No subscription found' });
 
@@ -334,12 +345,15 @@ const cancelSubscription = async (req, res) => {
 
 // STRIPE: Check Subscription Status
 const checkSubscriptionStatus = async (req, res) => {
-    const { token } = req.cookies;
-    if (!token) return res.json({ active: false });
+    // Token now comes from req.user set by authenticateToken middleware
+    if (!req.user || !req.user.id) {
+        return res.json({ active: false }); // No authenticated user, so no active subscription
+    }
 
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const user = await User.findById(decoded.id);
+        const user = await User.findById(req.user.id);
+        if (!user) return res.json({ active: false }); // User might have been deleted, no active sub
+
         res.json({ active: user?.isSubscribed || false });
     } catch (err) {
         console.error('Error checking subscription status:', err);
@@ -347,7 +361,7 @@ const checkSubscriptionStatus = async (req, res) => {
     }
 };
 
-// CONTACT FORM
+// CONTACT FORM (No authentication needed for this usually)
 const submitContactForm = async (req, res) => {
     const { name, email, reason, message } = req.body;
 
@@ -364,7 +378,8 @@ const submitContactForm = async (req, res) => {
   `;
 
     try {
-        await sendEmail('supportteam@konarcard.com', `Contact Form: ${reason}`, html);
+        // IMPORTANT: Ensure EMAIL_USER is correct in your Cloud Run Environment Variables
+        await sendEmail({ email: 'supportteam@konarcard.com', subject: `Contact Form: ${reason}`, message: html });
         res.json({ success: true, message: 'Message sent successfully' });
     } catch (err) {
         console.error('Error sending contact form email:', err);
@@ -382,9 +397,9 @@ module.exports = {
     forgotPassword,
     resetPassword,
     getProfile,
-    logoutUser,
+    logoutUser, // No longer clears cookie, just returns message
     updateProfile,
-    deleteAccount,
+    deleteAccount, // No longer clears cookie
     subscribeUser,
     cancelSubscription,
     checkSubscriptionStatus,
