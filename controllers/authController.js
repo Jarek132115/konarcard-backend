@@ -2,21 +2,12 @@ const { hashPassword, comparePassword } = require('../helpers/auth');
 const User = require('../models/user');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
-const sendEmail = require('../utils/SendEmail');
+const sendEmail = require('../utils/SendEmail'); // Corrected to expect object argument
 const { verificationEmailTemplate, passwordResetTemplate } = require('../utils/emailTemplates');
 const crypto = require('crypto');
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const uploadToS3 = require('../utils/uploadToS3'); // This is the ONLY import for S3 upload utility
-
-// REMOVED DUPLICATE AWS S3 CLIENT IMPORTS (e.g., const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');)
-// REMOVED DUPLICATE UUID AND PATH IMPORTS (e.g., const { v4: uuidv4 } = require('uuid'); const path = require('path');)
-// REMOVED DUPLICATE DOTENV IMPORT (e.g., const dotenv = require('dotenv').config();)
-// REMOVED DUPLICATE AWS ENV VARS (e.g., BUCKET_NAME = process.env.BUCKET_NAME)
-// REMOVED DUPLICATE S3 CLIENT INSTANTIATION (e.g., const s3 = new S3Client(...);)
-// REMOVED MULTER SETUP IF IT WAS HERE (e.g., const storage = multer.memoryStorage(); const upload = multer({ storage: storage });)
-// REMOVED uploadAvatar FUNCTION (it used the old S3 setup, profile images are handled in businessCardRoutes.js)
-
 
 // TEST
 const test = (req, res) => {
@@ -46,6 +37,7 @@ const registerUser = async (req, res) => {
         const hashedPassword = await hashPassword(password);
 
         const slug = username.toLowerCase();
+        // Use CLIENT_URL for the QR code target to ensure it links to the frontend profile
         const profileUrl = `${process.env.CLIENT_URL}/u/${slug}`;
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 10 * 60 * 1000;
@@ -62,7 +54,7 @@ const registerUser = async (req, res) => {
             slug,
         });
 
-        // Use QRCode from `qrcode` import
+        // Generate QR code for the user's profile URL
         const qrBuffer = await QRCode.toBuffer(profileUrl, {
             width: 500,
             color: {
@@ -71,19 +63,20 @@ const registerUser = async (req, res) => {
             },
         });
 
-        // Use the CENTRALIZED uploadToS3 utility
         const fileKey = `qr-codes/${user._id}.png`;
         const qrCodeUrl = await uploadToS3(qrBuffer, fileKey, process.env.AWS_QR_BUCKET_NAME, process.env.AWS_QR_BUCKET_REGION, 'image/png'); // Pass contentType
-        user.qrCodeUrl = qrCodeUrl;
+
+        // FIX: Ensure this matches your User model schema field name (qrCode, not qrCodeUrl)
+        user.qrCode = qrCodeUrl;
         await user.save();
 
         const html = verificationEmailTemplate(name, code);
-        // Use the CENTRALIZED sendEmail utility
+        // Call sendEmail with an object as argument
         await sendEmail({ email: email, subject: 'Verify Your Email', message: html });
 
         res.json({ success: true, message: 'Verification email sent' });
     } catch (err) {
-        console.error(err);
+        console.error("Backend Register Error:", err); // Specific log for register errors
         res.status(500).json({ error: 'Registration failed. Try again.' });
     }
 };
@@ -104,7 +97,14 @@ const verifyEmailCode = async (req, res) => {
         user.verificationCodeExpires = undefined;
         await user.save();
 
-        res.json({ success: true, message: 'Email verified successfully', user });
+        // Ensure user object returned here has 'name' and '_id' for frontend
+        const userToSend = user.toObject({ getters: true, virtuals: true });
+        userToSend.id = userToSend._id;
+        userToSend.name = userToSend.name || '';
+        userToSend.email = userToSend.email || '';
+
+        res.status(200).json({ success: true, message: 'Email verified successfully', data: userToSend }); // Consistent response: data: user
+
     } catch (err) {
         console.log(err);
         res.status(500).json({ error: 'Verification failed' });
@@ -165,13 +165,21 @@ const loginUser = async (req, res) => {
         }
 
         const token = jwt.sign(
-            { email: user.email, id: user._id, name: user.name },
+            { email: user.email, id: user._id, name: user.name }, // Ensure 'name' is in JWT payload
             process.env.JWT_SECRET,
             {}
         );
-        res.json({ user, token });
+
+        // Ensure user object returned here has 'name' and '_id'
+        const userToSend = user.toObject({ getters: true, virtuals: true });
+        userToSend.id = userToSend._id; // Add 'id' field for frontend
+        userToSend.name = userToSend.name || ''; // Ensure name is at least an empty string
+        userToSend.email = userToSend.email || ''; // Ensure email is at least an empty string
+
+        res.status(200).json({ user: userToSend, token }); // Consistent response: user and token
+
     } catch (error) {
-        console.log(error);
+        console.error("Backend Login Error:", error); // Specific log for login errors
         res.status(500).json({ error: 'Login failed' });
     }
 };
@@ -229,21 +237,24 @@ const resetPassword = async (req, res) => {
 const getProfile = async (req, res) => {
     if (!req.user || !req.user.id) {
         console.warn("Backend /profile: No req.user.id found from token.");
-        return res.json(null);
+        return res.status(401).json({ error: 'Unauthorized: User ID not found in token.' }); // Send 401 for unauthorized
     }
 
     try {
-        const user = await User.findById(req.user.id).select('-password');
+        // Fetch the user, explicitly select fields needed for frontend (including name, email)
+        const user = await User.findById(req.user.id).select('-password').lean(); // Added .lean()
 
         if (!user) {
             console.warn(`Backend /profile: User with ID ${req.user.id} not found in DB.`);
-            return res.json(null);
+            return res.status(404).json({ error: 'User not found.' }); // Send 404 if user not found
         }
 
-        const userObject = user.toObject({ getters: true, virtuals: true });
-        userObject.id = userObject._id;
+        // Ensure name, email, and _id (as id) are always present and not null
+        user.id = user._id; // Add 'id' field for frontend consistency
+        user.name = user.name || ''; // Ensure name is at least an empty string
+        user.email = user.email || ''; // Ensure email is at least an empty string
 
-        res.status(200).json(userObject);
+        res.status(200).json({ data: user }); // Consistent response: data: user
 
     } catch (err) {
         console.error("Backend /profile error:", err);
@@ -264,9 +275,20 @@ const updateProfile = async (req, res) => {
             req.user.id,
             { name, email, bio, job_title },
             { new: true, runValidators: true }
-        ).select('-password');
+        ).select('-password').lean(); // Added .lean()
 
-        res.json({ success: true, user: updatedUser });
+        if (!updatedUser) {
+            return res.status(404).json({ error: 'User not found for update.' });
+        }
+
+        // Add 'id' field for frontend consistency
+        updatedUser.id = updatedUser._id;
+        updatedUser.name = updatedUser.name || ''; // Ensure name is at least an empty string
+        updatedUser.email = updatedUser.email || ''; // Ensure email is at least an empty string
+
+
+        res.status(200).json({ success: true, data: updatedUser }); // Consistent response: data: updatedUser
+
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to update profile' });
@@ -281,7 +303,7 @@ const deleteAccount = async (req, res) => {
 
     try {
         await User.findByIdAndDelete(req.user.id);
-        res.json({ success: true, message: 'Account deleted successfully' });
+        res.status(200).json({ success: true, message: 'Account deleted successfully' });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to delete account' });
@@ -290,7 +312,9 @@ const deleteAccount = async (req, res) => {
 
 // LOGOUT
 const logoutUser = (req, res) => {
-    res.json({ message: 'Logged out successfully' });
+    // For JWT, client handles token removal. Backend might just clear cookies if applicable.
+    // Since JWT is localStorage based, simply sending a success message is enough.
+    res.status(200).json({ message: 'Logged out successfully' });
 };
 
 // STRIPE: Subscribe
@@ -315,7 +339,7 @@ const subscribeUser = async (req, res) => {
             customer_email: user.email,
         });
 
-        res.json({ url: session.url });
+        res.status(200).json({ url: session.url });
     } catch (err) {
         console.error('Subscription error:', err);
         res.status(500).json({ error: 'Failed to start subscription' });
@@ -346,7 +370,7 @@ const cancelSubscription = async (req, res) => {
             cancel_at_period_end: true,
         });
 
-        res.json({ success: true, message: 'Subscription will cancel at period end' });
+        res.status(200).json({ success: true, message: 'Subscription will cancel at period end' });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to cancel subscription' });
@@ -356,22 +380,24 @@ const cancelSubscription = async (req, res) => {
 // STRIPE: Check Subscription Status
 const checkSubscriptionStatus = async (req, res) => {
     if (!req.user || !req.user.id) {
-        return res.json({ active: false });
+        return res.status(200).json({ active: false }); // Always return 200 for status check
     }
 
     try {
         const user = await User.findById(req.user.id);
-        if (!user) return res.json({ active: false });
+        if (!user) return res.status(200).json({ active: false }); // User not found, so no active sub
 
-        res.json({ active: user?.isSubscribed || false });
+        res.status(200).json({ active: user?.isSubscribed || false });
     } catch (err) {
         console.error('Error checking subscription status:', err);
-        res.json({ active: false });
+        res.status(500).json({ active: false, error: 'Failed to check subscription status.' });
     }
 };
 
 // CONTACT FORM (No authentication needed for this usually)
 const submitContactForm = async (req, res) => {
+    // Add express.json() middleware explicitly to this route if not global in index.js
+    // Example in routes/contactRoutes.js: router.post('/', express.json(), submitContactForm);
     const { name, email, reason, message } = req.body;
 
     if (!name || !email || !message || !reason) {
@@ -389,7 +415,7 @@ const submitContactForm = async (req, res) => {
     try {
         // IMPORTANT: Ensure EMAIL_USER is correct in your Cloud Run Environment Variables
         await sendEmail({ email: 'supportteam@konarcard.com', subject: `Contact Form: ${reason}`, message: html });
-        res.json({ success: true, message: 'Message sent successfully' });
+        res.status(200).json({ success: true, message: 'Message sent successfully' }); // Always send 200 for success
     } catch (err) {
         console.error('Error sending contact form email:', err);
         res.status(500).json({ error: 'Failed to send message' });

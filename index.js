@@ -1,3 +1,6 @@
+// backend/index.js
+console.log("KONARCARD BACKEND: Initializing Express App - Version DEBUG-IMAGE-V11 - Multer Isolation!"); // New version string
+
 const express = require('express');
 const dotenv = require('dotenv').config();
 const cors = require('cors');
@@ -19,30 +22,44 @@ mongoose.connect(process.env.MONGO_URL)
   .then(() => console.log('Database Connected Successfully!'))
   .catch((err) => console.error('Database Connection Error:', err));
 
-// CORS Configuration (Crucial for live frontend communication)
+// CORS Configuration
 app.use(cors({
   origin: [
-    process.env.CLIENT_URL, // Ensure this ENV variable is set on Cloud Run to your frontend URL (e.g., 'https://konarcard.com')
+    process.env.CLIENT_URL,
     'https://www.konarcard.com',
-    'https://konarcard.com', // Added: Explicitly allow the non-www version
+    'https://konarcard.com',
   ],
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Explicitly allow methods
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cookie'], // Explicitly allow headers
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cookie'],
 }));
 
-// Standard Express Middleware
-app.use(express.json({ limit: '50mb' })); // Parse JSON bodies, increase limit for base64/large data
-app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Parse URL-encoded bodies, increase limit
+// Global Middleware Order:
+// 1. Cookie Parser (safe to be early)
 app.use(cookieParser());
 
+// 2. Custom Logger (for debugging headers)
+app.use((req, res, next) => {
+  console.log("Backend: Global Middleware - Request Method:", req.method, "Path:", req.path);
+  console.log("Backend: Global Middleware - Request Headers Content-Type:", req.headers['content-type']);
+  next();
+});
+
+// IMPORTANT: NO GLOBAL express.json() or express.urlencoded() here.
+// These will now be applied per-route where needed (e.g., authRoutes, contactRoutes).
+
 // Route Middleware
-app.use('/', authRoutes); // Root path for auth routes
+// Business Card routes use Multer for file uploads, which handles body parsing for multipart/form-data.
+// This must be mounted early.
+app.use('/api/business-card', businessCardRoutes);
+
+// Other routes that expect JSON or URL-encoded data must have express.json() / express.urlencoded() applied directly.
+app.use('/', authRoutes); // Auth routes will be updated to include express.json/urlencoded
 app.use('/api/checkout', checkoutRoutes);
-app.use('/webhook', webHookRoutes); // Use a variable name for require if you import it above
-app.use('/api/contact', contactRoutes);
-app.use('/api/business-card', businessCardRoutes); // Mount your business card routes
+app.use('/webhook', webHookRoutes);
+app.use('/api/contact', contactRoutes); // Contact routes will be updated to include express.json/urlencoded
+
 
 // Server Listening
-const port = process.env.PORT || 8080; // Cloud Run provides PORT env variable, default to 8080
+const port = process.env.PORT || 8080;
 app.listen(port, () => console.log(`Server running on port ${port}`));

@@ -9,20 +9,6 @@ const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const uploadToS3 = require('../utils/uploadToS3'); // Centralized S3 upload utility
 
-// REMOVED ALL DUPLICATE AWS S3 RELATED IMPORTS, VARS, AND CLIENT INSTANTIATIONS FROM HERE
-// These were in your provided file but cause conflicts as they are duplicated elsewhere
-// and are handled by the centralized uploadToS3 utility now.
-// const multer = require('multer');
-// const { PutObjectCommand } = require('@aws-sdk/client-s3');
-// const { v4: uuidv4 } = require('uuid');
-// const path = require('path');
-// const dotenv = require('dotenv').config(); // Should only be in index.js for global app env loading
-// BUCKET_NAME = process.env.BUCKET_NAME; // etc.
-// const s3 = new S3Client({...});
-// const storage = multer.memoryStorage();
-// const upload = multer({ storage: storage }); // This multer setup is for file uploads, if needed here, should be separate
-
-
 // TEST
 const test = (req, res) => {
   res.json('test is working');
