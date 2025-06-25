@@ -6,15 +6,13 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const sendEmail = require('../utils/SendEmail');
 const {
   orderConfirmationTemplate,
-} = require('./emailTemplates'); // Corrected path to emailTemplates
-
-const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+} = require('../utils/emailTemplates'); // <<<--- THIS IS THE CRUCIAL FIX FOR THE PATH
 
 // DEBUG LOG: Confirming stripe.js route file is being loaded
 console.log("Backend: routes/stripe.js file loaded.");
 
 
-router.post('/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+router.post('/', express.raw({ type: 'application/json' }), async (req, res) => { // <<<--- THIS IS THE CRUCIAL FIX FOR THE ROUTER PATH
   // DEBUG LOG: Confirming /stripe POST request received
   console.log("Backend: Received POST request to /stripe webhook.");
 
@@ -22,7 +20,8 @@ router.post('/stripe', express.raw({ type: 'application/json' }), async (req, re
 
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    // Ensure endpointSecret is directly used here
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
     console.log("Backend: Webhook event constructed successfully.");
   } catch (err) {
     console.error('⚠️ Stripe webhook signature error:', err.message);
