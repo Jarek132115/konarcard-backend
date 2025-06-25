@@ -1,5 +1,4 @@
-// backend/index.js
-console.log("KONARCARD BACKEND: Initializing Express App - Version DEBUG-IMAGE-V11 - Multer Isolation!"); // New version string
+console.log("KONARCARD BACKEND: Initializing Express App - Version DEBUG-IMAGE-V11 - Multer Isolation!");
 
 const express = require('express');
 const dotenv = require('dotenv').config();
@@ -11,7 +10,8 @@ const path = require('path');
 // Import routes
 const authRoutes = require('./routes/authRoutes');
 const checkoutRoutes = require('./routes/checkout');
-const webHookRoutes = require('./routes/webHook');
+// FIX 1: Correctly import the Stripe webhook route file name
+const stripeWebhookRoutes = require('./routes/stripe'); // Changed from webHook to stripe
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
 
@@ -35,29 +35,31 @@ app.use(cors({
 }));
 
 // Global Middleware Order:
-// 1. Cookie Parser (safe to be early)
 app.use(cookieParser());
 
-// 2. Custom Logger (for debugging headers)
 app.use((req, res, next) => {
   console.log("Backend: Global Middleware - Request Method:", req.method, "Path:", req.path);
   console.log("Backend: Global Middleware - Request Headers Content-Type:", req.headers['content-type']);
   next();
 });
 
-// IMPORTANT: NO GLOBAL express.json() or express.urlencoded() here.
-// These will now be applied per-route where needed (e.g., authRoutes, contactRoutes).
+// IMPORTANT: Order matters for body parsers and routes that handle raw bodies (like webhooks)
 
-// Route Middleware
+// FIX 2: Mount the Stripe webhook route at '/stripe' and ensure it uses the correct imported module
+// This must be placed BEFORE general express.json() / express.urlencoded() or other bodyParser middleware,
+// as the webhook route uses express.raw() to handle the raw request body.
+app.use('/stripe', stripeWebhookRoutes); // Changed '/webhook' to '/stripe' and used stripeWebhookRoutes
+
 // Business Card routes use Multer for file uploads, which handles body parsing for multipart/form-data.
 // This must be mounted early.
 app.use('/api/business-card', businessCardRoutes);
 
 // Other routes that expect JSON or URL-encoded data must have express.json() / express.urlencoded() applied directly.
-app.use('/', authRoutes); // Auth routes will be updated to include express.json/urlencoded
+// Ensure authRoutes, checkoutRoutes, contactRoutes have express.json() or similar middleware internally or on their specific routes.
+// (Already noted in your previous code comments, just reiterating importance)
+app.use('/', authRoutes);
 app.use('/api/checkout', checkoutRoutes);
-app.use('/webhook', webHookRoutes);
-app.use('/api/contact', contactRoutes); // Contact routes will be updated to include express.json/urlencoded
+app.use('/api/contact', contactRoutes);
 
 
 // Server Listening
