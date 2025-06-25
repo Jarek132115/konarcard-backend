@@ -49,6 +49,9 @@ app.use((req, res, next) => {
 // This must be placed BEFORE general express.json() / express.urlencoded() or other bodyParser middleware,
 // as the webhook route uses express.raw() to handle the raw request body.
 app.use('/stripe', stripeWebhookRoutes); // Changed '/webhook' to '/stripe' and used stripeWebhookRoutes
+// DEBUG LOG: Confirming Stripe webhook route is mounted
+console.log("Backend: Mounted /stripe route using stripeWebhookRoutes.");
+
 
 // Business Card routes use Multer for file uploads, which handles body parsing for multipart/form-data.
 // This must be mounted early.
