@@ -16,7 +16,8 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage }).fields([
     { name: 'cover_photo', maxCount: 1 },
     { name: 'avatar', maxCount: 1 },
-    { name: 'works', maxCount: 10 }, // FIX: Changed field name from 'work_images' to 'works'
+    { name: 'works', maxCount: 10 },
+    { name: 'existing_works' }, // FIX: Added 'existing_works' to Multer config
 ]);
 
 // POST /api/business-card/create_business_card (Protected and handles file uploads)
@@ -39,7 +40,7 @@ router.get('/by_username/:username', async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // FIX: Populate the 'user' field when fetching the business card for public view
+        // Populate the 'user' field when fetching the business card for public view
         const card = await BusinessCard.findOne({ user: user._id })
             .populate({
                 path: 'user',
