@@ -23,6 +23,12 @@ const userSchema = new Schema({
         unique: true,
         sparse: true,
     },
+    // Add stripeSubscriptionId to track the active subscription
+    stripeSubscriptionId: {
+        type: String,
+        unique: true,
+        sparse: true,
+    },
     isVerified: {
         type: Boolean,
         default: false,
