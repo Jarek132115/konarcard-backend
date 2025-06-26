@@ -16,7 +16,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage }).fields([
     { name: 'cover_photo', maxCount: 1 },
     { name: 'avatar', maxCount: 1 },
-    { name: 'work_images', maxCount: 10 },
+    { name: 'works', maxCount: 10 }, // FIX: Changed field name from 'work_images' to 'works'
 ]);
 
 // POST /api/business-card/create_business_card (Protected and handles file uploads)
