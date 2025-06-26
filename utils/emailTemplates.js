@@ -40,8 +40,64 @@ function orderConfirmationTemplate(customerEmail, amountPaid) {
   `;
 }
 
+// NEW: Subscription Confirmation Template
+function subscriptionConfirmationTemplate(name, amountPaid, eventType) {
+  let subjectLine = '';
+  let bodyContent = '';
+
+  switch (eventType) {
+    case 'subscription_started': // Used for customer.subscription.created event
+      subjectLine = 'Your Konar Premium Subscription Has Started!';
+      bodyContent = `
+        <p>Hi ${name || ''},</p>
+        <p>Welcome to Konar Premium! Your 7-day free trial has begun.</p>
+        <p>You now have full access to all profile editing features.</p>
+        <p>You'll be charged £${amountPaid} per month after your trial ends.</p>
+        <p>Enjoy building your amazing digital profile!</p>
+      `;
+      break;
+    case 'subscription_cancelled': // Used for customer.subscription.deleted event
+      subjectLine = 'Your Konar Premium Subscription Cancellation Confirmed';
+      bodyContent = `
+        <p>Hi ${name || ''},</p>
+        <p>Your Konar Premium subscription has been successfully cancelled. You will continue to have access until the end of your current billing period.</p>
+        <p>We're sad to see you go! If you change your mind, you can resubscribe anytime.</p>
+      `;
+      break;
+    case 'subscription_paid': // Optionally, for invoice.payment_succeeded
+      subjectLine = 'Konar Premium: Payment Received!';
+      bodyContent = `
+        <p>Hi ${name || ''},</p>
+        <p>Thank you! Your payment of <strong>£${amountPaid}</strong> for Konar Premium has been successfully processed.</p>
+        <p>Your subscription remains active, and you continue to have full access to all features.</p>
+      `;
+      break;
+    case 'subscription_general': // General confirmation from checkout.session.completed for subscriptions
+    default:
+      subjectLine = 'Your Konar Premium Subscription is Active!';
+      bodyContent = `
+        <p>Hi ${name || ''},</p>
+        <p>Thank you for subscribing to Konar Premium! Your subscription is now active.</p>
+        <p>You now have full access to all profile editing features. Your first charge of £${amountPaid} (after any trial period) will appear on your statement.</p>
+        <p>Enjoy building your amazing digital profile!</p>
+      `;
+      break;
+  }
+
+  return `
+    <div style="font-family: Arial, sans-serif; padding: 20px;">
+      <h2>${subjectLine}</h2>
+      ${bodyContent}
+      <br />
+      <p>— KonarCard Team</p>
+      <img src="https://konarcard.com/assets/banner.png" alt="KonarCard" style="width: 100%; max-width: 500px;" />
+    </div>
+  `;
+}
+
 module.exports = {
   verificationEmailTemplate,
   passwordResetTemplate,
   orderConfirmationTemplate,
+  subscriptionConfirmationTemplate, 
 };
