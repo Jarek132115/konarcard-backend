@@ -28,7 +28,8 @@ router.post('/logout', authenticateToken, logoutUser); // POST for logout
 // Stripe related routes
 router.post('/subscribe', authenticateToken, subscribeUser); // POST for new subscriptions
 router.post('/cancel-subscription', authenticateToken, cancelSubscription); // POST to cancel subscription
-router.get('/subscription-status', checkSubscriptionStatus); // GET for status
+// FIX: Added authenticateToken middleware to /subscription-status route
+router.get('/subscription-status', authenticateToken, checkSubscriptionStatus);
 
 // Contact form route (assuming submitContactForm is in authController, otherwise it'd be in contactRoutes)
 router.post('/contact', submitContactForm);
