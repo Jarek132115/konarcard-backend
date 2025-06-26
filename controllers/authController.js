@@ -386,31 +386,67 @@ const cancelSubscription = async (req, res) => {
 };
 
 // STRIPE: Check Subscription Status
+// STRIPE: Check Subscription Status
 const checkSubscriptionStatus = async (req, res) => {
     if (!req.user || !req.user.id) {
+        console.log("Backend: /subscription-status - No user authenticated. Returning active: false.");
         return res.status(200).json({ active: false, status: 'unauthenticated' });
     }
 
     try {
         const user = await User.findById(req.user.id);
         if (!user) {
+            console.log(`Backend: /subscription-status - User ${req.user.id} not found in DB. Returning active: false.`);
             return res.status(200).json({ active: false, status: 'user_not_found' });
         }
 
-        if (!user.isSubscribed || !user.stripeCustomerId || !user.stripeSubscriptionId) {
-            return res.status(200).json({ active: false, status: 'not_subscribed_in_db' });
+        // Log the user's subscription fields from DB
+        console.log(`Backend: /subscription-status - User ${user._id} DB status: isSubscribed=${user.isSubscribed}, stripeCustomerId=${user.stripeCustomerId}, stripeSubscriptionId=${user.stripeSubscriptionId}`);
+
+        // If no Stripe data is linked, or subscription is explicitly false, assume not active for Stripe check
+        if (!user.stripeCustomerId || !user.stripeSubscriptionId) {
+            console.log(`Backend: /subscription-status - No Stripe customer/subscription ID found for user ${user._id}. Returning active: false.`);
+            return res.status(200).json({ active: false, status: 'no_stripe_data' });
         }
 
+        // Retrieve subscription from Stripe directly to get the real-time status
         const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
+        console.log(`Backend: /subscription-status - Stripe subscription status for ${user.stripeSubscriptionId}: ${subscription.status}`);
 
-        if (subscription.status === 'active' || subscription.status === 'trialing') {
-            return res.status(200).json({ active: true, status: subscription.status, current_period_end: subscription.current_period_end });
-        } else {
-            return res.status(200).json({ active: false, status: subscription.status });
+        let isActive = false;
+        if (['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status)) {
+            isActive = true;
         }
+
+        // If DB status is out of sync, update it here (less reliable than webhook but good for consistency)
+        if (user.isSubscribed !== isActive) {
+            user.isSubscribed = isActive;
+            await user.save();
+            console.log(`Backend: /subscription-status - Updated user ${user._id} isSubscribed status in DB to ${isActive}.`);
+        }
+
+        const responseData = {
+            active: isActive,
+            status: subscription.status,
+            current_period_end: subscription.current_period_end
+        };
+        console.log("Backend: /subscription-status - Sending response:", responseData);
+        return res.status(200).json(responseData);
 
     } catch (err) {
         console.error('Backend: Error checking subscription status:', err);
+        // If Stripe API call fails (e.g., subscription not found), treat as not active
+        if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
+            console.warn(`Backend: /subscription-status - Stripe subscription resource missing for user ${req.user.id}. Marking as not subscribed.`);
+            const user = await User.findById(req.user.id);
+            if (user) {
+                user.isSubscribed = false;
+                user.stripeSubscriptionId = undefined;
+                user.stripeCustomerId = undefined;
+                await user.save();
+            }
+            return res.status(200).json({ active: false, status: 'subscription_missing_in_stripe' });
+        }
         res.status(500).json({ active: false, status: 'error_checking_stripe', details: err.message });
     }
 };
