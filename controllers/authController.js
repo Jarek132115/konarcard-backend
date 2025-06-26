@@ -260,11 +260,19 @@ const updateProfile = async (req, res) => {
     }
 
     try {
-        const { name, email, bio, job_title } = req.body;
+        // Destructure all potentially updated fields, including password
+        const { name, email, bio, job_title, password } = req.body; // FIX: Added password to destructuring
+
+        const updateFields = { name, email, bio, job_title }; // Fields to always consider updating
+
+        // If a new password is provided, hash it and add to updateFields
+        if (password) { // FIX: Only hash and update password if it's actually provided
+            updateFields.password = await hashPassword(password); // FIX: Hash the new password
+        }
 
         const updatedUser = await User.findByIdAndUpdate(
             req.user.id,
-            { name, email, bio, job_title },
+            updateFields, // FIX: Use the dynamically built updateFields object
             { new: true, runValidators: true }
         ).select('-password').lean();
 
@@ -279,8 +287,9 @@ const updateProfile = async (req, res) => {
         res.status(200).json({ success: true, data: updatedUser });
 
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to update profile' });
+        console.error('Backend: Error updating profile:', err); // Added specific log
+        // Consider more specific error messages for validation failures if needed
+        res.status(500).json({ error: 'Failed to update profile', details: err.message });
     }
 };
 
@@ -304,7 +313,6 @@ const logoutUser = (req, res) => {
     res.status(200).json({ message: 'Logged out successfully' });
 };
 
-// STRIPE: Subscribe
 // STRIPE: Subscribe
 const subscribeUser = async (req, res) => {
     if (!req.user || !req.user.id) {
@@ -385,7 +393,6 @@ const cancelSubscription = async (req, res) => {
     }
 };
 
-// STRIPE: Check Subscription Status
 // STRIPE: Check Subscription Status
 const checkSubscriptionStatus = async (req, res) => {
     if (!req.user || !req.user.id) {
