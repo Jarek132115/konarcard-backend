@@ -120,9 +120,10 @@ const createOrUpdateBusinessCard = async (req, res) => {
 
     // --- Handle new work images (append to existing ones) ---
     const newWorkImageUrls = [];
-    if (req.files?.work_images && req.files.work_images.length > 0) {
+    // FIX: Changed req.files?.work_images to req.files?.works
+    if (req.files?.works && req.files.works.length > 0) {
       console.log("Backend: New work image files detected. Processing upload to S3.");
-      for (const file of req.files.work_images) {
+      for (const file of req.files.works) { // FIX: Changed req.files.work_images to req.files.works
         const ext = path.extname(file.originalname);
         const key = `work_images/${userId}/${uuidv4()}${ext}`; // User-specific folder in S3
         const uploadToS3Util = require('../utils/uploadToS3'); // Import utility here for local scope
