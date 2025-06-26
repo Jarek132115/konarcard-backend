@@ -62,7 +62,7 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
       // Check if it's a one-time payment or a subscription
       if (session.mode === 'payment') {
-        console("Backend: Processing one-time payment.");
+        console.log("Backend: Processing one-time payment."); // FIX: Changed console() to console.log()
         // One-time product purchase logic (already existing)
         if (customerEmail) {
           try {

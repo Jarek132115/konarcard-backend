@@ -305,6 +305,7 @@ const logoutUser = (req, res) => {
 };
 
 // STRIPE: Subscribe
+// STRIPE: Subscribe
 const subscribeUser = async (req, res) => {
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -340,7 +341,7 @@ const subscribeUser = async (req, res) => {
             }],
 
             // Redirect URLs after checkout
-            success_url: `${process.env.CLIENT_URL}/success?session_id={CHECKOUT_SESSION_ID}`, // Pass session ID to success page
+            success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`, // CRITICAL FIX: Changed to /SuccessSubscription
             cancel_url: `${process.env.CLIENT_URL}/pricing`, // Redirect to a pricing/subscription page if canceled
 
             // Add subscription data for trial conversions (optional, handled by price)
