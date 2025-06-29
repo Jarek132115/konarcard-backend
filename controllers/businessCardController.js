@@ -14,6 +14,9 @@ const s3 = new S3Client({
   },
 });
 
+// Helper function to upload to S3 (assuming it exists in utils/uploadToS3.js)
+const uploadToS3Util = require('../utils/uploadToS3');
+
 const createOrUpdateBusinessCard = async (req, res) => {
   console.log("Backend: createOrUpdateBusinessCard function triggered.");
   try {
@@ -30,113 +33,121 @@ const createOrUpdateBusinessCard = async (req, res) => {
       job_title,
       services,
       reviews,
-      existing_works, // Now expecting this to be an array of strings (or a single string)
+      existing_works,
       cover_photo_removed,
       avatar_removed,
       contact_email,
       phone_number,
     } = req.body;
 
-    console.log("Backend: Received body data (from req.body):", { userId, business_card_name, full_name, cover_photo_removed, avatar_removed, contact_email, phone_number });
+    console.log("Backend: Received body data (from req.body):", { userId, business_card_name, full_name, cover_photo_removed, avatar_removed, contact_email, phone_number, existing_works });
     console.log("Backend: Received files data (from req.files):", req.files);
-
 
     if (!userId) {
       console.error("Backend: Missing user ID in createOrUpdateBusinessCard, authentication failed.");
       return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
     }
 
-    // --- Corrected Parsing for Arrays (services, reviews, and especially existing_works) ---
     let parsedServices = [];
     let parsedReviews = [];
-    let parsedWorks = []; // Initialize as empty array
+    let parsedWorks = [];
 
     // Handle existing_works: it comes as an array of strings from FormData if multiple, or a single string
     if (existing_works) {
       if (Array.isArray(existing_works)) {
         parsedWorks = existing_works;
       } else if (typeof existing_works === 'string') {
-        // If only one existing_works, it comes as a string, parse it into an array
         parsedWorks = [existing_works];
       }
-      // Filter out any blob URLs that might have snuck in (though frontend should ideally prevent this)
       parsedWorks = parsedWorks.filter(url => url && !url.startsWith('blob:'));
     }
-    console.log("Backend: Parsed existing_works:", parsedWorks);
+    console.log("Backend: Parsed existing_works from frontend:", parsedWorks);
 
-
-    // Safely parse services and reviews (they are stringified JSON from frontend)
     try {
       parsedServices = services ? JSON.parse(services) : [];
     } catch (err) {
-      console.warn('Backend: Invalid services JSON. Defaulting to []. Error:', err);
+      console.warn('Backend: Invalid services JSON. Defaulting to []. Error:', err.message);
     }
 
     try {
       parsedReviews = reviews ? JSON.parse(reviews) : [];
     } catch (err) {
-      console.warn('Backend: Invalid reviews JSON. Defaulting to []. Error:', err);
+      console.warn('Backend: Invalid reviews JSON. Defaulting to []. Error:', err.message);
     }
-    // --- END Corrected Parsing ---
-
 
     let coverPhotoUrl = null;
     let avatarUrl = null;
 
     const existingCard = await BusinessCard.findOne({ user: userId }).lean();
-    console.log("Backend: Existing card fetched for user:", existingCard ? { cover_photo: existingCard.cover_photo, avatar: existingCard.avatar, works: existingCard.works?.length } : "None");
+    console.log("Backend: Existing card from DB:", existingCard ? { cover_photo: existingCard.cover_photo, avatar: existingCard.avatar, works: existingCard.works?.length } : "None");
 
-    // Handle cover photo
+    // --- FIX: Handle cover photo persistence and defaults ---
     if (req.files?.cover_photo?.[0]) {
-      console.log("Backend: New cover photo file detected. Processing upload to S3.");
+      console.log("Backend: New cover photo file detected.");
       const file = req.files.cover_photo[0];
       const ext = path.extname(file.originalname);
       const key = `cover_photos/${userId}/${uuidv4()}${ext}`;
-      const uploadToS3Util = require('../utils/uploadToS3');
       coverPhotoUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
-      console.log("Backend: Cover photo uploaded to S3:", coverPhotoUrl);
+      console.log("Backend: New cover photo uploaded:", coverPhotoUrl);
     } else if (cover_photo_removed === 'true' || cover_photo_removed === true) {
-      console.log("Backend: Cover photo explicitly marked for removal. Setting URL to null.");
-      coverPhotoUrl = null;
+      console.log("Backend: Cover photo explicitly marked for removal.");
+      coverPhotoUrl = null; // Set to null if removed
     } else {
-      coverPhotoUrl = existingCard?.cover_photo || null;
-      console.log("Backend: Retaining existing cover photo URL:", coverPhotoUrl);
+      // If no new file and not marked for removal, retain existing OR use the default from frontend if present in req.body.cover_photo
+      // The frontend sends the default path in `state.coverPhoto` if no custom image is set.
+      coverPhotoUrl = existingCard?.cover_photo || req.body.coverPhoto || null; // Use req.body.coverPhoto for default public paths
+      console.log("Backend: Retaining cover photo. Current URL:", coverPhotoUrl);
     }
 
-    // Handle avatar
+    // --- FIX: Handle avatar persistence and defaults ---
     if (req.files?.avatar?.[0]) {
-      console.log("Backend: New avatar file detected. Processing upload to S3.");
+      console.log("Backend: New avatar file detected.");
       const file = req.files.avatar[0];
       const ext = path.extname(file.originalname);
       const key = `avatars/${userId}/${uuidv4()}${ext}`;
-      const uploadToS3Util = require('../utils/uploadToS3');
       avatarUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
-      console.log("Backend: Avatar uploaded to S3:", avatarUrl);
+      console.log("Backend: New avatar uploaded:", avatarUrl);
     } else if (avatar_removed === 'true' || avatar_removed === true) {
-      console.log("Backend: Avatar explicitly marked for removal. Setting URL to null.");
-      avatarUrl = null;
+      console.log("Backend: Avatar explicitly marked for removal.");
+      avatarUrl = null; // Set to null if removed
     } else {
-      avatarUrl = existingCard?.avatar || null;
-      console.log("Backend: Retaining existing avatar URL:", avatarUrl);
+      // If no new file and not marked for removal, retain existing OR use the default from frontend if present in req.body.avatar
+      avatarUrl = existingCard?.avatar || req.body.avatar || null; // Use req.body.avatar for default public paths
+      console.log("Backend: Retaining avatar. Current URL:", avatarUrl);
     }
 
-    // Handle new work images (append to existing ones)
+
+    // --- FIX: Handle works (images) persistence and defaults ---
     const newWorkImageUrls = [];
     if (req.files?.works && req.files.works.length > 0) {
-      console.log("Backend: New work image files detected. Processing upload to S3.");
+      console.log("Backend: New work image files detected.");
       for (const file of req.files.works) {
         const ext = path.extname(file.originalname);
         const key = `work_images/${userId}/${uuidv4()}${ext}`;
-        const uploadToS3Util = require('../utils/uploadToS3');
         const imageUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
         newWorkImageUrls.push(imageUrl);
       }
-      console.log("Backend: New work images uploaded to S3:", newWorkImageUrls);
+      console.log("Backend: Newly uploaded work images:", newWorkImageUrls);
     }
 
-    // Combine existing works URLs with newly uploaded ones
-    const finalWorks = [...(parsedWorks || []), ...newWorkImageUrls];
+    // Determine finalWorks:
+    // 1. Start with existing S3 URLs that frontend sent back (parsedWorks)
+    // 2. Add any newly uploaded S3 URLs (newWorkImageUrls)
+    // 3. If the combined list is empty, but the frontend's original state had default work images (sent via req.body.works if they were not Files)
+    // This is tricky. Frontend now filters out defaults for `worksToUpload`.
+    // The most robust way is to rebuild `works` on backend considering *all* pieces:
+    // - Existing S3 URLs (`parsedWorks`)
+    // - Newly uploaded URLs (`newWorkImageUrls`)
+    const finalWorks = [...parsedWorks, ...newWorkImageUrls];
+
+    // If the frontend didn't send any 'works' or 'existing_works' AND no new files were uploaded,
+    // it means all works were implicitly removed or were just initial defaults that were not replaced.
+    // In this case, ensure 'works' in DB becomes empty unless you want to persist defaults here explicitly.
+    // For now, `finalWorks` correctly reflects only user-provided (existing or new) images.
+    // If the user clears all images (leaving only defaults on frontend), finalWorks will be [].
+    // This effectively clears the works array in DB, which is usually desired for 'delete all' action.
     console.log("Backend: Final works array before DB update:", finalWorks);
+
 
     // Prepare Data for BusinessCard Model Update
     const updateData = {
@@ -148,7 +159,7 @@ const createOrUpdateBusinessCard = async (req, res) => {
       full_name,
       bio,
       job_title,
-      works: finalWorks, // This will now contain both old and new work image URLs
+      works: finalWorks,
       services: parsedServices,
       reviews: parsedReviews,
       cover_photo: coverPhotoUrl,
@@ -168,7 +179,7 @@ const createOrUpdateBusinessCard = async (req, res) => {
     console.log("Backend: MongoDB findOneAndUpdate result (card object):", card);
 
     if (!card) {
-      console.error("Backend: Business card not found or could not be updated after findOneAndUpdate. This should not happen with upsert:true.");
+      console.error("Backend: Business card not found or could not be updated. This should not happen with upsert:true.");
       return res.status(500).json({ error: 'Failed to find or update business card in DB' });
     }
 
