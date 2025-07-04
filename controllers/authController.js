@@ -181,12 +181,36 @@ const forgotPassword = async (req, res) => {
     try {
         const { email } = req.body;
         const user = await User.findOne({ email });
-        if (!user) return res.json({ error: 'User not found' });
+        if (!user) {
+            console.log(`[FORGOT PASSWORD DEBUG] User not found for email: ${email}`);
+            return res.json({ error: 'User not found' });
+        }
+
+        console.log(`[FORGOT PASSWORD DEBUG] User found: ${user.email}`);
+        console.log(`[FORGOT PASSWORD DEBUG] User current resetToken (before update): ${user.resetToken}`);
+        console.log(`[FORGOT PASSWORD DEBUG] User current resetTokenExpires (before update): ${user.resetTokenExpires}`);
 
         const token = crypto.randomBytes(32).toString('hex');
         user.resetToken = token;
         user.resetTokenExpires = Date.now() + 60 * 60 * 1000; // Token expires in 1 hour
-        await user.save();
+
+        console.log(`[FORGOT PASSWORD DEBUG] New resetToken set: ${user.resetToken}`);
+        console.log(`[FORGOT PASSWORD DEBUG] New resetTokenExpires set: ${new Date(user.resetTokenExpires).toISOString()} (Timestamp: ${user.resetTokenExpires})`);
+
+        try {
+            await user.save();
+            console.log(`[FORGOT PASSWORD DEBUG] User saved successfully. User's _id: ${user._id}`);
+        } catch (saveErr) {
+            console.error(`[FORGOT PASSWORD ERROR] Error saving user after setting reset token:`, saveErr);
+            // Check if it's a validation error
+            if (saveErr.name === 'ValidationError') {
+                for (let field in saveErr.errors) {
+                    console.error(`[FORGOT PASSWORD ERROR] Validation Error for ${field}: ${saveErr.errors[field].message}`);
+                }
+            }
+            return res.status(500).json({ error: 'Failed to update user with reset token.' });
+        }
+
 
         const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
         const html = passwordResetTemplate(user.name, resetLink);
@@ -194,7 +218,7 @@ const forgotPassword = async (req, res) => {
 
         res.json({ success: true, message: 'Password reset email sent' });
     } catch (err) {
-        console.log(err);
+        console.error(`[FORGOT PASSWORD ERROR] General error in forgotPassword:`, err);
         res.status(500).json({ error: 'Could not send password reset email' });
     }
 };
