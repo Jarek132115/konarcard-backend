@@ -40,13 +40,12 @@ function orderConfirmationTemplate(customerEmail, amountPaid) {
   `;
 }
 
-// NEW: Subscription Confirmation Template
 function subscriptionConfirmationTemplate(name, amountPaid, eventType) {
   let subjectLine = '';
   let bodyContent = '';
 
   switch (eventType) {
-    case 'subscription_started': // Used for customer.subscription.created event
+    case 'subscription_started': 
       subjectLine = 'Your Konar Premium Subscription Has Started!';
       bodyContent = `
         <p>Hi ${name || ''},</p>
@@ -56,7 +55,7 @@ function subscriptionConfirmationTemplate(name, amountPaid, eventType) {
         <p>Enjoy building your amazing digital profile!</p>
       `;
       break;
-    case 'subscription_cancelled': // Used for customer.subscription.deleted event
+    case 'subscription_cancelled': 
       subjectLine = 'Your Konar Premium Subscription Cancellation Confirmed';
       bodyContent = `
         <p>Hi ${name || ''},</p>
@@ -64,7 +63,7 @@ function subscriptionConfirmationTemplate(name, amountPaid, eventType) {
         <p>We're sad to see you go! If you change your mind, you can resubscribe anytime.</p>
       `;
       break;
-    case 'subscription_paid': // Optionally, for invoice.payment_succeeded
+    case 'subscription_paid': 
       subjectLine = 'Konar Premium: Payment Received!';
       bodyContent = `
         <p>Hi ${name || ''},</p>
@@ -72,7 +71,7 @@ function subscriptionConfirmationTemplate(name, amountPaid, eventType) {
         <p>Your subscription remains active, and you continue to have full access to all features.</p>
       `;
       break;
-    case 'subscription_general': // General confirmation from checkout.session.completed for subscriptions
+    case 'subscription_general': 
     default:
       subjectLine = 'Your Konar Premium Subscription is Active!';
       bodyContent = `

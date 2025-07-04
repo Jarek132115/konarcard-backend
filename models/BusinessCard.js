@@ -12,7 +12,7 @@ const businessCardSchema = new mongoose.Schema({
   avatar: { type: String, default: '' },
   cover_photo: { type: String, default: '' },
   works: {
-    type: [String], // Array of Strings for S3 URLs
+    type: [String], 
     default: [],
   },
   services: {
@@ -38,7 +38,6 @@ const businessCardSchema = new mongoose.Schema({
   },
   contact_email: { type: String, default: '' },
   phone_number: { type: String, default: '' },
-  // REMOVED: website_url field
 }, { timestamps: true });
 
 module.exports = mongoose.model('BusinessCard', businessCardSchema);

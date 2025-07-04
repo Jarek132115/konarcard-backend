@@ -14,7 +14,6 @@ const s3 = new S3Client({
   },
 });
 
-// Helper function to upload to S3 (assuming it exists in utils/uploadToS3.js)
 const uploadToS3Util = require('../utils/uploadToS3');
 
 const createOrUpdateBusinessCard = async (req, res) => {
@@ -52,7 +51,6 @@ const createOrUpdateBusinessCard = async (req, res) => {
     let parsedReviews = [];
     let parsedWorks = [];
 
-    // Handle existing_works: it comes as an array of strings from FormData if multiple, or a single string
     if (existing_works) {
       if (Array.isArray(existing_works)) {
         parsedWorks = existing_works;
@@ -81,7 +79,6 @@ const createOrUpdateBusinessCard = async (req, res) => {
     const existingCard = await BusinessCard.findOne({ user: userId }).lean();
     console.log("Backend: Existing card from DB:", existingCard ? { cover_photo: existingCard.cover_photo, avatar: existingCard.avatar, works: existingCard.works?.length } : "None");
 
-    // --- FIX: Handle cover photo persistence and defaults ---
     if (req.files?.cover_photo?.[0]) {
       console.log("Backend: New cover photo file detected.");
       const file = req.files.cover_photo[0];
@@ -91,15 +88,12 @@ const createOrUpdateBusinessCard = async (req, res) => {
       console.log("Backend: New cover photo uploaded:", coverPhotoUrl);
     } else if (cover_photo_removed === 'true' || cover_photo_removed === true) {
       console.log("Backend: Cover photo explicitly marked for removal.");
-      coverPhotoUrl = null; // Set to null if removed
+      coverPhotoUrl = null; 
     } else {
-      // If no new file and not marked for removal, retain existing OR use the default from frontend if present in req.body.cover_photo
-      // The frontend sends the default path in `state.coverPhoto` if no custom image is set.
-      coverPhotoUrl = existingCard?.cover_photo || req.body.coverPhoto || null; // Use req.body.coverPhoto for default public paths
+      coverPhotoUrl = existingCard?.cover_photo || req.body.coverPhoto || null; 
       console.log("Backend: Retaining cover photo. Current URL:", coverPhotoUrl);
     }
 
-    // --- FIX: Handle avatar persistence and defaults ---
     if (req.files?.avatar?.[0]) {
       console.log("Backend: New avatar file detected.");
       const file = req.files.avatar[0];
@@ -109,15 +103,13 @@ const createOrUpdateBusinessCard = async (req, res) => {
       console.log("Backend: New avatar uploaded:", avatarUrl);
     } else if (avatar_removed === 'true' || avatar_removed === true) {
       console.log("Backend: Avatar explicitly marked for removal.");
-      avatarUrl = null; // Set to null if removed
+      avatarUrl = null; 
     } else {
-      // If no new file and not marked for removal, retain existing OR use the default from frontend if present in req.body.avatar
-      avatarUrl = existingCard?.avatar || req.body.avatar || null; // Use req.body.avatar for default public paths
+      avatarUrl = existingCard?.avatar || req.body.avatar || null; 
       console.log("Backend: Retaining avatar. Current URL:", avatarUrl);
     }
 
 
-    // --- FIX: Handle works (images) persistence and defaults ---
     const newWorkImageUrls = [];
     if (req.files?.works && req.files.works.length > 0) {
       console.log("Backend: New work image files detected.");
@@ -130,26 +122,10 @@ const createOrUpdateBusinessCard = async (req, res) => {
       console.log("Backend: Newly uploaded work images:", newWorkImageUrls);
     }
 
-    // Determine finalWorks:
-    // 1. Start with existing S3 URLs that frontend sent back (parsedWorks)
-    // 2. Add any newly uploaded S3 URLs (newWorkImageUrls)
-    // 3. If the combined list is empty, but the frontend's original state had default work images (sent via req.body.works if they were not Files)
-    // This is tricky. Frontend now filters out defaults for `worksToUpload`.
-    // The most robust way is to rebuild `works` on backend considering *all* pieces:
-    // - Existing S3 URLs (`parsedWorks`)
-    // - Newly uploaded URLs (`newWorkImageUrls`)
     const finalWorks = [...parsedWorks, ...newWorkImageUrls];
-
-    // If the frontend didn't send any 'works' or 'existing_works' AND no new files were uploaded,
-    // it means all works were implicitly removed or were just initial defaults that were not replaced.
-    // In this case, ensure 'works' in DB becomes empty unless you want to persist defaults here explicitly.
-    // For now, `finalWorks` correctly reflects only user-provided (existing or new) images.
-    // If the user clears all images (leaving only defaults on frontend), finalWorks will be [].
-    // This effectively clears the works array in DB, which is usually desired for 'delete all' action.
     console.log("Backend: Final works array before DB update:", finalWorks);
 
 
-    // Prepare Data for BusinessCard Model Update
     const updateData = {
       business_card_name,
       page_theme,
@@ -183,7 +159,6 @@ const createOrUpdateBusinessCard = async (req, res) => {
       return res.status(500).json({ error: 'Failed to find or update business card in DB' });
     }
 
-    // Also update the User model for relevant fields (name, bio, job_title, avatar)
     const currentUser = await User.findById(userId);
     if (!currentUser) {
       console.error("Backend: User not found when trying to update user model after business card save.");

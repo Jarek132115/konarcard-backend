@@ -2,12 +2,12 @@ const { hashPassword, comparePassword } = require('../helpers/auth');
 const User = require('../models/user');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
-const sendEmail = require('../utils/SendEmail'); // Centralized email utility
+const sendEmail = require('../utils/SendEmail'); 
 const { verificationEmailTemplate, passwordResetTemplate } = require('../utils/emailTemplates');
 const crypto = require('crypto');
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-const uploadToS3 = require('../utils/uploadToS3'); // Centralized S3 upload utility
+const uploadToS3 = require('../utils/uploadToS3'); 
 
 // TEST
 const test = (req, res) => {
@@ -71,43 +71,6 @@ const registerUser = async (req, res) => {
     res.status(500).json({ error: 'Registration failed. Try again.' });
   }
 };
-
-// REMOVED: uploadAvatar function, as it uses the old S3 setup and is likely redundant.
-// Image uploads are handled via businessCardRoutes.js now using the centralized uploadToS3.
-/*
-const uploadAvatar = async (req, res) => {
-    try {
-        const file = req.file;
-        const userId = req.params.id;
-        console.log("userId: ",userId);
-        console.log("file: ",file);
-        if (!file) return res.status(400).json({ error: 'No image file uploaded' });
-
-        const ext = path.extname(file.originalname);
-        const key = `avatars/${uuidv4()}${ext}`;
-
-        const params = {
-            Bucket: BUCKET_NAME, // This BUCKET_NAME would be undefined here now
-            Key: key,
-            Body: file.buffer,
-            ContentType: file.mimetype,
-        };
-
-        await s3.send(new PutObjectCommand(params));
-
-        const avatarUrl = `https://${BUCKET_NAME}.s3.${BUCKET_REGION}.amazonaws.com/${key}`;
-
-        const user = await User.findByIdAndUpdate(userId, { avatar: avatarUrl }, { new: true });
-
-        if (!user) return res.status(404).json({ error: 'User not found' });
-
-        res.json({ message: 'Avatar updated successfully', avatar: avatarUrl });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to upload avatar' });
-    }
-};
-*/
 
 // VERIFY EMAIL
 const verifyEmailCode = async (req, res) => {

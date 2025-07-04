@@ -1,4 +1,3 @@
-// backend/utils/uploadToS3.js
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const uploadToS3 = async (buffer, key, bucketName, region, contentType) => {
@@ -19,8 +18,6 @@ const uploadToS3 = async (buffer, key, bucketName, region, contentType) => {
             Key: key,
             Body: buffer,
             ContentType: contentType,
-            // CRITICAL FIX: REMOVE ACL: 'public-read' because the bucket does not allow ACLs
-            // ACL: 'public-read' 
         });
 
         await s3.send(command);
@@ -38,7 +35,6 @@ const uploadToS3 = async (buffer, key, bucketName, region, contentType) => {
 
     } catch (error) {
         console.error("Backend: ERROR during S3 upload in uploadToS3 utility:", error);
-        // Throw the error so the calling controller can catch it
         throw error;
     }
 };

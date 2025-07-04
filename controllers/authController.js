@@ -185,7 +185,7 @@ const forgotPassword = async (req, res) => {
 
         const token = crypto.randomBytes(32).toString('hex');
         user.resetToken = token;
-        user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
+        user.resetTokenExpires = Date.now() + 60 * 60 * 1000; // Token expires in 1 hour
         await user.save();
 
         const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
@@ -202,25 +202,44 @@ const forgotPassword = async (req, res) => {
 // RESET PASSWORD
 const resetPassword = async (req, res) => {
     try {
-        const { token } = req.params;
-        const { password } = req.body;
+        const { token } = req.params; // Token from URL parameters
+        const { password } = req.body; // New password from request body
+
+        console.log(`[RESET PASSWORD DEBUG] Received token from URL: ${token}`);
+        console.log(`[RESET PASSWORD DEBUG] Received new password (length): ${password ? password.length : 'N/A'}`);
+        console.log(`[RESET PASSWORD DEBUG] Current server Date.now(): ${Date.now()}`);
 
         const user = await User.findOne({
             resetToken: token,
-            resetTokenExpires: { $gt: Date.now() },
+            resetTokenExpires: { $gt: Date.now() }, // Check if token is not expired
         });
 
-        if (!user) return res.json({ error: 'Invalid or expired token' });
+        if (!user) {
+            // If user is not found, let's try to find them by token alone to see if it's an expiry issue
+            const userWithToken = await User.findOne({ resetToken: token });
+            if (userWithToken) {
+                console.log(`[RESET PASSWORD DEBUG] User found by token, but token is expired.`);
+                console.log(`[RESET PASSWORD DEBUG] User's stored resetTokenExpires: ${userWithToken.resetTokenExpires}`);
+                console.log(`[RESET PASSWORD DEBUG] Time difference (ms): ${Date.now() - userWithToken.resetTokenExpires}`);
+            } else {
+                console.log(`[RESET PASSWORD DEBUG] No user found with the provided token at all.`);
+            }
+            return res.json({ error: 'Invalid or expired token' });
+        }
+
+        console.log(`[RESET PASSWORD DEBUG] User found for reset: ${user.email}`);
+        console.log(`[RESET PASSWORD DEBUG] User's stored resetToken: ${user.resetToken}`);
+        console.log(`[RESET PASSWORD DEBUG] User's stored resetTokenExpires: ${user.resetTokenExpires}`);
 
         const hashed = await hashPassword(password);
         user.password = hashed;
-        user.resetToken = undefined;
-        user.resetTokenExpires = undefined;
+        user.resetToken = undefined; // Clear the token after use
+        user.resetTokenExpires = undefined; // Clear the expiry after use
         await user.save();
 
         res.json({ success: true, message: 'Password updated successfully' });
     } catch (err) {
-        console.log(err);
+        console.error(`[RESET PASSWORD ERROR]`, err); // Log the full error
         res.status(500).json({ error: 'Password reset failed' });
     }
 };
@@ -233,7 +252,6 @@ const getProfile = async (req, res) => {
     }
 
     try {
-        // Fetch the user, explicitly select fields needed for frontend (including name, email)
         const user = await User.findById(req.user.id).select('-password').lean();
 
         if (!user) {
@@ -260,19 +278,16 @@ const updateProfile = async (req, res) => {
     }
 
     try {
-        // Destructure all potentially updated fields, including password
-        const { name, email, bio, job_title, password } = req.body; // FIX: Added password to destructuring
+        const { name, email, bio, job_title, password } = req.body;
+        const updateFields = { name, email, bio, job_title };
 
-        const updateFields = { name, email, bio, job_title }; // Fields to always consider updating
-
-        // If a new password is provided, hash it and add to updateFields
-        if (password) { // FIX: Only hash and update password if it's actually provided
-            updateFields.password = await hashPassword(password); // FIX: Hash the new password
+        if (password) {
+            updateFields.password = await hashPassword(password);
         }
 
         const updatedUser = await User.findByIdAndUpdate(
             req.user.id,
-            updateFields, // FIX: Use the dynamically built updateFields object
+            updateFields,
             { new: true, runValidators: true }
         ).select('-password').lean();
 
@@ -287,8 +302,7 @@ const updateProfile = async (req, res) => {
         res.status(200).json({ success: true, data: updatedUser });
 
     } catch (err) {
-        console.error('Backend: Error updating profile:', err); // Added specific log
-        // Consider more specific error messages for validation failures if needed
+        console.error('Backend: Error updating profile:', err);
         res.status(500).json({ error: 'Failed to update profile', details: err.message });
     }
 };
@@ -323,7 +337,6 @@ const subscribeUser = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // Step 1: Create a Stripe Customer if one doesn't exist for the user
         let customerId;
         if (user.stripeCustomerId) {
             customerId = user.stripeCustomerId;
@@ -331,34 +344,31 @@ const subscribeUser = async (req, res) => {
             const customer = await stripe.customers.create({
                 email: user.email,
                 name: user.name,
-                metadata: { userId: user._id.toString() }, // Link to your internal user ID
+                metadata: { userId: user._id.toString() },
             });
             customerId = customer.id;
             user.stripeCustomerId = customerId;
-            await user.save(); // Save the new customer ID to your user document
+            await user.save();
             console.log(`Backend: Created new Stripe customer: ${customerId} for user ${user._id}`);
         }
 
         const session = await stripe.checkout.sessions.create({
-            customer: customerId, // Associate session with the customer
+            customer: customerId,
             payment_method_types: ['card'],
             mode: 'subscription',
             line_items: [{
-                price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID, // Ensure this is the LIVE subscription Price ID with trial
+                price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID,
                 quantity: 1,
             }],
 
-            // Redirect URLs after checkout
-            success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`, // CRITICAL FIX: Changed to /SuccessSubscription
-            cancel_url: `${process.env.CLIENT_URL}/pricing`, // Redirect to a pricing/subscription page if canceled
+            success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${process.env.CLIENT_URL}/pricing`,
 
-            // Add subscription data for trial conversions (optional, handled by price)
             subscription_data: {
-                trial_period_days: 7, // THIS IS THE KEY TO ENABLING THE 7-DAY TRIAL!
+                trial_period_days: 7,
             },
         });
 
-        // Redirect to Stripe Checkout
         res.status(200).json({ url: session.url });
     } catch (err) {
         console.error('Backend: Subscription error:', err);
@@ -407,16 +417,13 @@ const checkSubscriptionStatus = async (req, res) => {
             return res.status(200).json({ active: false, status: 'user_not_found' });
         }
 
-        // Log the user's subscription fields from DB
         console.log(`Backend: /subscription-status - User ${user._id} DB status: isSubscribed=${user.isSubscribed}, stripeCustomerId=${user.stripeCustomerId}, stripeSubscriptionId=${user.stripeSubscriptionId}`);
 
-        // If no Stripe data is linked, or subscription is explicitly false, assume not active for Stripe check
         if (!user.stripeCustomerId || !user.stripeSubscriptionId) {
             console.log(`Backend: /subscription-status - No Stripe customer/subscription ID found for user ${user._id}. Returning active: false.`);
             return res.status(200).json({ active: false, status: 'no_stripe_data' });
         }
 
-        // Retrieve subscription from Stripe directly to get the real-time status
         const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
         console.log(`Backend: /subscription-status - Stripe subscription status for ${user.stripeSubscriptionId}: ${subscription.status}`);
 
@@ -425,7 +432,6 @@ const checkSubscriptionStatus = async (req, res) => {
             isActive = true;
         }
 
-        // If DB status is out of sync, update it here (less reliable than webhook but good for consistency)
         if (user.isSubscribed !== isActive) {
             user.isSubscribed = isActive;
             await user.save();
@@ -442,7 +448,6 @@ const checkSubscriptionStatus = async (req, res) => {
 
     } catch (err) {
         console.error('Backend: Error checking subscription status:', err);
-        // If Stripe API call fails (e.g., subscription not found), treat as not active
         if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
             console.warn(`Backend: /subscription-status - Stripe subscription resource missing for user ${req.user.id}. Marking as not subscribed.`);
             const user = await User.findById(req.user.id);
@@ -458,7 +463,7 @@ const checkSubscriptionStatus = async (req, res) => {
     }
 };
 
-// CONTACT FORM (No authentication needed for this usually)
+// CONTACT FORM
 const submitContactForm = async (req, res) => {
     const { name, email, reason, message } = req.body;
 
@@ -472,7 +477,7 @@ const submitContactForm = async (req, res) => {
     <p><strong>Email:</strong> ${email}</p>
     <p><strong>Reason:</strong> ${reason}</p>
     <p><strong>Message:</strong><br/>${message}</p>
-  `;
+ `;
 
     try {
         await sendEmail({ email: 'supportteam@konarcard.com', subject: `Contact Form: ${reason}`, message: html });

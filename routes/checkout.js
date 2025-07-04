@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY); // This will use your live secret key from env
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY); 
 
 router.post('/create-checkout-session', async (req, res) => {
     const { quantity } = req.body;
@@ -11,8 +11,7 @@ router.post('/create-checkout-session', async (req, res) => {
             payment_method_types: ['card'],
             line_items: [
                 {
-                    // IMPORTANT: Now using the NEW environment variable name: STRIPE_WHITE_CARD_PRICE_ID
-                    price: process.env.STRIPE_WHITE_CARD_PRICE_ID, // This will be your live £19.95 price ID
+                    price: process.env.STRIPE_WHITE_CARD_PRICE_ID, 
                     quantity: quantity || 1,
                 },
             ],

@@ -22,7 +22,7 @@ router.post('/', async (req, res) => {
     `;
 
         await sendEmail(
-            'supportteam@konarcard.com',  // your target inbox
+            'supportteam@konarcard.com',  
             `New Contact Form: ${reason}`,
             html
         );

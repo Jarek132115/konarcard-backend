@@ -6,18 +6,11 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const sendEmail = require('../utils/SendEmail');
 const {
   orderConfirmationTemplate,
-  subscriptionConfirmationTemplate, // Assuming you will create this new template
-} = require('../utils/emailTemplates'); // Path to emailTemplates fixed earlier
-const User = require('../models/user'); // Import User model
-
-// DEBUG LOG: Confirming stripe.js route file is being loaded
-console.log("Backend: routes/stripe.js file loaded.");
-
+  subscriptionConfirmationTemplate,
+} = require('../utils/emailTemplates'); 
+const User = require('../models/user'); 
 
 router.post('/', express.raw({ type: 'application/json' }), async (req, res) => {
-  // DEBUG LOG: Confirming /stripe POST request received
-  console.log("Backend: Received POST request to /stripe webhook.");
-
   const sig = req.headers['stripe-signature'];
   let event;
 
@@ -35,12 +28,11 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
       const session = event.data.object;
       console.log(`Backend: Webhook Event - checkout.session.completed for session ${session.id}`);
 
-      // Retrieve full session details to check line items for type (payment vs subscription)
       const fullSession = await stripe.checkout.sessions.retrieve(session.id, {
         expand: ['line_items', 'customer'],
       });
       const lineItems = fullSession.line_items.data;
-      const customerEmail = fullSession.customer_details?.email || fullSession.customer?.email; // Use email from fullSession or customer object
+      const customerEmail = fullSession.customer_details?.email || fullSession.customer?.email; 
       const amountTotal = (fullSession.amount_total / 100).toFixed(2);
 
       // Find user by customer ID or email
@@ -48,7 +40,6 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
       if (fullSession.customer && fullSession.customer.id) {
         user = await User.findOne({ stripeCustomerId: fullSession.customer.id });
         if (!user) {
-          // If user not found by stripeCustomerId, try by email as fallback
           user = await User.findOne({ email: customerEmail });
           if (user) {
             user.stripeCustomerId = fullSession.customer.id;
@@ -60,10 +51,8 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
         user = await User.findOne({ email: customerEmail });
       }
 
-      // Check if it's a one-time payment or a subscription
       if (session.mode === 'payment') {
-        console.log("Backend: Processing one-time payment."); // FIX: Changed console() to console.log()
-        // One-time product purchase logic (already existing)
+        console.log("Backend: Processing one-time payment."); 
         if (customerEmail) {
           try {
             await sendEmail({
@@ -82,20 +71,16 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
           }
         }
       } else if (session.mode === 'subscription') {
-        // For subscriptions, customer.subscription.created will also fire.
-        // This block ensures immediate user update and email for subscription success if needed,
-        // but customer.subscription.created is the canonical source of truth for status.
         console.log("Backend: Processing subscription checkout completion.");
-        const subscriptionId = fullSession.subscription; // Get subscription ID from the session
+        const subscriptionId = fullSession.subscription; 
 
         if (user) {
-          user.isSubscribed = true; // Mark as subscribed immediately
-          user.stripeSubscriptionId = subscriptionId; // Save subscription ID
+          user.isSubscribed = true; 
+          user.stripeSubscriptionId = subscriptionId;
           await user.save();
           console.log(`Backend: User ${user._id} marked as subscribed via checkout.session.completed.`);
         }
 
-        // Send subscription confirmation email (can be redundant with customer.subscription.created, but good for immediacy)
         if (customerEmail && subscriptionConfirmationTemplate) {
           try {
             await sendEmail({
@@ -113,9 +98,9 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
     }
 
     case 'customer.subscription.created': {
-      const subscription = event.data.object; // contains subscription object
+      const subscription = event.data.object; 
       console.log(`Backend: Webhook Event - customer.subscription.created for subscription ${subscription.id}`);
-      const customerId = subscription.customer; // Stripe customer ID
+      const customerId = subscription.customer; 
 
       const user = await User.findOne({ stripeCustomerId: customerId });
       if (user) {
@@ -124,7 +109,6 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
         await user.save();
         console.log(`Backend: User ${user._id} status updated to subscribed (created event).`);
 
-        // Send a welcome email for new subscriptions/trials
         if (subscriptionConfirmationTemplate) {
           try {
             await sendEmail({
@@ -150,13 +134,11 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
       const user = await User.findOne({ stripeCustomerId: customerId });
       if (user) {
-        const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status); // Keep subscribed if past_due/unpaid for a grace period
+        const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status); 
         user.isSubscribed = isActive;
-        user.stripeSubscriptionId = subscription.id; // Update in case it changed (e.g., migration)
+        user.stripeSubscriptionId = subscription.id; 
         await user.save();
         console.log(`Backend: User ${user._id} status updated to isSubscribed: ${isActive} (updated event).`);
-
-        // Additional email logic (e.g., payment failed, trial ending, plan changed) can go here
       } else {
         console.warn(`Backend: User not found for stripeCustomerId ${customerId} on customer.subscription.updated event.`);
       }
@@ -171,11 +153,10 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
       const user = await User.findOne({ stripeCustomerId: customerId });
       if (user) {
         user.isSubscribed = false;
-        user.stripeSubscriptionId = undefined; // Clear subscription ID
+        user.stripeSubscriptionId = undefined; 
         await user.save();
         console.log(`Backend: User ${user._id} status updated to isSubscribed: false (deleted event).`);
 
-        // Send a cancellation confirmation email
         if (subscriptionConfirmationTemplate) {
           try {
             await sendEmail({
@@ -197,17 +178,12 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
     case 'invoice.payment_succeeded': {
       const invoice = event.data.object;
       console.log(`Backend: Webhook Event - invoice.payment_succeeded for invoice ${invoice.id}`);
-      // This event fires for successful recurring payments or after trial conversion.
-      // Use this if you want to send receipts for recurring payments beyond the initial confirmation.
-      // The `customer.subscription.updated` event will also fire, potentially marking the sub as 'active' from 'trialing'.
       if (invoice.customer_email) {
         console.log(`Backend: Payment succeeded for ${invoice.customer_email}. Amount: ${(invoice.amount_paid / 100).toFixed(2)}`);
-        // You could send a receipt email here if needed, or rely on Stripe's own receipts.
       }
       break;
     }
 
-    // Add other event types as needed
     default:
       console.log(`Backend: Unhandled event type ${event.type}`);
   }
