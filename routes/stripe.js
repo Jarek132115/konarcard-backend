@@ -1,3 +1,4 @@
+// backend/routes/stripe.js
 const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
@@ -7,10 +8,12 @@ const sendEmail = require('../utils/SendEmail');
 const {
   orderConfirmationTemplate,
   subscriptionConfirmationTemplate,
-} = require('../utils/emailTemplates'); 
-const User = require('../models/user'); 
+} = require('../utils/emailTemplates');
+const User = require('../models/user');
 
-router.post('/', express.raw({ type: 'application/json' }), async (req, res) => {
+// IMPORTANT: This raw body parser is only for webhooks.
+// Other routes will need express.json() or express.urlencoded()
+router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => { // Renamed the route to /webhook
   const sig = req.headers['stripe-signature'];
   let event;
 
@@ -32,7 +35,7 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
         expand: ['line_items', 'customer'],
       });
       const lineItems = fullSession.line_items.data;
-      const customerEmail = fullSession.customer_details?.email || fullSession.customer?.email; 
+      const customerEmail = fullSession.customer_details?.email || fullSession.customer?.email;
       const amountTotal = (fullSession.amount_total / 100).toFixed(2);
 
       // Find user by customer ID or email
@@ -52,7 +55,7 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
       }
 
       if (session.mode === 'payment') {
-        console.log("Backend: Processing one-time payment."); 
+        console.log("Backend: Processing one-time payment.");
         if (customerEmail) {
           try {
             await sendEmail({
@@ -72,10 +75,10 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
         }
       } else if (session.mode === 'subscription') {
         console.log("Backend: Processing subscription checkout completion.");
-        const subscriptionId = fullSession.subscription; 
+        const subscriptionId = fullSession.subscription;
 
         if (user) {
-          user.isSubscribed = true; 
+          user.isSubscribed = true;
           user.stripeSubscriptionId = subscriptionId;
           await user.save();
           console.log(`Backend: User ${user._id} marked as subscribed via checkout.session.completed.`);
@@ -98,9 +101,9 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
     }
 
     case 'customer.subscription.created': {
-      const subscription = event.data.object; 
+      const subscription = event.data.object;
       console.log(`Backend: Webhook Event - customer.subscription.created for subscription ${subscription.id}`);
-      const customerId = subscription.customer; 
+      const customerId = subscription.customer;
 
       const user = await User.findOne({ stripeCustomerId: customerId });
       if (user) {
@@ -134,9 +137,9 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
       const user = await User.findOne({ stripeCustomerId: customerId });
       if (user) {
-        const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status); 
+        const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status);
         user.isSubscribed = isActive;
-        user.stripeSubscriptionId = subscription.id; 
+        user.stripeSubscriptionId = subscription.id;
         await user.save();
         console.log(`Backend: User ${user._id} status updated to isSubscribed: ${isActive} (updated event).`);
       } else {
@@ -153,7 +156,7 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
       const user = await User.findOne({ stripeCustomerId: customerId });
       if (user) {
         user.isSubscribed = false;
-        user.stripeSubscriptionId = undefined; 
+        user.stripeSubscriptionId = undefined;
         await user.save();
         console.log(`Backend: User ${user._id} status updated to isSubscribed: false (deleted event).`);
 
@@ -191,5 +194,52 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
   res.status(200).send('OK');
   console.log("Backend: Webhook processing finished, sending 200 OK.");
 });
+
+// NEW: Endpoint for frontend to confirm subscription session
+router.post('/confirm-subscription', async (req, res) => {
+  const { sessionId } = req.body;
+
+  if (!sessionId) {
+    return res.status(400).json({ error: 'Session ID is required.' });
+  }
+
+  try {
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+    if (session.payment_status === 'paid' && session.mode === 'subscription' && session.customer && session.subscription) {
+      let user = await User.findOne({ stripeCustomerId: session.customer });
+
+      // If user not found by customer ID, try finding by email from session (less reliable but fallback)
+      if (!user && session.customer_details?.email) {
+        user = await User.findOne({ email: session.customer_details.email });
+        if (user) {
+          // Update user with stripeCustomerId if found by email
+          user.stripeCustomerId = session.customer;
+          await user.save();
+        }
+      }
+
+      if (user) {
+        // Ensure the user's subscription status is updated in DB
+        user.isSubscribed = true;
+        user.stripeSubscriptionId = session.subscription;
+        await user.save();
+        console.log(`Backend: /confirm-subscription - User ${user._id} marked as subscribed via direct confirmation.`);
+        return res.status(200).json({ success: true, message: 'Subscription confirmed.' });
+      } else {
+        console.warn(`Backend: /confirm-subscription - User not found for Stripe session ${sessionId}.`);
+        return res.status(404).json({ error: 'User not found for this session.' });
+      }
+    } else {
+      console.warn(`Backend: /confirm-subscription - Session ${sessionId} is not a valid paid subscription session.`);
+      return res.status(400).json({ error: 'Invalid or unpaid subscription session.' });
+    }
+
+  } catch (error) {
+    console.error('Backend: Error confirming subscription session:', error);
+    res.status(500).json({ error: 'Failed to confirm subscription session.', details: error.message });
+  }
+});
+
 
 module.exports = router;
