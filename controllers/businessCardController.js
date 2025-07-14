@@ -15,6 +15,7 @@ const s3 = new S3Client({
 });
 
 const uploadToS3Util = require('../utils/uploadToS3');
+const QRCode = require('qrcode'); // Ensure this is imported if you're generating QR codes here
 
 const createOrUpdateBusinessCard = async (req, res) => {
   console.log("Backend: createOrUpdateBusinessCard function triggered.");
@@ -83,14 +84,14 @@ const createOrUpdateBusinessCard = async (req, res) => {
       console.log("Backend: New cover photo file detected.");
       const file = req.files.cover_photo[0];
       const ext = path.extname(file.originalname);
-      const key = `cover_photos/${userId}/${uuidv4()}${ext}`;
+      const key = `card_cover_photos/${userId}/${uuidv4()}${ext}`; // Use specific folder for card images
       coverPhotoUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
       console.log("Backend: New cover photo uploaded:", coverPhotoUrl);
     } else if (cover_photo_removed === 'true' || cover_photo_removed === true) {
       console.log("Backend: Cover photo explicitly marked for removal.");
-      coverPhotoUrl = null; 
+      coverPhotoUrl = null;
     } else {
-      coverPhotoUrl = existingCard?.cover_photo || req.body.coverPhoto || null; 
+      coverPhotoUrl = existingCard?.cover_photo || null; // Only keep if it was an existing saved URL
       console.log("Backend: Retaining cover photo. Current URL:", coverPhotoUrl);
     }
 
@@ -98,14 +99,14 @@ const createOrUpdateBusinessCard = async (req, res) => {
       console.log("Backend: New avatar file detected.");
       const file = req.files.avatar[0];
       const ext = path.extname(file.originalname);
-      const key = `avatars/${userId}/${uuidv4()}${ext}`;
+      const key = `card_avatars/${userId}/${uuidv4()}${ext}`; // Use specific folder for card images
       avatarUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
       console.log("Backend: New avatar uploaded:", avatarUrl);
     } else if (avatar_removed === 'true' || avatar_removed === true) {
       console.log("Backend: Avatar explicitly marked for removal.");
-      avatarUrl = null; 
+      avatarUrl = null;
     } else {
-      avatarUrl = existingCard?.avatar || req.body.avatar || null; 
+      avatarUrl = existingCard?.avatar || null; // Only keep if it was an existing saved URL
       console.log("Backend: Retaining avatar. Current URL:", avatarUrl);
     }
 
@@ -115,7 +116,7 @@ const createOrUpdateBusinessCard = async (req, res) => {
       console.log("Backend: New work image files detected.");
       for (const file of req.files.works) {
         const ext = path.extname(file.originalname);
-        const key = `work_images/${userId}/${uuidv4()}${ext}`;
+        const key = `card_work_images/${userId}/${uuidv4()}${ext}`; // Use specific folder for card images
         const imageUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
         newWorkImageUrls.push(imageUrl);
       }
@@ -126,29 +127,30 @@ const createOrUpdateBusinessCard = async (req, res) => {
     console.log("Backend: Final works array before DB update:", finalWorks);
 
 
-    const updateData = {
+    // ONLY UPDATE BUSINESS CARD FIELDS HERE
+    const updateBusinessCardData = {
       business_card_name,
       page_theme,
       style,
       main_heading,
       sub_heading,
-      full_name,
-      bio,
-      job_title,
+      full_name, // This is the BusinessCard's full_name
+      bio, // This is the BusinessCard's bio
+      job_title, // This is the BusinessCard's job_title
       works: finalWorks,
       services: parsedServices,
       reviews: parsedReviews,
       cover_photo: coverPhotoUrl,
-      avatar: avatarUrl,
+      avatar: avatarUrl, // This is the BusinessCard's avatar
       contact_email,
       phone_number,
     };
 
-    console.log("Backend: Data to be sent to MongoDB (updateData object):", updateData);
+    console.log("Backend: Data to be sent to MongoDB (updateBusinessCardData object):", updateBusinessCardData);
 
     const card = await BusinessCard.findOneAndUpdate(
       { user: userId },
-      updateData,
+      updateBusinessCardData, // Use the specific business card data
       { new: true, upsert: true, runValidators: true }
     ).lean();
 
@@ -159,36 +161,30 @@ const createOrUpdateBusinessCard = async (req, res) => {
       return res.status(500).json({ error: 'Failed to find or update business card in DB' });
     }
 
-    const currentUser = await User.findById(userId);
-    if (!currentUser) {
-      console.error("Backend: User not found when trying to update user model after business card save.");
-      return res.status(500).json({ error: 'User not found during profile update' });
-    }
+    // --- CRITICAL FIX START ---
+    // Remove the entire block that updates the User model with BusinessCard fields.
+    // The User model's name, bio, job_title, and avatar should ONLY be updated
+    // via the /update-profile route or registration, NOT from BusinessCard saves.
 
-    const userUpdate = {
-      name: full_name,
-      bio: bio,
-      job_title: job_title,
-      avatar: avatarUrl,
-      qrCode: currentUser.qrCode,
-      slug: currentUser.slug,
-      profileUrl: currentUser.profileUrl
-    };
-
-    if (!currentUser.slug && full_name) {
-      const generatedSlug = full_name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-*|-*$/g, '');
-      userUpdate.slug = generatedSlug;
-      userUpdate.profileUrl = `${process.env.CLIENT_URL}/u/${generatedSlug}`;
-      console.log("Backend: Generated slug and profileUrl for user:", { slug: generatedSlug, profileUrl: userUpdate.profileUrl });
-    }
-
-    await User.findByIdAndUpdate(userId, userUpdate, { new: true });
-    console.log("Backend: User model updated with:", userUpdate);
+    // If User.qrCode, User.slug, User.profileUrl are only generated once and tied to username (from registerUser),
+    // then this whole block is unnecessary here. If they can be updated based on business card name changes,
+    // this logic would need to be very carefully isolated.
+    // Based on your User schema, qrCode, slug, profileUrl are on User.
+    // Your registerUser sets these based on username. Let's assume they are only set once.
+    // If you need the public profile URL to change based on BusinessCard.full_name,
+    // then the slug generation logic needs to be in a separate, dedicated endpoint
+    // that updates the user and generates a new QR code.
+    // For now, removing the problematic overwrite.
+    // The current User.qrCode, User.slug, User.profileUrl should be populated from the User object
+    // directly in the getBusinessCardByUserId.
+    // --- CRITICAL FIX END ---
 
     const userDetails = await User.findById(userId).select('username qrCode profileUrl').lean();
 
+    // Construct responseCard which includes business card data AND relevant user data for client-side
     const responseCard = {
-      ...card,
+      ...card, // The updated business card fields
+      // Directly use the fetched userDetails for username, qrCodeUrl, publicProfileUrl
       qrCodeUrl: userDetails?.qrCode || '',
       username: userDetails?.username || '',
       publicProfileUrl: userDetails?.profileUrl || ''
@@ -216,6 +212,8 @@ const getBusinessCardByUserId = async (req, res) => {
     const card = await BusinessCard.findOne({ user: userId })
       .populate({
         path: 'user',
+        // Select only the user fields relevant to the BUSINESS CARD's public display
+        // and explicitly NOT the user.name (registered name) if it's meant to be separate.
         select: 'qrCode username profileUrl',
       })
       .lean();
