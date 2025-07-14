@@ -45,6 +45,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// !!! CRITICAL FIX: Place Stripe webhook route *before* any general body parsing middleware.
+// This ensures that the raw body for Stripe webhooks is available before express.json() parses it.
+console.log("Backend: Stripe routes are attempting to be mounted NOW! Version 20250714-FIX"); // Updated version for debugging
+app.use('/api/stripe', stripeWebhookRoutes); // Moved this line up!
+
+// Now, apply general body-parsing middleware for ALL OTHER routes.
+// This should come *after* the specific Stripe raw body parser.
+app.use(express.json()); // This is likely what's parsing your Stripe webhooks prematurely
+app.use(express.urlencoded({ extended: true })); // And this one too
+
 // Define where your routes should be used by the Express application
 // These lines tell your server which parts of your code handle which web addresses (paths)
 
@@ -52,7 +62,6 @@ app.use((req, res, next) => {
 app.use('/api/business-card', businessCardRoutes);
 
 // Routes for authentication, user profiles, login, register, etc. (e.g., /login, /profile)
-// Note: authRoutes has its own body parsing middleware defined inside it.
 app.use('/', authRoutes);
 
 // Routes for general checkout (if separate from subscriptions, e.g., one-time purchases)
@@ -60,12 +69,6 @@ app.use('/api/checkout', checkoutRoutes);
 
 // Routes for contact form submissions
 app.use('/api/contact', contactRoutes);
-
-// !!! CRITICAL FIX: This line tells Express to use your Stripe routes.
-// Requests to /api/stripe/webhook and /api/stripe/confirm-subscription
-// will now be correctly handled by the stripeWebhookRoutes.
-console.log("Backend: Stripe routes are attempting to be mounted NOW! Version 20250710-v3"); // Unique identifier for debugging
-app.use('/api/stripe', stripeWebhookRoutes);
 
 // Start the server
 const port = process.env.PORT || 8080;
