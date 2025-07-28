@@ -70,7 +70,7 @@ const registerUser = async (req, res) => {
 
         res.json({ success: true, message: 'Verification email sent' });
     } catch (err) {
-        console.error("Backend Register Error:", err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Registration failed. Try again.' });
     }
 };
@@ -99,7 +99,7 @@ const verifyEmailCode = async (req, res) => {
         res.status(200).json({ success: true, message: 'Email verified successfully', data: userToSend });
 
     } catch (err) {
-        console.log(err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Verification failed' });
     }
 };
@@ -125,7 +125,7 @@ const resendVerificationCode = async (req, res) => {
 
         res.json({ success: true, message: 'Verification code resent' });
     } catch (err) {
-        console.log(err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Could not resend code' });
     }
 };
@@ -171,7 +171,7 @@ const loginUser = async (req, res) => {
         res.status(200).json({ user: userToSend, token });
 
     } catch (error) {
-        console.error("Backend Login Error:", error);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Login failed' });
     }
 };
@@ -182,35 +182,19 @@ const forgotPassword = async (req, res) => {
         const { email } = req.body;
         const user = await User.findOne({ email });
         if (!user) {
-            console.log(`[FORGOT PASSWORD DEBUG] User not found for email: ${email}`);
             return res.json({ error: 'User not found' });
         }
-
-        console.log(`[FORGOT PASSWORD DEBUG] User found: ${user.email}`);
-        console.log(`[FORGOT PASSWORD DEBUG] User current resetToken (before update): ${user.resetToken}`);
-        console.log(`[FORGOT PASSWORD DEBUG] User current resetTokenExpires (before update): ${user.resetTokenExpires}`);
 
         const token = crypto.randomBytes(32).toString('hex');
         user.resetToken = token;
         user.resetTokenExpires = Date.now() + 60 * 60 * 1000; // Token expires in 1 hour
 
-        console.log(`[FORGOT PASSWORD DEBUG] New resetToken set: ${user.resetToken}`);
-        console.log(`[FORGOT PASSWORD DEBUG] New resetTokenExpires set: ${new Date(user.resetTokenExpires).toISOString()} (Timestamp: ${user.resetTokenExpires})`);
-
         try {
             await user.save();
-            console.log(`[FORGOT PASSWORD DEBUG] User saved successfully. User's _id: ${user._id}`);
         } catch (saveErr) {
-            console.error(`[FORGOT PASSWORD ERROR] Error saving user after setting reset token:`, saveErr);
-            // Check if it's a validation error
-            if (saveErr.name === 'ValidationError') {
-                for (let field in saveErr.errors) {
-                    console.error(`[FORGOT PASSWORD ERROR] Validation Error for ${field}: ${saveErr.errors[field].message}`);
-                }
-            }
+            // Keep actual error logging for unexpected issues during save
             return res.status(500).json({ error: 'Failed to update user with reset token.' });
         }
-
 
         const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
         const html = passwordResetTemplate(user.name, resetLink);
@@ -218,7 +202,7 @@ const forgotPassword = async (req, res) => {
 
         res.json({ success: true, message: 'Password reset email sent' });
     } catch (err) {
-        console.error(`[FORGOT PASSWORD ERROR] General error in forgotPassword:`, err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Could not send password reset email' });
     }
 };
@@ -229,31 +213,14 @@ const resetPassword = async (req, res) => {
         const { token } = req.params; // Token from URL parameters
         const { password } = req.body; // New password from request body
 
-        console.log(`[RESET PASSWORD DEBUG] Received token from URL: ${token}`);
-        console.log(`[RESET PASSWORD DEBUG] Received new password (length): ${password ? password.length : 'N/A'}`);
-        console.log(`[RESET PASSWORD DEBUG] Current server Date.now(): ${Date.now()}`);
-
         const user = await User.findOne({
             resetToken: token,
             resetTokenExpires: { $gt: Date.now() }, // Check if token is not expired
         });
 
         if (!user) {
-            // If user is not found, let's try to find them by token alone to see if it's an expiry issue
-            const userWithToken = await User.findOne({ resetToken: token });
-            if (userWithToken) {
-                console.log(`[RESET PASSWORD DEBUG] User found by token, but token is expired.`);
-                console.log(`[RESET PASSWORD DEBUG] User's stored resetTokenExpires: ${userWithToken.resetTokenExpires}`);
-                console.log(`[RESET PASSWORD DEBUG] Time difference (ms): ${Date.now() - userWithToken.resetTokenExpires}`);
-            } else {
-                console.log(`[RESET PASSWORD DEBUG] No user found with the provided token at all.`);
-            }
             return res.json({ error: 'Invalid or expired token' });
         }
-
-        console.log(`[RESET PASSWORD DEBUG] User found for reset: ${user.email}`);
-        console.log(`[RESET PASSWORD DEBUG] User's stored resetToken: ${user.resetToken}`);
-        console.log(`[RESET PASSWORD DEBUG] User's stored resetTokenExpires: ${user.resetTokenExpires}`);
 
         const hashed = await hashPassword(password);
         user.password = hashed;
@@ -263,7 +230,7 @@ const resetPassword = async (req, res) => {
 
         res.json({ success: true, message: 'Password updated successfully' });
     } catch (err) {
-        console.error(`[RESET PASSWORD ERROR]`, err); // Log the full error
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Password reset failed' });
     }
 };
@@ -271,7 +238,6 @@ const resetPassword = async (req, res) => {
 // PROFILE
 const getProfile = async (req, res) => {
     if (!req.user || !req.user.id) {
-        console.warn("Backend /profile: No req.user.id found from token.");
         return res.status(401).json({ error: 'Unauthorized: User ID not found in token.' });
     }
 
@@ -279,7 +245,6 @@ const getProfile = async (req, res) => {
         const user = await User.findById(req.user.id).select('-password').lean();
 
         if (!user) {
-            console.warn(`Backend /profile: User with ID ${req.user.id} not found in DB.`);
             return res.status(404).json({ error: 'User not found.' });
         }
 
@@ -290,7 +255,7 @@ const getProfile = async (req, res) => {
         res.status(200).json({ data: user });
 
     } catch (err) {
-        console.error("Backend /profile error:", err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to fetch user profile.' });
     }
 };
@@ -326,7 +291,7 @@ const updateProfile = async (req, res) => {
         res.status(200).json({ success: true, data: updatedUser });
 
     } catch (err) {
-        console.error('Backend: Error updating profile:', err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to update profile', details: err.message });
     }
 };
@@ -341,7 +306,7 @@ const deleteAccount = async (req, res) => {
         await User.findByIdAndDelete(req.user.id);
         res.status(200).json({ success: true, message: 'Account deleted successfully' });
     } catch (err) {
-        console.error(err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to delete account' });
     }
 };
@@ -373,7 +338,6 @@ const subscribeUser = async (req, res) => {
             customerId = customer.id;
             user.stripeCustomerId = customerId;
             await user.save();
-            console.log(`Backend: Created new Stripe customer: ${customerId} for user ${user._id}`);
         }
 
         const session = await stripe.checkout.sessions.create({
@@ -395,7 +359,7 @@ const subscribeUser = async (req, res) => {
 
         res.status(200).json({ url: session.url });
     } catch (err) {
-        console.error('Backend: Subscription error:', err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to start subscription', details: err.message });
     }
 };
@@ -414,7 +378,8 @@ const cancelSubscription = async (req, res) => {
             return res.status(400).json({ error: 'No active subscription found for this user.' });
         }
 
-        const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
+        // We don't need to retrieve the subscription before updating it for cancellation
+        // const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
 
         await stripe.subscriptions.update(user.stripeSubscriptionId, {
             cancel_at_period_end: true,
@@ -422,7 +387,7 @@ const cancelSubscription = async (req, res) => {
 
         res.status(200).json({ success: true, message: 'Subscription will cancel at the end of the current billing period.' });
     } catch (err) {
-        console.error('Backend: Error canceling subscription:', err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to cancel subscription', details: err.message });
     }
 };
@@ -430,26 +395,20 @@ const cancelSubscription = async (req, res) => {
 // STRIPE: Check Subscription Status
 const checkSubscriptionStatus = async (req, res) => {
     if (!req.user || !req.user.id) {
-        console.log("Backend: /subscription-status - No user authenticated. Returning active: false.");
         return res.status(200).json({ active: false, status: 'unauthenticated' });
     }
 
     try {
         const user = await User.findById(req.user.id);
         if (!user) {
-            console.log(`Backend: /subscription-status - User ${req.user.id} not found in DB. Returning active: false.`);
             return res.status(200).json({ active: false, status: 'user_not_found' });
         }
 
-        console.log(`Backend: /subscription-status - User ${user._id} DB status: isSubscribed=${user.isSubscribed}, stripeCustomerId=${user.stripeCustomerId}, stripeSubscriptionId=${user.stripeSubscriptionId}`);
-
         if (!user.stripeCustomerId || !user.stripeSubscriptionId) {
-            console.log(`Backend: /subscription-status - No Stripe customer/subscription ID found for user ${user._id}. Returning active: false.`);
             return res.status(200).json({ active: false, status: 'no_stripe_data' });
         }
 
         const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
-        console.log(`Backend: /subscription-status - Stripe subscription status for ${user.stripeSubscriptionId}: ${subscription.status}`);
 
         let isActive = false;
         if (['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status)) {
@@ -459,7 +418,6 @@ const checkSubscriptionStatus = async (req, res) => {
         if (user.isSubscribed !== isActive) {
             user.isSubscribed = isActive;
             await user.save();
-            console.log(`Backend: /subscription-status - Updated user ${user._id} isSubscribed status in DB to ${isActive}.`);
         }
 
         const responseData = {
@@ -467,13 +425,11 @@ const checkSubscriptionStatus = async (req, res) => {
             status: subscription.status,
             current_period_end: subscription.current_period_end
         };
-        console.log("Backend: /subscription-status - Sending response:", responseData);
         return res.status(200).json(responseData);
 
     } catch (err) {
-        console.error('Backend: Error checking subscription status:', err);
+        // Handle Stripe specific errors for missing resources gracefully
         if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
-            console.warn(`Backend: /subscription-status - Stripe subscription resource missing for user ${req.user.id}. Marking as not subscribed.`);
             const user = await User.findById(req.user.id);
             if (user) {
                 user.isSubscribed = false;
@@ -483,6 +439,7 @@ const checkSubscriptionStatus = async (req, res) => {
             }
             return res.status(200).json({ active: false, status: 'subscription_missing_in_stripe' });
         }
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ active: false, status: 'error_checking_stripe', details: err.message });
     }
 };
@@ -501,13 +458,13 @@ const submitContactForm = async (req, res) => {
     <p><strong>Email:</strong> ${email}</p>
     <p><strong>Reason:</strong> ${reason}</p>
     <p><strong>Message:</strong><br/>${message}</p>
- `;
+`;
 
     try {
         await sendEmail({ email: 'supportteam@konarcard.com', subject: `Contact Form: ${reason}`, message: html });
         res.status(200).json({ success: true, message: 'Message sent successfully' });
     } catch (err) {
-        console.error('Error sending contact form email:', err);
+        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to send message' });
     }
 };

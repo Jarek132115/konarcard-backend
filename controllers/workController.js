@@ -2,18 +2,10 @@ const Work = require('../models/Work');
 const multer = require('multer');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-// REMOVED: const dotenv = require('dotenv').config(); // Should be handled in index.js
-// REMOVED: const { PutObjectCommand, S3Client } = require("@aws-sdk/client-s3"); // Centralized in utils/uploadToS3
-// REMOVED: const BUCKET_NAME = process.env.BUCKET_NAME; // Centralized
-// REMOVED: const BUCKET_REGION = process.env.BUCKET_REGION; // Centralized
-// REMOVED: const ACCESS_KEY = process.env.ACCESS_KEY; // Centralized
-// REMOVED: const SECRET_ACCESS_KEY = process.env.SECRET_ACCESS_KEY; // Centralized
-// REMOVED: const s3 = new S3Client(...); // Centralized in utils/uploadToS3
-
-const uploadToS3 = require('../utils/uploadToS3'); // Import the centralized S3 upload utility
+const uploadToS3 = require('../utils/uploadToS3'); 
 
 const storage = multer.memoryStorage();
-const uploadMiddleware = multer({ storage: storage }); // Renamed 'upload' to 'uploadMiddleware' to avoid confusion
+const uploadMiddleware = multer({ storage: storage }); 
 
 exports.createWork = async (req, res) => {
   try {

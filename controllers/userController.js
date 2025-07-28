@@ -2,12 +2,12 @@ const { hashPassword, comparePassword } = require('../helpers/auth');
 const User = require('../models/user');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
-const sendEmail = require('../utils/SendEmail'); 
+const sendEmail = require('../utils/SendEmail');
 const { verificationEmailTemplate, passwordResetTemplate } = require('../utils/emailTemplates');
 const crypto = require('crypto');
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-const uploadToS3 = require('../utils/uploadToS3'); 
+const uploadToS3 = require('../utils/uploadToS3');
 
 // TEST
 const test = (req, res) => {
@@ -67,7 +67,7 @@ const registerUser = async (req, res) => {
 
     res.json({ success: true, message: 'Verification email sent' });
   } catch (err) {
-    console.error(err);
+    console.error(err); // Keep error logging for production
     res.status(500).json({ error: 'Registration failed. Try again.' });
   }
 };
@@ -90,7 +90,7 @@ const verifyEmailCode = async (req, res) => {
 
     res.json({ success: true, message: 'Email verified successfully', user });
   } catch (err) {
-    console.log(err);
+    console.error(err); // Changed to console.error
     res.status(500).json({ error: 'Verification failed' });
   }
 };
@@ -116,7 +116,7 @@ const resendVerificationCode = async (req, res) => {
 
     res.json({ success: true, message: 'Verification code resent' });
   } catch (err) {
-    console.log(err);
+    console.error(err); // Changed to console.error
     res.status(500).json({ error: 'Could not resend code' });
   }
 };
@@ -155,7 +155,7 @@ const loginUser = async (req, res) => {
     );
     res.json({ user, token });
   } catch (error) {
-    console.log(error);
+    console.error(error); // Changed to console.error
     res.status(500).json({ error: 'Login failed' });
   }
 };
@@ -178,7 +178,7 @@ const forgotPassword = async (req, res) => {
 
     res.json({ success: true, message: 'Password reset email sent' });
   } catch (err) {
-    console.log(err);
+    console.error(err); // Changed to console.error
     res.status(500).json({ error: 'Could not send password reset email' });
   }
 };
@@ -204,7 +204,7 @@ const resetPassword = async (req, res) => {
 
     res.json({ success: true, message: 'Password updated successfully' });
   } catch (err) {
-    console.log(err);
+    console.error(err); // Changed to console.error
     res.status(500).json({ error: 'Password reset failed' });
   }
 };
@@ -212,7 +212,7 @@ const resetPassword = async (req, res) => {
 // PROFILE
 const getProfile = async (req, res) => {
   if (!req.user || !req.user.id) {
-    console.warn("Backend /profile: No req.user.id found from token.");
+    console.warn("Backend /profile: No req.user.id found from token."); // Keep as console.warn
     return res.json(null);
   }
 
@@ -220,7 +220,7 @@ const getProfile = async (req, res) => {
     const user = await User.findById(req.user.id).select('-password');
 
     if (!user) {
-      console.warn(`Backend /profile: User with ID ${req.user.id} not found in DB.`);
+      console.warn(`Backend /profile: User with ID ${req.user.id} not found in DB.`); // Keep as console.warn
       return res.json(null);
     }
 
@@ -230,7 +230,7 @@ const getProfile = async (req, res) => {
     res.status(200).json(userObject);
 
   } catch (err) {
-    console.error("Backend /profile error:", err);
+    console.error("Backend /profile error:", err); // Keep as console.error
     res.status(500).json({ error: 'Failed to fetch user profile.' });
   }
 };
@@ -252,7 +252,7 @@ const updateProfile = async (req, res) => {
 
     res.json({ success: true, user: updatedUser });
   } catch (err) {
-    console.error(err);
+    console.error(err); // Keep as console.error
     res.status(500).json({ error: 'Failed to update profile' });
   }
 };
@@ -267,7 +267,7 @@ const deleteAccount = async (req, res) => {
     await User.findByIdAndDelete(req.user.id);
     res.json({ success: true, message: 'Account deleted successfully' });
   } catch (err) {
-    console.error(err);
+    console.error(err); // Keep as console.error
     res.status(500).json({ error: 'Failed to delete account' });
   }
 };
@@ -287,6 +287,25 @@ const subscribeUser = async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
+    // Assuming you handle customer creation/retrieval elsewhere if user.stripeCustomerId is null
+    // or that it's handled implicitly by Stripe Checkout based on email.
+    // For robust production, ensure customerId is properly managed here or passed from a dedicated customer management flow.
+    let customerId;
+    if (user.stripeCustomerId) {
+      customerId = user.stripeCustomerId;
+    } else {
+      // Create new Stripe customer if not exists
+      const customer = await stripe.customers.create({
+        email: user.email,
+        name: user.name,
+        metadata: { userId: user._id.toString() },
+      });
+      customerId = customer.id;
+      user.stripeCustomerId = customerId;
+      await user.save();
+    }
+
+
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'subscription',
@@ -294,14 +313,18 @@ const subscribeUser = async (req, res) => {
         price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID,
         quantity: 1,
       }],
-      success_url: `${process.env.CLIENT_URL}/success`,
-      cancel_url: `${process.env.CLIENT_URL}/subscription`,
-      customer_email: user.email,
+      success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`, // Updated success URL for consistency
+      cancel_url: `${process.env.CLIENT_URL}/pricing`,
+      customer_email: user.email, // Explicitly pass customer email
+      customer: customerId, // Associate with customer
+      subscription_data: {
+        trial_period_days: 7, // Ensure this is correctly applied for trials
+      },
     });
 
     res.json({ url: session.url });
   } catch (err) {
-    console.error('Subscription error:', err);
+    console.error('Subscription error:', err); // Keep as console.error
     res.status(500).json({ error: 'Failed to start subscription' });
   }
 };
@@ -318,10 +341,11 @@ const cancelSubscription = async (req, res) => {
 
     if (!user.stripeCustomerId) return res.status(400).json({ error: 'No subscription found' });
 
+    // Retrieve active subscription associated with customer to get subscription ID if not stored on user
     const subscriptions = await stripe.subscriptions.list({
       customer: user.stripeCustomerId,
       status: 'active',
-      limit: 1,
+      limit: 1, // Assuming one active subscription per customer
     });
 
     if (subscriptions.data.length === 0) return res.json({ error: 'No active subscription found' });
@@ -330,9 +354,13 @@ const cancelSubscription = async (req, res) => {
       cancel_at_period_end: true,
     });
 
+    // Optionally, update user's subscription status in DB
+    user.isSubscribed = false; // Mark as false, but actual cancellation happens at period end
+    await user.save();
+
     res.json({ success: true, message: 'Subscription will cancel at period end' });
   } catch (err) {
-    console.error(err);
+    console.error(err); // Keep as console.error
     res.status(500).json({ error: 'Failed to cancel subscription' });
   }
 };
@@ -347,10 +375,34 @@ const checkSubscriptionStatus = async (req, res) => {
     const user = await User.findById(req.user.id);
     if (!user) return res.json({ active: false });
 
-    res.json({ active: user?.isSubscribed || false });
+    // This logic now correctly fetches from Stripe and updates DB if necessary
+    if (user.stripeCustomerId && user.stripeSubscriptionId) {
+      const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
+      let isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status);
+
+      if (user.isSubscribed !== isActive) {
+        user.isSubscribed = isActive;
+        await user.save();
+      }
+      return res.json({ active: isActive, status: subscription.status });
+    } else {
+      return res.json({ active: false, status: 'no_stripe_data_on_user' });
+    }
+
   } catch (err) {
-    console.error('Error checking subscription status:', err);
-    res.json({ active: false });
+    console.error('Error checking subscription status:', err); // Keep as console.error
+    // If Stripe API call fails (e.g., subscription deleted on Stripe side), fallback to false
+    // Also, consider invalidating user.stripeSubscriptionId if resource_missing error
+    if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
+      const user = await User.findById(req.user.id);
+      if (user) {
+        user.isSubscribed = false;
+        user.stripeSubscriptionId = undefined;
+        await user.save();
+      }
+      return res.json({ active: false, status: 'subscription_missing_in_stripe' });
+    }
+    res.json({ active: false, status: 'error_checking_stripe' });
   }
 };
 
@@ -375,7 +427,7 @@ const submitContactForm = async (req, res) => {
     await sendEmail({ email: 'supportteam@konarcard.com', subject: `Contact Form: ${reason}`, message: html });
     res.json({ success: true, message: 'Message sent successfully' });
   } catch (err) {
-    console.error('Error sending contact form email:', err);
+    console.error('Error sending contact form email:', err); // Keep as console.error
     res.status(500).json({ error: 'Failed to send message' });
   }
 };
