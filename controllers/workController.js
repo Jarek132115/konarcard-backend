@@ -20,12 +20,11 @@ exports.createWork = async (req, res) => {
 exports.createMultipleWorksWithImages = async (req, res) => {
   try {
     const { user } = req.body;
-    // ensure work_name is an array
     const work_names = Array.isArray(req.body.work_name)
       ? req.body.work_name
       : [req.body.work_name];
 
-    const files = req.files; // Multer should put files here
+    const files = req.files; 
 
     if (!user || !work_names.length || files.length !== work_names.length) {
       return res.status(400).json({ error: 'Mismatch between work_name and work_images or missing data' });
@@ -33,15 +32,14 @@ exports.createMultipleWorksWithImages = async (req, res) => {
 
     const uploadPromises = files.map(async (file, idx) => {
       const ext = path.extname(file.originalname);
-      const key = `works/${user}/${uuidv4()}${ext}`; // Suggest adding user ID to key for organization
+      const key = `works/${user}/${uuidv4()}${ext}`; 
 
-      // Use the CENTRALIZED uploadToS3 utility
       const imageUrl = await uploadToS3(
         file.buffer,
         key,
-        process.env.AWS_CARD_BUCKET_NAME, // Use specific bucket name for card images
-        process.env.AWS_CARD_BUCKET_REGION, // Use specific region for card images
-        file.mimetype // Pass content type
+        process.env.AWS_CARD_BUCKET_NAME, 
+        process.env.AWS_CARD_BUCKET_REGION, 
+        file.mimetype 
       );
 
       return {
@@ -56,7 +54,7 @@ exports.createMultipleWorksWithImages = async (req, res) => {
 
     res.status(201).json({ message: 'Works created successfully', data: createdWorks });
   } catch (err) {
-    console.error('Error in createMultipleWorksWithImages:', err); // Specific log
+    console.error('Error in createMultipleWorksWithImages:', err); 
     res.status(500).json({ error: 'Failed to upload works' });
   }
 };
@@ -81,16 +79,15 @@ exports.getWorkById = async (req, res) => {
   }
 };
 
-// READ ALL WORKS BY USER ID (renamed from getServiceByUserId for clarity)
 exports.getWorkByUserId = async (req, res) => {
   try {
-    const works = await Work.find({ user: req.params.userid }).populate('user'); // Changed from services to works
+    const works = await Work.find({ user: req.params.userid }).populate('user')
     if (!works || works.length === 0)
       return res.status(404).json({ message: "No Works found for this user" });
 
     res.json(works);
   } catch (err) {
-    console.error('Error in getWorkByUserId:', err); // Specific log
+    console.error('Error in getWorkByUserId:', err); 
     res.status(500).json({ error: err.message });
   }
 };

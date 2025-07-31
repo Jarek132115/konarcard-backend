@@ -1,4 +1,3 @@
-// backend/routes/stripe.js
 const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
@@ -11,63 +10,52 @@ const {
 } = require('../utils/emailTemplates');
 const User = require('../models/user');
 
-// IMPORTANT: This raw body parser is only for webhooks.
-// Other routes will need express.json() or express.urlencoded()
 router.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
 
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-    // ADDED LOG: Detailed event info
     console.log(`Backend: Webhook event constructed successfully. Type: ${event.type} ID: ${event.id} Livemode: ${event.livemode}`);
   } catch (err) {
     console.error('⚠️ Stripe webhook signature error:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  // Handle the event
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object;
-      // ADDED LOG: Session details
       console.log(`Backend: Webhook Event - checkout.session.completed for session ${session.id}. Customer: ${session.customer}. Subscription: ${session.subscription}. Mode: ${session.mode}`);
 
-      try { // ADDED TRY-CATCH BLOCK FOR INTERNAL PROCESSING
+      try { 
         const fullSession = await stripe.checkout.sessions.retrieve(session.id, {
           expand: ['line_items', 'customer'],
         });
         const customerEmail = fullSession.customer_details?.email || fullSession.customer?.email;
         const amountTotal = (fullSession.amount_total / 100).toFixed(2);
 
-        // ADDED LOG: More session details
         console.log(`Backend: checkout.session.completed - Retrieved full session. Customer Email: ${customerEmail}. Amount: ${amountTotal}.`);
 
-        // Find user by customer ID or email
         let user = null;
         if (fullSession.customer && fullSession.customer.id) {
           user = await User.findOne({ stripeCustomerId: fullSession.customer.id });
-          // ADDED LOG: User find attempt 1
           console.log(`Backend: checkout.session.completed - Attempted to find user by stripeCustomerId: ${fullSession.customer.id}. User found (by customerId): ${!!user}`);
           if (!user && customerEmail) {
             user = await User.findOne({ email: customerEmail });
-            // ADDED LOG: User find attempt 2
             console.log(`Backend: checkout.session.completed - User not found by customer ID, attempting by email: ${customerEmail}. User found (by email): ${!!user}`);
             if (user) {
               user.stripeCustomerId = fullSession.customer.id;
-              await user.save(); // IMPORTANT SAVE AFTER ADDING CUSTOMER ID
+              await user.save(); 
               console.log(`Backend: checkout.session.completed - User found by email, updated with stripeCustomerId: ${fullSession.customer.id} and saved.`);
             }
           }
         } else if (customerEmail) {
           user = await User.findOne({ email: customerEmail });
-          // ADDED LOG: User find attempt (only email)
           console.log(`Backend: checkout.session.completed - Only customer email available: ${customerEmail}. User found (by email only): ${!!user}`);
         }
 
         if (!user) {
           console.warn(`Backend: checkout.session.completed - No user found in DB for Stripe customer ID ${fullSession.customer?.id} or email ${customerEmail}. Cannot update subscription status.`);
-          // Even if user not found, return 200 OK to Stripe to avoid retries
           return res.status(200).send('User not found for webhook event.');
         }
 
@@ -75,16 +63,14 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
           console.log("Backend: Processing subscription checkout completion.");
           const subscriptionId = fullSession.subscription;
 
-          // Ensure user is found before attempting to update (redundant check, but harmless)
           if (user) {
             user.isSubscribed = true;
             user.stripeSubscriptionId = subscriptionId;
-            try { // ADDED TRY-CATCH FOR USER.SAVE
-              await user.save(); // <-- THIS IS THE CRUCIAL SAVE OPERATION
+            try {
+              await user.save(); 
               console.log(`Backend: User ${user._id} marked as subscribed via checkout.session.completed. isSubscribed: ${user.isSubscribed}, stripeSubscriptionId: ${user.stripeSubscriptionId}`);
             } catch (saveErr) {
               console.error(`Backend: ERROR saving user after checkout.session.completed:`, saveErr);
-              // Log the error but still return 200 OK to Stripe
               return res.status(200).send('Internal user save error for webhook event.');
             }
           }
@@ -102,9 +88,9 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
             }
           }
         }
-      } catch (internalErr) { // CATCH FOR THE MAIN TRY-CATCH BLOCK
+      } catch (internalErr) { 
         console.error(`Backend: Major ERROR processing checkout.session.completed webhook internally:`, internalErr);
-        return res.status(200).send('Major internal webhook error processed.'); // Still 200 to Stripe
+        return res.status(200).send('Major internal webhook error processed.'); 
       }
       break;
     }
@@ -114,13 +100,13 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.log(`Backend: Webhook Event - customer.subscription.created for subscription ${subscription.id}. Customer ID: ${subscription.customer}`);
       const customerId = subscription.customer;
 
-      try { // ADDED TRY-CATCH FOR INTERNAL PROCESSING
+      try { 
         const user = await User.findOne({ stripeCustomerId: customerId });
         console.log(`Backend: customer.subscription.created - User found by stripeCustomerId: ${!!user}`);
         if (user) {
           user.isSubscribed = true;
           user.stripeSubscriptionId = subscription.id;
-          try { // ADDED TRY-CATCH FOR USER.SAVE
+          try { 
             await user.save();
             console.log(`Backend: User ${user._id} status updated to subscribed (created event). isSubscribed: ${user.isSubscribed}, stripeSubscriptionId: ${user.stripeSubscriptionId}`);
           } catch (saveErr) {
@@ -155,15 +141,15 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.log(`Backend: Webhook Event - customer.subscription.updated for subscription ${subscription.id} to status ${subscription.status}`);
       const customerId = subscription.customer;
 
-      try { // ADDED TRY-CATCH FOR INTERNAL PROCESSING
+      try { 
         const user = await User.findOne({ stripeCustomerId: customerId });
         console.log(`Backend: customer.subscription.updated - User found by stripeCustomerId: ${!!user}`);
         if (user) {
           const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status);
-          if (user.isSubscribed !== isActive) { // Only save if status changed
+          if (user.isSubscribed !== isActive) {
             user.isSubscribed = isActive;
-            user.stripeSubscriptionId = subscription.id; // Ensure ID is updated
-            try { // ADDED TRY-CATCH FOR USER.SAVE
+            user.stripeSubscriptionId = subscription.id; 
+            try { 
               await user.save();
               console.log(`Backend: User ${user._id} status updated to isSubscribed: ${isActive} (updated event).`);
             } catch (saveErr) {
@@ -188,13 +174,13 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.log(`Backend: Webhook Event - customer.subscription.deleted for subscription ${subscription.id}`);
       const customerId = subscription.customer;
 
-      try { // ADDED TRY-CATCH FOR INTERNAL PROCESSING
+      try { 
         const user = await User.findOne({ stripeCustomerId: customerId });
         console.log(`Backend: customer.subscription.deleted - User found by stripeCustomerId: ${!!user}`);
         if (user) {
           user.isSubscribed = false;
           user.stripeSubscriptionId = undefined;
-          try { // ADDED TRY-CATCH FOR USER.SAVE
+          try { 
             await user.save();
             console.log(`Backend: User ${user._id} status updated to isSubscribed: false (deleted event).`);
           } catch (saveErr) {
@@ -237,11 +223,10 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       console.log(`Backend: Unhandled event type ${event.type}`);
   }
 
-  res.status(200).send('OK'); // Always send 200 OK to Stripe to prevent retries
+  res.status(200).send('OK'); 
   console.log("Backend: Webhook processing finished, sending 200 OK.");
 });
 
-// NEW: Endpoint for frontend to confirm subscription session
 router.post('/confirm-subscription', async (req, res) => {
   const { sessionId } = req.body;
 
@@ -264,21 +249,19 @@ router.post('/confirm-subscription', async (req, res) => {
         console.log(`Backend: /confirm-subscription - User not found by customer ID, attempting by email: ${session.customer_details.email}. User found: ${!!user}`);
         if (user) {
           user.stripeCustomerId = session.customer;
-          try { // ADDED TRY-CATCH FOR USER.SAVE
+          try { 
             await user.save();
             console.log(`Backend: /confirm-subscription - User found by email, updated with stripeCustomerId and saved.`);
           } catch (saveErr) {
             console.error(`Backend: /confirm-subscription - ERROR saving user with customerId after finding by email:`, saveErr);
-            // Don't fail the request just for this, but log it.
           }
         }
       }
 
       if (user) {
-        // Ensure the user's subscription status is updated in DB
         user.isSubscribed = true;
         user.stripeSubscriptionId = session.subscription;
-        try { // ADDED TRY-CATCH FOR USER.SAVE
+        try { 
           await user.save();
           console.log(`Backend: /confirm-subscription - User ${user._id} marked as subscribed via direct confirmation. isSubscribed: ${user.isSubscribed}, stripeSubscriptionId: ${user.stripeSubscriptionId}`);
           return res.status(200).json({ success: true, message: 'Subscription confirmed.' });

@@ -1,7 +1,5 @@
-// backend/routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
-// CORS is handled globally in index.js
 const { test, registerUser, loginUser, getProfile, logoutUser, verifyEmailCode, resendVerificationCode, forgotPassword, resetPassword, updateProfile, deleteAccount, subscribeUser, cancelSubscription, checkSubscriptionStatus, submitContactForm } = require('../controllers/authController');
 
 router.use(express.json({ limit: '50mb' }));

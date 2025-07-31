@@ -70,7 +70,6 @@ const registerUser = async (req, res) => {
 
         res.json({ success: true, message: 'Verification email sent' });
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Registration failed. Try again.' });
     }
 };
@@ -99,7 +98,6 @@ const verifyEmailCode = async (req, res) => {
         res.status(200).json({ success: true, message: 'Email verified successfully', data: userToSend });
 
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Verification failed' });
     }
 };
@@ -125,7 +123,6 @@ const resendVerificationCode = async (req, res) => {
 
         res.json({ success: true, message: 'Verification code resent' });
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Could not resend code' });
     }
 };
@@ -171,7 +168,6 @@ const loginUser = async (req, res) => {
         res.status(200).json({ user: userToSend, token });
 
     } catch (error) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Login failed' });
     }
 };
@@ -187,12 +183,11 @@ const forgotPassword = async (req, res) => {
 
         const token = crypto.randomBytes(32).toString('hex');
         user.resetToken = token;
-        user.resetTokenExpires = Date.now() + 60 * 60 * 1000; // Token expires in 1 hour
+        user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
 
         try {
             await user.save();
         } catch (saveErr) {
-            // Keep actual error logging for unexpected issues during save
             return res.status(500).json({ error: 'Failed to update user with reset token.' });
         }
 
@@ -202,7 +197,6 @@ const forgotPassword = async (req, res) => {
 
         res.json({ success: true, message: 'Password reset email sent' });
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Could not send password reset email' });
     }
 };
@@ -210,12 +204,12 @@ const forgotPassword = async (req, res) => {
 // RESET PASSWORD
 const resetPassword = async (req, res) => {
     try {
-        const { token } = req.params; // Token from URL parameters
-        const { password } = req.body; // New password from request body
+        const { token } = req.params;
+        const { password } = req.body;
 
         const user = await User.findOne({
             resetToken: token,
-            resetTokenExpires: { $gt: Date.now() }, // Check if token is not expired
+            resetTokenExpires: { $gt: Date.now() }, 
         });
 
         if (!user) {
@@ -224,13 +218,12 @@ const resetPassword = async (req, res) => {
 
         const hashed = await hashPassword(password);
         user.password = hashed;
-        user.resetToken = undefined; // Clear the token after use
-        user.resetTokenExpires = undefined; // Clear the expiry after use
+        user.resetToken = undefined;
+        user.resetTokenExpires = undefined; 
         await user.save();
 
         res.json({ success: true, message: 'Password updated successfully' });
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Password reset failed' });
     }
 };
@@ -255,7 +248,6 @@ const getProfile = async (req, res) => {
         res.status(200).json({ data: user });
 
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to fetch user profile.' });
     }
 };
@@ -291,7 +283,6 @@ const updateProfile = async (req, res) => {
         res.status(200).json({ success: true, data: updatedUser });
 
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to update profile', details: err.message });
     }
 };
@@ -306,7 +297,6 @@ const deleteAccount = async (req, res) => {
         await User.findByIdAndDelete(req.user.id);
         res.status(200).json({ success: true, message: 'Account deleted successfully' });
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to delete account' });
     }
 };
@@ -359,7 +349,6 @@ const subscribeUser = async (req, res) => {
 
         res.status(200).json({ url: session.url });
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to start subscription', details: err.message });
     }
 };
@@ -377,17 +366,12 @@ const cancelSubscription = async (req, res) => {
         if (!user.stripeCustomerId || !user.stripeSubscriptionId) {
             return res.status(400).json({ error: 'No active subscription found for this user.' });
         }
-
-        // We don't need to retrieve the subscription before updating it for cancellation
-        // const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
-
         await stripe.subscriptions.update(user.stripeSubscriptionId, {
             cancel_at_period_end: true,
         });
 
         res.status(200).json({ success: true, message: 'Subscription will cancel at the end of the current billing period.' });
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to cancel subscription', details: err.message });
     }
 };
@@ -428,7 +412,6 @@ const checkSubscriptionStatus = async (req, res) => {
         return res.status(200).json(responseData);
 
     } catch (err) {
-        // Handle Stripe specific errors for missing resources gracefully
         if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
             const user = await User.findById(req.user.id);
             if (user) {
@@ -439,7 +422,6 @@ const checkSubscriptionStatus = async (req, res) => {
             }
             return res.status(200).json({ active: false, status: 'subscription_missing_in_stripe' });
         }
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ active: false, status: 'error_checking_stripe', details: err.message });
     }
 };
@@ -464,7 +446,6 @@ const submitContactForm = async (req, res) => {
         await sendEmail({ email: 'supportteam@konarcard.com', subject: `Contact Form: ${reason}`, message: html });
         res.status(200).json({ success: true, message: 'Message sent successfully' });
     } catch (err) {
-        // Keep actual error logging for unexpected issues
         res.status(500).json({ error: 'Failed to send message' });
     }
 };

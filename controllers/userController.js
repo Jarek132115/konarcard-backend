@@ -52,7 +52,6 @@ const registerUser = async (req, res) => {
       slug,
     });
 
-    // Use the CENTRALIZED QRCode and uploadToS3 utility
     const qrBuffer = await QRCode.toBuffer(profileUrl, {
       width: 500,
       color: { dark: '#000000', light: '#ffffff' },
@@ -67,12 +66,11 @@ const registerUser = async (req, res) => {
 
     res.json({ success: true, message: 'Verification email sent' });
   } catch (err) {
-    console.error(err); // Keep error logging for production
+    console.error(err); 
     res.status(500).json({ error: 'Registration failed. Try again.' });
   }
 };
 
-// VERIFY EMAIL
 const verifyEmailCode = async (req, res) => {
   try {
     const { email, code } = req.body;
@@ -90,12 +88,11 @@ const verifyEmailCode = async (req, res) => {
 
     res.json({ success: true, message: 'Email verified successfully', user });
   } catch (err) {
-    console.error(err); // Changed to console.error
+    console.error(err); 
     res.status(500).json({ error: 'Verification failed' });
   }
 };
 
-// RESEND VERIFICATION CODE
 const resendVerificationCode = async (req, res) => {
   try {
     const { email } = req.body;
@@ -116,7 +113,7 @@ const resendVerificationCode = async (req, res) => {
 
     res.json({ success: true, message: 'Verification code resent' });
   } catch (err) {
-    console.error(err); // Changed to console.error
+    console.error(err); 
     res.status(500).json({ error: 'Could not resend code' });
   }
 };
@@ -155,7 +152,7 @@ const loginUser = async (req, res) => {
     );
     res.json({ user, token });
   } catch (error) {
-    console.error(error); // Changed to console.error
+    console.error(error); 
     res.status(500).json({ error: 'Login failed' });
   }
 };
@@ -178,7 +175,7 @@ const forgotPassword = async (req, res) => {
 
     res.json({ success: true, message: 'Password reset email sent' });
   } catch (err) {
-    console.error(err); // Changed to console.error
+    console.error(err); 
     res.status(500).json({ error: 'Could not send password reset email' });
   }
 };
@@ -204,7 +201,7 @@ const resetPassword = async (req, res) => {
 
     res.json({ success: true, message: 'Password updated successfully' });
   } catch (err) {
-    console.error(err); // Changed to console.error
+    console.error(err); 
     res.status(500).json({ error: 'Password reset failed' });
   }
 };
@@ -212,7 +209,7 @@ const resetPassword = async (req, res) => {
 // PROFILE
 const getProfile = async (req, res) => {
   if (!req.user || !req.user.id) {
-    console.warn("Backend /profile: No req.user.id found from token."); // Keep as console.warn
+    console.warn("Backend /profile: No req.user.id found from token."); 
     return res.json(null);
   }
 
@@ -220,7 +217,7 @@ const getProfile = async (req, res) => {
     const user = await User.findById(req.user.id).select('-password');
 
     if (!user) {
-      console.warn(`Backend /profile: User with ID ${req.user.id} not found in DB.`); // Keep as console.warn
+      console.warn(`Backend /profile: User with ID ${req.user.id} not found in DB.`);
       return res.json(null);
     }
 
@@ -230,7 +227,7 @@ const getProfile = async (req, res) => {
     res.status(200).json(userObject);
 
   } catch (err) {
-    console.error("Backend /profile error:", err); // Keep as console.error
+    console.error("Backend /profile error:", err); 
     res.status(500).json({ error: 'Failed to fetch user profile.' });
   }
 };
@@ -252,7 +249,7 @@ const updateProfile = async (req, res) => {
 
     res.json({ success: true, user: updatedUser });
   } catch (err) {
-    console.error(err); // Keep as console.error
+    console.error(err); 
     res.status(500).json({ error: 'Failed to update profile' });
   }
 };
@@ -267,7 +264,7 @@ const deleteAccount = async (req, res) => {
     await User.findByIdAndDelete(req.user.id);
     res.json({ success: true, message: 'Account deleted successfully' });
   } catch (err) {
-    console.error(err); // Keep as console.error
+    console.error(err); 
     res.status(500).json({ error: 'Failed to delete account' });
   }
 };
@@ -286,15 +283,10 @@ const subscribeUser = async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-
-    // Assuming you handle customer creation/retrieval elsewhere if user.stripeCustomerId is null
-    // or that it's handled implicitly by Stripe Checkout based on email.
-    // For robust production, ensure customerId is properly managed here or passed from a dedicated customer management flow.
     let customerId;
     if (user.stripeCustomerId) {
       customerId = user.stripeCustomerId;
     } else {
-      // Create new Stripe customer if not exists
       const customer = await stripe.customers.create({
         email: user.email,
         name: user.name,
@@ -313,18 +305,18 @@ const subscribeUser = async (req, res) => {
         price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID,
         quantity: 1,
       }],
-      success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`, // Updated success URL for consistency
+      success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`, 
       cancel_url: `${process.env.CLIENT_URL}/pricing`,
-      customer_email: user.email, // Explicitly pass customer email
-      customer: customerId, // Associate with customer
+      customer_email: user.email, 
+      customer: customerId, 
       subscription_data: {
-        trial_period_days: 7, // Ensure this is correctly applied for trials
+        trial_period_days: 7,
       },
     });
 
     res.json({ url: session.url });
   } catch (err) {
-    console.error('Subscription error:', err); // Keep as console.error
+    console.error('Subscription error:', err); 
     res.status(500).json({ error: 'Failed to start subscription' });
   }
 };
@@ -341,11 +333,10 @@ const cancelSubscription = async (req, res) => {
 
     if (!user.stripeCustomerId) return res.status(400).json({ error: 'No subscription found' });
 
-    // Retrieve active subscription associated with customer to get subscription ID if not stored on user
     const subscriptions = await stripe.subscriptions.list({
       customer: user.stripeCustomerId,
       status: 'active',
-      limit: 1, // Assuming one active subscription per customer
+      limit: 1, 
     });
 
     if (subscriptions.data.length === 0) return res.json({ error: 'No active subscription found' });
@@ -354,18 +345,16 @@ const cancelSubscription = async (req, res) => {
       cancel_at_period_end: true,
     });
 
-    // Optionally, update user's subscription status in DB
-    user.isSubscribed = false; // Mark as false, but actual cancellation happens at period end
+    user.isSubscribed = false; 
     await user.save();
 
     res.json({ success: true, message: 'Subscription will cancel at period end' });
   } catch (err) {
-    console.error(err); // Keep as console.error
+    console.error(err);
     res.status(500).json({ error: 'Failed to cancel subscription' });
   }
 };
 
-// STRIPE: Check Subscription Status
 const checkSubscriptionStatus = async (req, res) => {
   if (!req.user || !req.user.id) {
     return res.json({ active: false });
@@ -374,8 +363,6 @@ const checkSubscriptionStatus = async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
     if (!user) return res.json({ active: false });
-
-    // This logic now correctly fetches from Stripe and updates DB if necessary
     if (user.stripeCustomerId && user.stripeSubscriptionId) {
       const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
       let isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status);
@@ -390,9 +377,7 @@ const checkSubscriptionStatus = async (req, res) => {
     }
 
   } catch (err) {
-    console.error('Error checking subscription status:', err); // Keep as console.error
-    // If Stripe API call fails (e.g., subscription deleted on Stripe side), fallback to false
-    // Also, consider invalidating user.stripeSubscriptionId if resource_missing error
+    console.error('Error checking subscription status:', err); 
     if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
       const user = await User.findById(req.user.id);
       if (user) {
@@ -406,7 +391,6 @@ const checkSubscriptionStatus = async (req, res) => {
   }
 };
 
-// CONTACT FORM (No authentication needed for this usually)
 const submitContactForm = async (req, res) => {
   const { name, email, reason, message } = req.body;
 
@@ -423,11 +407,10 @@ const submitContactForm = async (req, res) => {
   `;
 
   try {
-    // IMPORTANT: Ensure EMAIL_USER is correct in your Cloud Run Environment Variables
     await sendEmail({ email: 'supportteam@konarcard.com', subject: `Contact Form: ${reason}`, message: html });
     res.json({ success: true, message: 'Message sent successfully' });
   } catch (err) {
-    console.error('Error sending contact form email:', err); // Keep as console.error
+    console.error('Error sending contact form email:', err);
     res.status(500).json({ error: 'Failed to send message' });
   }
 };

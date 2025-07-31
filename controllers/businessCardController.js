@@ -15,7 +15,7 @@ const s3 = new S3Client({
 });
 
 const uploadToS3Util = require('../utils/uploadToS3');
-const QRCode = require('qrcode'); // Ensure this is imported if you're generating QR codes here
+const QRCode = require('qrcode'); 
 
 const createOrUpdateBusinessCard = async (req, res) => {
   try {
@@ -59,13 +59,13 @@ const createOrUpdateBusinessCard = async (req, res) => {
     try {
       parsedServices = services ? JSON.parse(services) : [];
     } catch (err) {
-      console.error('Backend: Invalid services JSON. Defaulting to []. Error:', err.message); // Changed to console.error
+      console.error('Backend: Invalid services JSON. Defaulting to []. Error:', err.message); 
     }
 
     try {
       parsedReviews = reviews ? JSON.parse(reviews) : [];
     } catch (err) {
-      console.error('Backend: Invalid reviews JSON. Defaulting to []. Error:', err.message); // Changed to console.error
+      console.error('Backend: Invalid reviews JSON. Defaulting to []. Error:', err.message); 
     }
 
     let coverPhotoUrl = null;
@@ -76,30 +76,30 @@ const createOrUpdateBusinessCard = async (req, res) => {
     if (req.files?.cover_photo?.[0]) {
       const file = req.files.cover_photo[0];
       const ext = path.extname(file.originalname);
-      const key = `card_cover_photos/${userId}/${uuidv4()}${ext}`; // Use specific folder for card images
+      const key = `card_cover_photos/${userId}/${uuidv4()}${ext}`; 
       coverPhotoUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
     } else if (cover_photo_removed === 'true' || cover_photo_removed === true) {
       coverPhotoUrl = null;
     } else {
-      coverPhotoUrl = existingCard?.cover_photo || null; // Only keep if it was an existing saved URL
+      coverPhotoUrl = existingCard?.cover_photo || null; 
     }
 
     if (req.files?.avatar?.[0]) {
       const file = req.files.avatar[0];
       const ext = path.extname(file.originalname);
-      const key = `card_avatars/${userId}/${uuidv4()}${ext}`; // Use specific folder for card images
+      const key = `card_avatars/${userId}/${uuidv4()}${ext}`; 
       avatarUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
     } else if (avatar_removed === 'true' || avatar_removed === true) {
       avatarUrl = null;
     } else {
-      avatarUrl = existingCard?.avatar || null; // Only keep if it was an existing saved URL
+      avatarUrl = existingCard?.avatar || null; 
     }
 
     const newWorkImageUrls = [];
     if (req.files?.works && req.files.works.length > 0) {
       for (const file of req.files.works) {
         const ext = path.extname(file.originalname);
-        const key = `card_work_images/${userId}/${uuidv4()}${ext}`; // Use specific folder for card images
+        const key = `card_work_images/${userId}/${uuidv4()}${ext}`; 
         const imageUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
         newWorkImageUrls.push(imageUrl);
       }
@@ -107,28 +107,27 @@ const createOrUpdateBusinessCard = async (req, res) => {
 
     const finalWorks = [...parsedWorks, ...newWorkImageUrls];
 
-    // ONLY UPDATE BUSINESS CARD FIELDS HERE
     const updateBusinessCardData = {
       business_card_name,
       page_theme,
       style,
       main_heading,
       sub_heading,
-      full_name, // This is the BusinessCard's full_name
-      bio, // This is the BusinessCard's bio
-      job_title, // This is the BusinessCard's job_title
+      full_name, 
+      bio, 
+      job_title, 
       works: finalWorks,
       services: parsedServices,
       reviews: parsedReviews,
       cover_photo: coverPhotoUrl,
-      avatar: avatarUrl, // This is the BusinessCard's avatar
+      avatar: avatarUrl, 
       contact_email,
       phone_number,
     };
 
     const card = await BusinessCard.findOneAndUpdate(
       { user: userId },
-      updateBusinessCardData, // Use the specific business card data
+      updateBusinessCardData, 
       { new: true, upsert: true, runValidators: true }
     ).lean();
 
@@ -138,10 +137,8 @@ const createOrUpdateBusinessCard = async (req, res) => {
 
     const userDetails = await User.findById(userId).select('username qrCode profileUrl').lean();
 
-    // Construct responseCard which includes business card data AND relevant user data for client-side
     const responseCard = {
-      ...card, // The updated business card fields
-      // Directly use the fetched userDetails for username, qrCodeUrl, publicProfileUrl
+      ...card, 
       qrCodeUrl: userDetails?.qrCode || '',
       username: userDetails?.username || '',
       publicProfileUrl: userDetails?.profileUrl || ''
@@ -166,8 +163,6 @@ const getBusinessCardByUserId = async (req, res) => {
     const card = await BusinessCard.findOne({ user: userId })
       .populate({
         path: 'user',
-        // Select only the user fields relevant to the BUSINESS CARD's public display
-        // and explicitly NOT the user.name (registered name) if it's meant to be separate.
         select: 'qrCode username profileUrl',
       })
       .lean();
