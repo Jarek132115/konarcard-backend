@@ -435,6 +435,7 @@ const checkSubscriptionStatus = async (req, res) => {
 };
 
 // New function to start the 14-day free trial
+// New function to start the 2-minute free trial
 const startTrial = async (req, res) => {
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -450,13 +451,13 @@ const startTrial = async (req, res) => {
             return res.status(400).json({ error: 'Trial has already started.' });
         }
 
-        const fourteenDaysInMilliseconds = 14 * 24 * 60 * 60 * 1000;
-        user.trialExpires = new Date(Date.now() + fourteenDaysInMilliseconds);
+        const twoMinutesInMilliseconds = 2 * 60 * 1000;
+        user.trialExpires = new Date(Date.now() + twoMinutesInMilliseconds);
         await user.save();
 
         res.status(200).json({
             success: true,
-            message: '14-day free trial started successfully!',
+            message: '2-minute free trial started successfully!',
             trialExpires: user.trialExpires
         });
     } catch (err) {
