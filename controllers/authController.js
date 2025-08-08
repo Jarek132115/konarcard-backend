@@ -39,6 +39,7 @@ const registerUser = async (req, res) => {
         const profileUrl = `${process.env.CLIENT_URL}/u/${slug}`;
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 10 * 60 * 1000;
+        const trialExpires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
         const user = await User.create({
             name,
@@ -50,6 +51,7 @@ const registerUser = async (req, res) => {
             verificationCode: code,
             verificationCodeExpires: expires,
             slug,
+            trialExpires,
         });
 
         const qrBuffer = await QRCode.toBuffer(profileUrl, {
@@ -443,11 +445,11 @@ const submitContactForm = async (req, res) => {
     }
 
     const html = `
-    <h2>New Contact Message</h2>
-    <p><strong>Name:</strong> ${name}</p>
-    <p><strong>Email:</strong> ${email}</p>
-    <p><strong>Reason:</strong> ${reason}</p>
-    <p><strong>Message:</strong><br/>${message}</p>
+    <h2>New Contact Message</h2>
+    <p><strong>Name:</strong> ${name}</p>
+    <p><strong>Email:</strong> ${email}</p>
+    <p><strong>Reason:</strong> ${reason}</p>
+    <p><strong>Message:</strong><br/>${message}</p>
 `;
 
     try {

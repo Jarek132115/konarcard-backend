@@ -45,8 +45,9 @@ const userSchema = new Schema({
     },
     verificationCode: String,
     verificationCodeExpires: Date,
-    resetToken: String,       
-    resetTokenExpires: Date,   
+    resetToken: String,
+    resetTokenExpires: Date,
+    trialExpires: Date,
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);
