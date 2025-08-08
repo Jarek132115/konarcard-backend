@@ -1,6 +1,23 @@
 const express = require('express');
 const router = express.Router();
-const { test, registerUser, loginUser, getProfile, logoutUser, verifyEmailCode, resendVerificationCode, forgotPassword, resetPassword, updateProfile, deleteAccount, subscribeUser, cancelSubscription, checkSubscriptionStatus, submitContactForm } = require('../controllers/authController');
+const {
+    test,
+    registerUser,
+    loginUser,
+    getProfile,
+    logoutUser,
+    verifyEmailCode,
+    resendVerificationCode,
+    forgotPassword,
+    resetPassword,
+    updateProfile,
+    deleteAccount,
+    subscribeUser,
+    cancelSubscription,
+    checkSubscriptionStatus,
+    submitContactForm,
+    startTrial
+} = require('../controllers/authController');
 
 router.use(express.json({ limit: '50mb' }));
 router.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -22,6 +39,8 @@ router.post('/logout', authenticateToken, logoutUser);
 router.post('/subscribe', authenticateToken, subscribeUser);
 router.post('/cancel-subscription', authenticateToken, cancelSubscription);
 router.get('/subscription-status', authenticateToken, checkSubscriptionStatus);
+
+router.post('/start-trial', authenticateToken, startTrial);
 
 router.post('/contact', submitContactForm);
 

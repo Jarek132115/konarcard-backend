@@ -39,7 +39,6 @@ const registerUser = async (req, res) => {
         const profileUrl = `${process.env.CLIENT_URL}/u/${slug}`;
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 10 * 60 * 1000;
-        const trialExpires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
         const user = await User.create({
             name,
@@ -51,7 +50,6 @@ const registerUser = async (req, res) => {
             verificationCode: code,
             verificationCodeExpires: expires,
             slug,
-            trialExpires,
         });
 
         const qrBuffer = await QRCode.toBuffer(profileUrl, {
@@ -436,6 +434,37 @@ const checkSubscriptionStatus = async (req, res) => {
     }
 };
 
+// New function to start the 14-day free trial
+const startTrial = async (req, res) => {
+    if (!req.user || !req.user.id) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        if (user.trialExpires) {
+            return res.status(400).json({ error: 'Trial has already started.' });
+        }
+
+        const fourteenDaysInMilliseconds = 14 * 24 * 60 * 60 * 1000;
+        user.trialExpires = new Date(Date.now() + fourteenDaysInMilliseconds);
+        await user.save();
+
+        res.status(200).json({
+            success: true,
+            message: '14-day free trial started successfully!',
+            trialExpires: user.trialExpires
+        });
+    } catch (err) {
+        res.status(500).json({ error: 'Failed to start trial', details: err.message });
+    }
+};
+
+
 // CONTACT FORM
 const submitContactForm = async (req, res) => {
     const { name, email, reason, message } = req.body;
@@ -445,11 +474,11 @@ const submitContactForm = async (req, res) => {
     }
 
     const html = `
-    <h2>New Contact Message</h2>
-    <p><strong>Name:</strong> ${name}</p>
-    <p><strong>Email:</strong> ${email}</p>
-    <p><strong>Reason:</strong> ${reason}</p>
-    <p><strong>Message:</strong><br/>${message}</p>
+    <h2>New Contact Message</h2>
+    <p><strong>Name:</strong> ${name}</p>
+    <p><strong>Email:</strong> ${email}</p>
+    <p><strong>Reason:</strong> ${reason}</p>
+    <p><strong>Message:</strong><br/>${message}</p>
 `;
 
     try {
@@ -476,5 +505,6 @@ module.exports = {
     subscribeUser,
     cancelSubscription,
     checkSubscriptionStatus,
+    startTrial,
     submitContactForm,
 };
