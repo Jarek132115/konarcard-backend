@@ -49,7 +49,7 @@ function subscriptionConfirmationTemplate(name, amountPaid, eventType) {
       subjectLine = 'Your Konar Premium Subscription Has Started!';
       bodyContent = `
         <p>Hi ${name || ''},</p>
-        <p>Welcome to Konar Premium! Your 7-day free trial has begun.</p>
+        <p>Welcome to Konar Premium! Your 14-day free trial has begun.</p>
         <p>You now have full access to all profile editing features.</p>
         <p>You'll be charged £${amountPaid} per month after your trial ends.</p>
         <p>Enjoy building your amazing digital profile!</p>

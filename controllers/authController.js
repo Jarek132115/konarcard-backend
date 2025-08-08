@@ -95,7 +95,15 @@ const verifyEmailCode = async (req, res) => {
         userToSend.name = userToSend.name || '';
         userToSend.email = userToSend.email || '';
 
-        res.status(200).json({ success: true, message: 'Email verified successfully', data: userToSend });
+        // Generate a new JWT token for the now-verified user
+        const token = jwt.sign(
+            { email: user.email, id: user._id, name: user.name },
+            process.env.JWT_SECRET,
+            {}
+        );
+
+        // Send both the token and the user data back to the client
+        res.status(200).json({ success: true, message: 'Email verified successfully', user: userToSend, token });
 
     } catch (err) {
         res.status(500).json({ error: 'Verification failed' });
@@ -209,7 +217,7 @@ const resetPassword = async (req, res) => {
 
         const user = await User.findOne({
             resetToken: token,
-            resetTokenExpires: { $gt: Date.now() }, 
+            resetTokenExpires: { $gt: Date.now() },
         });
 
         if (!user) {
@@ -219,7 +227,7 @@ const resetPassword = async (req, res) => {
         const hashed = await hashPassword(password);
         user.password = hashed;
         user.resetToken = undefined;
-        user.resetTokenExpires = undefined; 
+        user.resetTokenExpires = undefined;
         await user.save();
 
         res.json({ success: true, message: 'Password updated successfully' });
