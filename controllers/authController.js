@@ -348,7 +348,7 @@ const subscribeUser = async (req, res) => {
             }],
 
             success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`,
-            cancel_url: `${process.env.CLIENT_URL}/pricing`,
+            cancel_url: `${process.env.CLIENT_URL}/subscription`,
 
             subscription_data: {
                 trial_period_days: 7,
