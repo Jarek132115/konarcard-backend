@@ -352,7 +352,7 @@ const subscribeUser = async (req, res) => {
             cancel_url: `${process.env.CLIENT_URL}/subscription`,
 
             subscription_data: {
-                trial_period_days: 7,
+                trial_period_days: 14,
             },
         });
 
