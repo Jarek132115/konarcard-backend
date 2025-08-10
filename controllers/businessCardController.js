@@ -15,7 +15,7 @@ const s3 = new S3Client({
 });
 
 const uploadToS3Util = require('../utils/uploadToS3');
-const QRCode = require('qrcode'); 
+const QRCode = require('qrcode');
 
 const createOrUpdateBusinessCard = async (req, res) => {
   try {
@@ -59,13 +59,13 @@ const createOrUpdateBusinessCard = async (req, res) => {
     try {
       parsedServices = services ? JSON.parse(services) : [];
     } catch (err) {
-      console.error('Backend: Invalid services JSON. Defaulting to []. Error:', err.message); 
+      console.error('Backend: Invalid services JSON. Defaulting to []. Error:', err.message);
     }
 
     try {
       parsedReviews = reviews ? JSON.parse(reviews) : [];
     } catch (err) {
-      console.error('Backend: Invalid reviews JSON. Defaulting to []. Error:', err.message); 
+      console.error('Backend: Invalid reviews JSON. Defaulting to []. Error:', err.message);
     }
 
     let coverPhotoUrl = null;
@@ -76,30 +76,30 @@ const createOrUpdateBusinessCard = async (req, res) => {
     if (req.files?.cover_photo?.[0]) {
       const file = req.files.cover_photo[0];
       const ext = path.extname(file.originalname);
-      const key = `card_cover_photos/${userId}/${uuidv4()}${ext}`; 
+      const key = `card_cover_photos/${userId}/${uuidv4()}${ext}`;
       coverPhotoUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
     } else if (cover_photo_removed === 'true' || cover_photo_removed === true) {
       coverPhotoUrl = null;
     } else {
-      coverPhotoUrl = existingCard?.cover_photo || null; 
+      coverPhotoUrl = existingCard?.cover_photo || null;
     }
 
     if (req.files?.avatar?.[0]) {
       const file = req.files.avatar[0];
       const ext = path.extname(file.originalname);
-      const key = `card_avatars/${userId}/${uuidv4()}${ext}`; 
+      const key = `card_avatars/${userId}/${uuidv4()}${ext}`;
       avatarUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
     } else if (avatar_removed === 'true' || avatar_removed === true) {
       avatarUrl = null;
     } else {
-      avatarUrl = existingCard?.avatar || null; 
+      avatarUrl = existingCard?.avatar || null;
     }
 
     const newWorkImageUrls = [];
     if (req.files?.works && req.files.works.length > 0) {
       for (const file of req.files.works) {
         const ext = path.extname(file.originalname);
-        const key = `card_work_images/${userId}/${uuidv4()}${ext}`; 
+        const key = `card_work_images/${userId}/${uuidv4()}${ext}`;
         const imageUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
         newWorkImageUrls.push(imageUrl);
       }
@@ -113,21 +113,21 @@ const createOrUpdateBusinessCard = async (req, res) => {
       style,
       main_heading,
       sub_heading,
-      full_name, 
-      bio, 
-      job_title, 
+      full_name,
+      bio,
+      job_title,
       works: finalWorks,
       services: parsedServices,
       reviews: parsedReviews,
       cover_photo: coverPhotoUrl,
-      avatar: avatarUrl, 
+      avatar: avatarUrl,
       contact_email,
       phone_number,
     };
 
     const card = await BusinessCard.findOneAndUpdate(
       { user: userId },
-      updateBusinessCardData, 
+      updateBusinessCardData,
       { new: true, upsert: true, runValidators: true }
     ).lean();
 
@@ -135,13 +135,16 @@ const createOrUpdateBusinessCard = async (req, res) => {
       return res.status(500).json({ error: 'Failed to find or update business card in DB' });
     }
 
-    const userDetails = await User.findById(userId).select('username qrCode profileUrl').lean();
+    // --- CHANGE 1: Fetch user data with subscription info for the response
+    const userDetails = await User.findById(userId).select('username qrCode profileUrl isSubscribed trialExpires').lean();
 
     const responseCard = {
-      ...card, 
+      ...card,
       qrCodeUrl: userDetails?.qrCode || '',
       username: userDetails?.username || '',
-      publicProfileUrl: userDetails?.profileUrl || ''
+      publicProfileUrl: userDetails?.profileUrl || '',
+      isSubscribed: userDetails?.isSubscribed || false,
+      trialExpires: userDetails?.trialExpires || null,
     };
 
     res.status(200).json({ message: 'Business card saved successfully', data: responseCard });
@@ -160,10 +163,11 @@ const getBusinessCardByUserId = async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
     }
 
+    // --- CHANGE 2: Populate with subscription info
     const card = await BusinessCard.findOne({ user: userId })
       .populate({
         path: 'user',
-        select: 'qrCode username profileUrl',
+        select: 'qrCode username profileUrl isSubscribed trialExpires',
       })
       .lean();
 
@@ -175,7 +179,9 @@ const getBusinessCardByUserId = async (req, res) => {
       ...card,
       qrCodeUrl: card.user?.qrCode || '',
       username: card.user?.username || '',
-      publicProfileUrl: card.user?.profileUrl || ''
+      publicProfileUrl: card.user?.profileUrl || '',
+      isSubscribed: card.user?.isSubscribed || false, // Add this
+      trialExpires: card.user?.trialExpires || null, // Add this
     };
 
     res.status(200).json({ data: responseCard });
@@ -185,7 +191,38 @@ const getBusinessCardByUserId = async (req, res) => {
   }
 };
 
+// --- CHANGE 3: Add a new public endpoint to fetch by username
+const getBusinessCardByUsername = async (req, res) => {
+  const { username } = req.params;
+
+  try {
+    const user = await User.findOne({ username }).select('isSubscribed trialExpires').lean();
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const card = await BusinessCard.findOne({ user: user._id }).lean();
+
+    if (!card) {
+      return res.status(404).json({ error: 'Business card not found' });
+    }
+
+    const responseData = {
+      ...card,
+      isSubscribed: user.isSubscribed,
+      trialExpires: user.trialExpires,
+    };
+
+    res.json(responseData);
+  } catch (err) {
+    console.error('Backend: Error fetching public business card:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
+
 module.exports = {
   createOrUpdateBusinessCard,
   getBusinessCardByUserId,
+  getBusinessCardByUsername, // Export the new function
 };
