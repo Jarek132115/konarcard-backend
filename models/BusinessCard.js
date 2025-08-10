@@ -17,8 +17,10 @@ const businessCardSchema = new Schema({
     type: [String],
     default: [],
   },
-  // FIX: Added new field for the work section display mode
-  work_display_mode: { type: String, default: 'list' },
+  work_display_mode: { type: String, default: 'list' }, // Already added
+  services_display_mode: { type: String, default: 'list' }, // New
+  reviews_display_mode: { type: String, default: 'list' }, // New
+  about_me_layout: { type: String, default: 'side-by-side' }, // New
   services: {
     type: [{
       name: { type: String, required: true },

@@ -38,8 +38,10 @@ const createOrUpdateBusinessCard = async (req, res) => {
       avatar_removed,
       contact_email,
       phone_number,
-      // FIX: New field to receive from the frontend
       work_display_mode,
+      services_display_mode, // New
+      reviews_display_mode, // New
+      about_me_layout, // New
     } = req.body;
 
     if (!userId) {
@@ -121,8 +123,10 @@ const createOrUpdateBusinessCard = async (req, res) => {
       bio,
       job_title,
       works: finalWorks,
-      // FIX: Add the new display mode to the update object
       work_display_mode,
+      services_display_mode, // New
+      reviews_display_mode, // New
+      about_me_layout, // New
       services: parsedServices,
       reviews: parsedReviews,
       cover_photo: coverPhotoUrl,
