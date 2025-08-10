@@ -14,7 +14,7 @@ const upload = multer({ storage }).fields([
     { name: 'cover_photo', maxCount: 1 },
     { name: 'avatar', maxCount: 1 },
     { name: 'works', maxCount: 10 },
-    { name: 'existing_works' }, 
+    { name: 'existing_works' },
 ]);
 
 router.post('/create_business_card', authenticateToken, upload, createOrUpdateBusinessCard);
@@ -23,7 +23,7 @@ router.get('/my_card', authenticateToken, getBusinessCardByUserId);
 
 router.get('/by_username/:username', async (req, res) => {
     try {
-        const User = require('../models/user'); 
+        const User = require('../models/user');
         const BusinessCard = require('../models/BusinessCard');
         const { username } = req.params;
 
@@ -32,22 +32,25 @@ router.get('/by_username/:username', async (req, res) => {
             return res.status(404).json({ message: 'User not found' });
         }
 
+        // Corrected: Populate with subscription info
         const card = await BusinessCard.findOne({ user: user._id })
             .populate({
                 path: 'user',
-                select: 'qrCode username profileUrl', 
+                select: 'qrCode username profileUrl isSubscribed trialExpires', // Include these fields
             })
-            .lean(); 
+            .lean();
 
         if (!card) {
             return res.status(404).json({ message: 'Business card not found for this user' });
         }
 
         const responseCard = {
-            ...card, 
-            qrCodeUrl: card.user?.qrCode || '', 
+            ...card,
+            qrCodeUrl: card.user?.qrCode || '',
             username: card.user?.username || '',
-            publicProfileUrl: card.user?.profileUrl || '' 
+            publicProfileUrl: card.user?.profileUrl || '',
+            isSubscribed: card.user?.isSubscribed, // Add this
+            trialExpires: card.user?.trialExpires, // Add this
         };
 
         res.status(200).json(responseCard);
