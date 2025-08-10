@@ -450,16 +450,16 @@ const startTrial = async (req, res) => {
             return res.status(400).json({ error: 'Trial has already started.' });
         }
 
-        const fiveMinutesInMilliseconds = 5 * 60 * 1000;
-        user.trialExpires = new Date(Date.now() + fiveMinutesInMilliseconds);
-        user.isSubscribed = false; // FIX: The user is not a paying subscriber during the trial.
+        const fourteenDaysInMilliseconds = 14 * 24 * 60 * 60 * 1000;
+        user.trialExpires = new Date(Date.now() + fourteenDaysInMilliseconds);
+        user.isSubscribed = false;
         user.trialEmailRemindersSent = [];
 
         await user.save();
 
         res.status(200).json({
             success: true,
-            message: '5-minute free trial started successfully!',
+            message: '14-day free trial started successfully!',
             trialExpires: user.trialExpires
         });
     } catch (err) {

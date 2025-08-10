@@ -1,5 +1,4 @@
 // utils/emailTemplates.js
-
 function verificationEmailTemplate(name, code) {
   return `
     <div style="font-family: Arial, sans-serif; padding: 20px;">
@@ -112,7 +111,7 @@ function trialFirstReminderTemplate(name) {
         <body>
             <div class="container">
                 <p>Hi ${name},</p>
-                <p>Just a friendly reminder that your **5-minute free trial** is about to expire!</p>
+                <p>Just a friendly reminder that your **14-day free trial** is about to expire!</p>
                 <p>To continue using your professional digital business card and keep your profile live, please upgrade to a premium subscription.</p>
                 <p>Don't let your card go offline. We look forward to having you as a subscriber!</p>
                 <p><a href="${process.env.CLIENT_URL}/subscription" class="button">Upgrade Your Subscription</a></p>
@@ -128,7 +127,7 @@ function trialFinalWarningTemplate(name) {
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Last Chance! Your Trial Ends in Seconds</title>
+            <title>Last Chance! Your Trial Ends Soon</title>
             <style>
                 body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
                 .container { max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
@@ -138,9 +137,9 @@ function trialFinalWarningTemplate(name) {
         <body>
             <div class="container">
                 <p>Hi ${name},</p>
-                <p>This is your final warning. Your 5-minute free trial is ending in just a few moments.</p>
+                <p>This is your final warning. Your 14-day free trial is ending in just a few moments.</p>
                 <p>If you don't subscribe, your public profile will be hidden and your card will no longer be active.</p>
-                <p><a href="${process.env.CLIENT_URL}/subscription" class="button">Subscribe and Save Your Card</a></p>
+                <p><a href="${process.env.CLIENT_URL}/subscription" class="button">Subscribe and Save Your Card!</a></p>
                 <p>Best regards,<br>The Konar Card Team</p>
             </div>
         </body>
@@ -154,5 +153,5 @@ module.exports = {
   orderConfirmationTemplate,
   subscriptionConfirmationTemplate,
   trialFirstReminderTemplate,
-  trialFinalWarningTemplate
+  trialFinalWarningTemplate,
 };

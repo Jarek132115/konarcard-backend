@@ -11,9 +11,6 @@ const stripeWebhookRoutes = require('./routes/stripe');
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
 
-// --- NEW: Import the cron job file
-require('./utils/cron-job.js');
-
 const app = express();
 
 // Connect to MongoDB

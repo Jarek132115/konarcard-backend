@@ -7,7 +7,8 @@ const sendEmail = require('../utils/SendEmail');
 const {
   orderConfirmationTemplate,
   subscriptionConfirmationTemplate,
-  finalTrialWarningEmailTemplate,
+  trialFirstReminderTemplate,
+  trialFinalWarningTemplate,
 } = require('../utils/emailTemplates');
 const User = require('../models/user');
 
@@ -39,7 +40,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         const user = await User.findOne({ stripeCustomerId: customerId });
         console.log(`Backend: customer.subscription.created - User found by stripeCustomerId: ${!!user}`);
         if (user) {
-          user.isSubscribed = true;
+          const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status);
+          user.isSubscribed = isActive;
           user.stripeSubscriptionId = subscription.id;
           user.trialExpires = undefined;
           user.trialEmailRemindersSent = [];
@@ -140,17 +142,16 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
       try {
         const user = await User.findOne({ stripeCustomerId: customerId });
-        if (user && user.isSubscribed && user.trialExpires && !user.trialEmailRemindersSent.includes('final_warning')) {
-          const trialEndDate = new Date(subscription.trial_end * 1000);
-          const html = finalTrialWarningEmailTemplate(user.name, trialEndDate);
-          await sendEmail({ email: user.email, subject: 'Your Trial is Ending Soon!', message: html });
-
-          user.trialEmailRemindersSent.push('final_warning');
-          await user.save();
-
-          console.log(`Backend: Sent final trial warning email to user ${user._id}`);
+        // NEW LOGIC: Send the email if the user exists and is in a trialing state.
+        if (user && subscription.status === 'trialing') {
+          console.log(`Backend: Sending final trial warning email to user ${user._id}.`);
+          await sendEmail({
+            email: user.email,
+            subject: 'Your Free Trial is Ending Soon!',
+            message: trialFinalWarningTemplate(user.name),
+          });
         } else {
-          console.log(`Backend: Did not send final trial email. User not found, not subscribed, or email already sent.`);
+          console.log(`Backend: Did not send final trial email. User not found or not in a trialing state.`);
         }
       } catch (err) {
         console.error(`Backend: Error processing 'customer.subscription.trial_will_end' event:`, err);
