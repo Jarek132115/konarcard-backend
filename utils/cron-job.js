@@ -14,15 +14,15 @@ cron.schedule('* * * * *', async () => {
         const usersInTrial = await User.find({
             isSubscribed: false,
             trialExpires: { $exists: true, $gt: now },
-        }).lean(); // Use .lean() for faster reads as we are only reading data
+        }).lean();
 
         for (const user of usersInTrial) {
             const trialExpiresDate = new Date(user.trialExpires);
             const timeRemainingMs = trialExpiresDate.getTime() - now.getTime();
             const minutesRemaining = timeRemainingMs / (1000 * 60);
 
-            // First email reminder at the 3-minute mark
-            if (minutesRemaining >= 2.9 && minutesRemaining <= 3.1 && !user.trialEmailRemindersSent.includes('first_reminder')) {
+            // First email reminder: Sent when time remaining is between 3 and 4 minutes.
+            if (minutesRemaining >= 3 && minutesRemaining < 4 && !user.trialEmailRemindersSent.includes('first_reminder')) {
                 try {
                     console.log(`Sending first trial reminder to ${user.email}.`);
                     await sendEmail({
@@ -37,8 +37,8 @@ cron.schedule('* * * * *', async () => {
                 }
             }
 
-            // Second email reminder at the 30-second mark
-            if (minutesRemaining >= 0.4 && minutesRemaining <= 0.6 && !user.trialEmailRemindersSent.includes('final_warning')) {
+            // Second email reminder: Sent when time remaining is between 0.5 and 1.5 minutes.
+            if (minutesRemaining >= 0.5 && minutesRemaining < 1.5 && !user.trialEmailRemindersSent.includes('final_warning')) {
                 try {
                     console.log(`Sending final trial warning email to ${user.email}.`);
                     await sendEmail({
