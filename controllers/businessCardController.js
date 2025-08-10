@@ -24,7 +24,6 @@ const createOrUpdateBusinessCard = async (req, res) => {
     const {
       business_card_name,
       page_theme,
-      // FIX: New field to receive from the frontend
       page_theme_variant,
       style,
       main_heading,
@@ -39,6 +38,8 @@ const createOrUpdateBusinessCard = async (req, res) => {
       avatar_removed,
       contact_email,
       phone_number,
+      // FIX: New field to receive from the frontend
+      work_display_mode,
     } = req.body;
 
     if (!userId) {
@@ -112,7 +113,6 @@ const createOrUpdateBusinessCard = async (req, res) => {
     const updateBusinessCardData = {
       business_card_name,
       page_theme,
-      // FIX: Add the new theme variant to the update object
       page_theme_variant,
       style,
       main_heading,
@@ -121,6 +121,8 @@ const createOrUpdateBusinessCard = async (req, res) => {
       bio,
       job_title,
       works: finalWorks,
+      // FIX: Add the new display mode to the update object
+      work_display_mode,
       services: parsedServices,
       reviews: parsedReviews,
       cover_photo: coverPhotoUrl,
@@ -139,7 +141,6 @@ const createOrUpdateBusinessCard = async (req, res) => {
       return res.status(500).json({ error: 'Failed to find or update business card in DB' });
     }
 
-    // --- CHANGE 1: Fetch user data with subscription info for the response
     const userDetails = await User.findById(userId).select('username qrCode profileUrl isSubscribed trialExpires').lean();
 
     const responseCard = {
@@ -167,7 +168,6 @@ const getBusinessCardByUserId = async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
     }
 
-    // --- CHANGE 2: Populate with subscription info
     const card = await BusinessCard.findOne({ user: userId })
       .populate({
         path: 'user',
@@ -184,8 +184,8 @@ const getBusinessCardByUserId = async (req, res) => {
       qrCodeUrl: card.user?.qrCode || '',
       username: card.user?.username || '',
       publicProfileUrl: card.user?.profileUrl || '',
-      isSubscribed: card.user?.isSubscribed || false, // Add this
-      trialExpires: card.user?.trialExpires || null, // Add this
+      isSubscribed: card.user?.isSubscribed || false,
+      trialExpires: card.user?.trialExpires || null,
     };
 
     res.status(200).json({ data: responseCard });
@@ -195,7 +195,6 @@ const getBusinessCardByUserId = async (req, res) => {
   }
 };
 
-// --- CHANGE 3: Add a new public endpoint to fetch by username
 const getBusinessCardByUsername = async (req, res) => {
   const { username } = req.params;
 
@@ -228,5 +227,5 @@ const getBusinessCardByUsername = async (req, res) => {
 module.exports = {
   createOrUpdateBusinessCard,
   getBusinessCardByUserId,
-  getBusinessCardByUsername, // Export the new function
+  getBusinessCardByUsername,
 };
