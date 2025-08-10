@@ -1,8 +1,8 @@
 // A new file: cron-job.js
 const cron = require('node-cron');
-const User = require('../models/user'); // Corrected path to the User model
-const sendEmail = require('../utils/SendEmail'); // Assuming SendEmail is in the utils directory
-const { trialEndingTemplate } = require('./emailTemplates'); // Corrected path to email templates
+const User = require('../models/user');
+const sendEmail = require('../utils/SendEmail');
+const { trialEndingTemplate } = require('./emailTemplates');
 
 // This cron job will run every minute
 cron.schedule('* * * * *', async () => {
@@ -20,8 +20,10 @@ cron.schedule('* * * * *', async () => {
         const timeRemainingMs = trialExpiresDate.getTime() - now.getTime();
         const minutesRemaining = timeRemainingMs / (1000 * 60);
 
-        // Check for the first email reminder (at the 3-minute mark)
-        if (minutesRemaining <= 3 && minutesRemaining > 2 && !user.trialEmailRemindersSent.includes('first_reminder')) {
+        // Corrected check for the first email reminder (at the 3-minute mark)
+        // We want to send it when there are 3 minutes remaining.
+        // The cron job runs once per minute, so we check for a window around 3 minutes.
+        if (minutesRemaining >= 2.9 && minutesRemaining < 3.9 && !user.trialEmailRemindersSent.includes('first_reminder')) {
             try {
                 console.log(`Sending first trial reminder to ${user.email}.`);
                 await sendEmail({
@@ -37,6 +39,7 @@ cron.schedule('* * * * *', async () => {
         }
 
         // Check for the second email reminder (at the 30-second mark)
+        // This condition is correct, as 30 seconds is 0.5 minutes.
         if (minutesRemaining <= 0.5 && !user.trialEmailRemindersSent.includes('final_warning')) {
             try {
                 console.log(`Sending final trial warning email to ${user.email}.`);
