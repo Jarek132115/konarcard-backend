@@ -1,3 +1,4 @@
+// controllers/authController.js
 const { hashPassword, comparePassword } = require('../helpers/auth');
 const User = require('../models/user');
 const jwt = require('jsonwebtoken');
