@@ -17,10 +17,19 @@ const businessCardSchema = new Schema({
     type: [String],
     default: [],
   },
-  work_display_mode: { type: String, default: 'list' }, // Already added
-  services_display_mode: { type: String, default: 'list' }, // New
-  reviews_display_mode: { type: String, default: 'list' }, // New
-  about_me_layout: { type: String, default: 'side-by-side' }, // New
+  work_display_mode: { type: String, default: 'list' },
+  services_display_mode: { type: String, default: 'list' },
+  reviews_display_mode: { type: String, default: 'list' },
+  about_me_layout: { type: String, default: 'side-by-side' },
+
+  // NEW: Fields to store section visibility
+  show_main_section: { type: Boolean, default: true },
+  show_about_me_section: { type: Boolean, default: true },
+  show_work_section: { type: Boolean, default: true },
+  show_services_section: { type: Boolean, default: true },
+  show_reviews_section: { type: Boolean, default: true },
+  show_contact_section: { type: Boolean, default: true },
+
   services: {
     type: [{
       name: { type: String, required: true },
