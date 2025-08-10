@@ -16,10 +16,17 @@ cron.schedule('* * * * *', async () => {
             trialExpires: { $exists: true, $gt: now },
         }).lean();
 
+        if (usersInTrial.length === 0) {
+            console.log('No users in active trial period found. Skipping email checks.');
+            return;
+        }
+
         for (const user of usersInTrial) {
             const trialExpiresDate = new Date(user.trialExpires);
             const timeRemainingMs = trialExpiresDate.getTime() - now.getTime();
             const minutesRemaining = timeRemainingMs / (1000 * 60);
+
+            console.log(`Checking user ${user.email}. Time remaining: ${minutesRemaining.toFixed(2)} minutes.`);
 
             // First email reminder: Sent when time remaining is between 3 and 4 minutes.
             if (minutesRemaining >= 3 && minutesRemaining < 4 && !user.trialEmailRemindersSent.includes('first_reminder')) {
@@ -30,7 +37,6 @@ cron.schedule('* * * * *', async () => {
                         subject: 'Your Free Trial is About to End',
                         message: trialFirstReminderTemplate(user.name),
                     });
-                    // Update user to mark email as sent
                     await User.findByIdAndUpdate(user._id, { $push: { trialEmailRemindersSent: 'first_reminder' } });
                 } catch (err) {
                     console.error(`Error sending first reminder email to ${user.email}:`, err);
@@ -46,7 +52,6 @@ cron.schedule('* * * * *', async () => {
                         subject: 'Last Chance! Your Trial Ends in Seconds',
                         message: trialFinalWarningTemplate(user.name),
                     });
-                    // Update user to mark email as sent
                     await User.findByIdAndUpdate(user._id, { $push: { trialEmailRemindersSent: 'final_warning' } });
                 } catch (err) {
                     console.error(`Error sending final reminder email to ${user.email}:`, err);
