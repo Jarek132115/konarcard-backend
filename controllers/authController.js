@@ -452,7 +452,7 @@ const startTrial = async (req, res) => {
 
         const fiveMinutesInMilliseconds = 5 * 60 * 1000;
         user.trialExpires = new Date(Date.now() + fiveMinutesInMilliseconds);
-        user.isSubscribed = true;
+        user.isSubscribed = false; // FIX: The user is not a paying subscriber during the trial.
         user.trialEmailRemindersSent = [];
 
         await user.save();
