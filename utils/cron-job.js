@@ -1,31 +1,27 @@
 // A new file: cron-job.js
 const cron = require('node-cron');
-const User = require('./models/user'); // Adjust path as needed
-const sendEmail = require('./utils/SendEmail');
-const { trialEndingTemplate } = require('./utils/emailTemplates'); // New email template
+const User = require('../models/user'); // Corrected path to the User model
+const sendEmail = require('../utils/SendEmail'); // Assuming SendEmail is in the utils directory
+const { trialEndingTemplate } = require('./emailTemplates'); // Corrected path to email templates
 
 // This cron job will run every minute
 cron.schedule('* * * * *', async () => {
     console.log('Cron job is running to check for trial reminders.');
-    const now = Date.now();
-
-    // Time windows for our emails (in milliseconds)
-    const fiveMinutes = 5 * 60 * 1000;
-    const oneMinute = 60 * 1000;
-    const remainingTimeForEmail = fiveMinutes - (5 * 60 * 1000 - 3 * 60 * 1000); // This is the time remaining for the email to be sent at the 3-minute mark
-    const remainingTimeForSecondEmail = fiveMinutes - (5 * 60 * 1000 - 4.5 * 60 * 1000); // Time remaining for the second email at the 4.5 minute mark
+    const now = new Date();
 
     // Find users who are in their trial period and have not subscribed
     const usersInTrial = await User.find({
-        isSubscribed: { $ne: true }, // User is not on a paid subscription
-        trialExpires: { $exists: true, $gt: now }, // Trial exists and has not expired
+        isSubscribed: { $ne: true },
+        trialExpires: { $exists: true, $gt: now },
     });
 
     for (const user of usersInTrial) {
-        const timeRemaining = user.trialExpires.getTime() - now;
+        const trialExpiresDate = new Date(user.trialExpires);
+        const timeRemainingMs = trialExpiresDate.getTime() - now.getTime();
+        const minutesRemaining = timeRemainingMs / (1000 * 60);
 
         // Check for the first email reminder (at the 3-minute mark)
-        if (timeRemaining <= 2 * 60 * 1000 && timeRemaining > 1.5 * 60 * 1000 && !user.trialEmailRemindersSent.includes('first_reminder')) {
+        if (minutesRemaining <= 3 && minutesRemaining > 2 && !user.trialEmailRemindersSent.includes('first_reminder')) {
             try {
                 console.log(`Sending first trial reminder to ${user.email}.`);
                 await sendEmail({
@@ -40,8 +36,8 @@ cron.schedule('* * * * *', async () => {
             }
         }
 
-        // Check for the second email reminder (at the 4.5-minute mark)
-        if (timeRemaining <= 30 * 1000 && !user.trialEmailRemindersSent.includes('final_warning')) {
+        // Check for the second email reminder (at the 30-second mark)
+        if (minutesRemaining <= 0.5 && !user.trialEmailRemindersSent.includes('final_warning')) {
             try {
                 console.log(`Sending final trial warning email to ${user.email}.`);
                 await sendEmail({
