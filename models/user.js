@@ -48,6 +48,10 @@ const userSchema = new Schema({
     resetToken: String,
     resetTokenExpires: Date,
     trialExpires: Date,
+    trialEmailRemindersSent: {
+        type: [String],
+        default: [],
+    },
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema);

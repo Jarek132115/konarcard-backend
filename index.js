@@ -7,9 +7,12 @@ const path = require('path');
 
 const authRoutes = require('./routes/authRoutes');
 const checkoutRoutes = require('./routes/checkout');
-const stripeWebhookRoutes = require('./routes/stripe'); 
+const stripeWebhookRoutes = require('./routes/stripe');
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
+
+// --- NEW: Import the cron job file
+require('./utils/cron-job.js');
 
 const app = express();
 
@@ -37,10 +40,10 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use('/api/stripe', stripeWebhookRoutes); 
+app.use('/api/stripe', stripeWebhookRoutes);
 
-app.use(express.json()); 
-app.use(express.urlencoded({ extended: true })); 
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use('/api/business-card', businessCardRoutes);
 app.use('/', authRoutes);
 app.use('/api/checkout', checkoutRoutes);
