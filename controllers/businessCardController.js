@@ -39,9 +39,16 @@ const createOrUpdateBusinessCard = async (req, res) => {
       contact_email,
       phone_number,
       work_display_mode,
-      services_display_mode, // New
-      reviews_display_mode, // New
-      about_me_layout, // New
+      services_display_mode,
+      reviews_display_mode,
+      about_me_layout,
+      // NEW: Add section visibility flags
+      show_main_section,
+      show_about_me_section,
+      show_work_section,
+      show_services_section,
+      show_reviews_section,
+      show_contact_section
     } = req.body;
 
     if (!userId) {
@@ -124,9 +131,16 @@ const createOrUpdateBusinessCard = async (req, res) => {
       job_title,
       works: finalWorks,
       work_display_mode,
-      services_display_mode, // New
-      reviews_display_mode, // New
-      about_me_layout, // New
+      services_display_mode,
+      reviews_display_mode,
+      about_me_layout,
+      // NEW: Ensure visibility flags are set in the update object
+      show_main_section: show_main_section === 'true',
+      show_about_me_section: show_about_me_section === 'true',
+      show_work_section: show_work_section === 'true',
+      show_services_section: show_services_section === 'true',
+      show_reviews_section: show_reviews_section === 'true',
+      show_contact_section: show_contact_section === 'true',
       services: parsedServices,
       reviews: parsedReviews,
       cover_photo: coverPhotoUrl,
@@ -172,6 +186,7 @@ const getBusinessCardByUserId = async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
     }
 
+    // We need to retrieve all fields, not just a subset.
     const card = await BusinessCard.findOne({ user: userId })
       .populate({
         path: 'user',
@@ -209,6 +224,7 @@ const getBusinessCardByUsername = async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // FIX: Retrieve all the data from the BusinessCard model.
     const card = await BusinessCard.findOne({ user: user._id }).lean();
 
     if (!card) {
