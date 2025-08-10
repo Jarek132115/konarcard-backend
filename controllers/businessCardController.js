@@ -24,6 +24,8 @@ const createOrUpdateBusinessCard = async (req, res) => {
     const {
       business_card_name,
       page_theme,
+      // FIX: New field to receive from the frontend
+      page_theme_variant,
       style,
       main_heading,
       sub_heading,
@@ -110,6 +112,8 @@ const createOrUpdateBusinessCard = async (req, res) => {
     const updateBusinessCardData = {
       business_card_name,
       page_theme,
+      // FIX: Add the new theme variant to the update object
+      page_theme_variant,
       style,
       main_heading,
       sub_heading,

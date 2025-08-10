@@ -3,6 +3,8 @@ const mongoose = require('mongoose');
 const businessCardSchema = new mongoose.Schema({
   business_card_name: { type: String, default: '' },
   page_theme: { type: String, default: 'light' },
+  // FIX: Added a new field to store the specific color variant.
+  page_theme_variant: { type: String, default: 'subtle-light' },
   style: { type: String, default: 'Inter' },
   main_heading: { type: String, default: '' },
   sub_heading: { type: String, default: '' },
@@ -12,7 +14,7 @@ const businessCardSchema = new mongoose.Schema({
   avatar: { type: String, default: '' },
   cover_photo: { type: String, default: '' },
   works: {
-    type: [String], 
+    type: [String],
     default: [],
   },
   services: {
