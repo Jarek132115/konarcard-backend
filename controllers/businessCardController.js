@@ -1,6 +1,6 @@
 const BusinessCard = require('../models/BusinessCard');
 const User = require('../models/user');
-const { PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
+const { S3Client } = require('@aws-sdk/client-s3');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 require('dotenv').config();
@@ -15,11 +15,35 @@ const s3 = new S3Client({
 });
 
 const uploadToS3Util = require('../utils/uploadToS3');
-const QRCode = require('qrcode');
+// const QRCode = require('qrcode'); // kept if used elsewhere
+
+// Helper: coerce possibly-undefined, string, or boolean into boolean with fallback
+const toBool = (v, fallback) => {
+  if (typeof v === 'boolean') return v;
+  if (typeof v === 'string') return v.toLowerCase() === 'true';
+  return fallback;
+};
+
+// Helper: parse JSON or accept array directly
+const parseMaybeJsonArray = (value, fallback = []) => {
+  try {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string' && value.trim().length) {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : fallback;
+    }
+  } catch (e) {
+    console.error('Backend: Failed to parse array JSON:', e.message);
+  }
+  return fallback;
+};
 
 const createOrUpdateBusinessCard = async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
+    }
 
     const {
       business_card_name,
@@ -42,83 +66,86 @@ const createOrUpdateBusinessCard = async (req, res) => {
       services_display_mode,
       reviews_display_mode,
       about_me_layout,
-      // NEW: Add section visibility flags
+      // Section visibility (may be omitted, string or boolean)
       show_main_section,
       show_about_me_section,
       show_work_section,
       show_services_section,
       show_reviews_section,
-      show_contact_section
+      show_contact_section,
     } = req.body;
 
-    if (!userId) {
-      return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
-    }
+    // Load current card to preserve values not being updated
+    const existingCard = await BusinessCard.findOne({ user: userId }).lean();
 
-    let parsedServices = [];
-    let parsedReviews = [];
+    // Works: keep any existing URLs passed from client + upload new files
     let parsedWorks = [];
-
     if (existing_works) {
       if (Array.isArray(existing_works)) {
         parsedWorks = existing_works;
       } else if (typeof existing_works === 'string') {
         parsedWorks = [existing_works];
       }
-      parsedWorks = parsedWorks.filter(url => url && !url.startsWith('blob:'));
+      parsedWorks = parsedWorks.filter((url) => url && !String(url).startsWith('blob:'));
     }
 
-    try {
-      parsedServices = services ? JSON.parse(services) : [];
-    } catch (err) {
-      console.error('Backend: Invalid services JSON. Defaulting to []. Error:', err.message);
-    }
+    // Services & reviews: accept array or JSON string
+    const parsedServices = parseMaybeJsonArray(services, []);
+    const parsedReviews = parseMaybeJsonArray(reviews, []);
 
-    try {
-      parsedReviews = reviews ? JSON.parse(reviews) : [];
-    } catch (err) {
-      console.error('Backend: Invalid reviews JSON. Defaulting to []. Error:', err.message);
-    }
-
-    let coverPhotoUrl = null;
-    let avatarUrl = null;
-
-    const existingCard = await BusinessCard.findOne({ user: userId }).lean();
-
+    // Handle cover photo
+    let coverPhotoUrl = existingCard?.cover_photo || null;
     if (req.files?.cover_photo?.[0]) {
       const file = req.files.cover_photo[0];
       const ext = path.extname(file.originalname);
       const key = `card_cover_photos/${userId}/${uuidv4()}${ext}`;
-      coverPhotoUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
+      coverPhotoUrl = await uploadToS3Util(
+        file.buffer,
+        key,
+        process.env.AWS_CARD_BUCKET_NAME,
+        process.env.AWS_CARD_BUCKET_REGION,
+        file.mimetype
+      );
     } else if (cover_photo_removed === 'true' || cover_photo_removed === true) {
       coverPhotoUrl = null;
-    } else {
-      coverPhotoUrl = existingCard?.cover_photo || null;
     }
 
+    // Handle avatar
+    let avatarUrl = existingCard?.avatar || null;
     if (req.files?.avatar?.[0]) {
       const file = req.files.avatar[0];
       const ext = path.extname(file.originalname);
       const key = `card_avatars/${userId}/${uuidv4()}${ext}`;
-      avatarUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
+      avatarUrl = await uploadToS3Util(
+        file.buffer,
+        key,
+        process.env.AWS_CARD_BUCKET_NAME,
+        process.env.AWS_CARD_BUCKET_REGION,
+        file.mimetype
+      );
     } else if (avatar_removed === 'true' || avatar_removed === true) {
       avatarUrl = null;
-    } else {
-      avatarUrl = existingCard?.avatar || null;
     }
 
+    // Upload any new work images
     const newWorkImageUrls = [];
     if (req.files?.works && req.files.works.length > 0) {
       for (const file of req.files.works) {
         const ext = path.extname(file.originalname);
         const key = `card_work_images/${userId}/${uuidv4()}${ext}`;
-        const imageUrl = await uploadToS3Util(file.buffer, key, process.env.AWS_CARD_BUCKET_NAME, process.env.AWS_CARD_BUCKET_REGION, file.mimetype);
+        const imageUrl = await uploadToS3Util(
+          file.buffer,
+          key,
+          process.env.AWS_CARD_BUCKET_NAME,
+          process.env.AWS_CARD_BUCKET_REGION,
+          file.mimetype
+        );
         newWorkImageUrls.push(imageUrl);
       }
     }
-
     const finalWorks = [...parsedWorks, ...newWorkImageUrls];
 
+    // Build update object with simple fields
     const updateBusinessCardData = {
       business_card_name,
       page_theme,
@@ -134,13 +161,6 @@ const createOrUpdateBusinessCard = async (req, res) => {
       services_display_mode,
       reviews_display_mode,
       about_me_layout,
-      // NEW: Ensure visibility flags are set in the update object
-      show_main_section: show_main_section === 'true',
-      show_about_me_section: show_about_me_section === 'true',
-      show_work_section: show_work_section === 'true',
-      show_services_section: show_services_section === 'true',
-      show_reviews_section: show_reviews_section === 'true',
-      show_contact_section: show_contact_section === 'true',
       services: parsedServices,
       reviews: parsedReviews,
       cover_photo: coverPhotoUrl,
@@ -149,9 +169,56 @@ const createOrUpdateBusinessCard = async (req, res) => {
       phone_number,
     };
 
+    // Only set visibility flags if provided; otherwise keep existing values (default true)
+    if (typeof show_main_section !== 'undefined') {
+      updateBusinessCardData.show_main_section = toBool(
+        show_main_section,
+        existingCard?.show_main_section ?? true
+      );
+    }
+    if (typeof show_about_me_section !== 'undefined') {
+      updateBusinessCardData.show_about_me_section = toBool(
+        show_about_me_section,
+        existingCard?.show_about_me_section ?? true
+      );
+    }
+    if (typeof show_work_section !== 'undefined') {
+      updateBusinessCardData.show_work_section = toBool(
+        show_work_section,
+        existingCard?.show_work_section ?? true
+      );
+    }
+    if (typeof show_services_section !== 'undefined') {
+      updateBusinessCardData.show_services_section = toBool(
+        show_services_section,
+        existingCard?.show_services_section ?? true
+      );
+    }
+    if (typeof show_reviews_section !== 'undefined') {
+      updateBusinessCardData.show_reviews_section = toBool(
+        show_reviews_section,
+        existingCard?.show_reviews_section ?? true
+      );
+    }
+    if (typeof show_contact_section !== 'undefined') {
+      updateBusinessCardData.show_contact_section = toBool(
+        show_contact_section,
+        existingCard?.show_contact_section ?? true
+      );
+    }
+
+    // Clean out undefined fields so we don't overwrite existing values with undefined
+    Object.keys(updateBusinessCardData).forEach((k) => {
+      if (typeof updateBusinessCardData[k] === 'undefined') delete updateBusinessCardData[k];
+    });
+
+    // Upsert while ensuring new docs get the user field set
     const card = await BusinessCard.findOneAndUpdate(
       { user: userId },
-      updateBusinessCardData,
+      {
+        $set: updateBusinessCardData,
+        $setOnInsert: { user: userId },
+      },
       { new: true, upsert: true, runValidators: true }
     ).lean();
 
@@ -159,7 +226,9 @@ const createOrUpdateBusinessCard = async (req, res) => {
       return res.status(500).json({ error: 'Failed to find or update business card in DB' });
     }
 
-    const userDetails = await User.findById(userId).select('username qrCode profileUrl isSubscribed trialExpires').lean();
+    const userDetails = await User.findById(userId)
+      .select('username qrCode profileUrl isSubscribed trialExpires')
+      .lean();
 
     const responseCard = {
       ...card,
@@ -171,22 +240,22 @@ const createOrUpdateBusinessCard = async (req, res) => {
     };
 
     res.status(200).json({ message: 'Business card saved successfully', data: responseCard });
-
   } catch (error) {
-    console.error('Backend: Error saving business card in catch block:', error);
-    res.status(500).json({ message: 'Internal server error', error: error.message || 'Unknown error during save.' });
+    console.error('Backend: Error saving business card:', error);
+    res
+      .status(500)
+      .json({ message: 'Internal server error', error: error.message || 'Unknown error during save.' });
   }
 };
 
 const getBusinessCardByUserId = async (req, res) => {
-  const userId = req.user.id;
+  const userId = req.user?.id;
 
   try {
     if (!userId) {
       return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
     }
 
-    // We need to retrieve all fields, not just a subset.
     const card = await BusinessCard.findOne({ user: userId })
       .populate({
         path: 'user',
@@ -218,15 +287,12 @@ const getBusinessCardByUsername = async (req, res) => {
   const { username } = req.params;
 
   try {
-    const user = await User.findOne({ username }).select('isSubscribed trialExpires').lean();
-
+    const user = await User.findOne({ username }).select('isSubscribed trialExpires _id').lean();
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
 
-    // FIX: Retrieve all the data from the BusinessCard model.
     const card = await BusinessCard.findOne({ user: user._id }).lean();
-
     if (!card) {
       return res.status(404).json({ error: 'Business card not found' });
     }
