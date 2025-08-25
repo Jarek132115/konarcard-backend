@@ -30,8 +30,8 @@ router.post('/resend-code', resendVerificationCode);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
 
-// Use the actual middleware file (auth.js)
-const authenticateToken = require('../middleware/auth');
+// ✅ use the actual file name that exists in your repo
+const authenticateToken = require('../middleware/authenticateToken');
 
 router.get('/profile', authenticateToken, getProfile);
 router.put('/update-profile', authenticateToken, updateProfile);
@@ -42,9 +42,10 @@ router.post('/subscribe', authenticateToken, subscribeUser);
 router.post('/cancel-subscription', authenticateToken, cancelSubscription);
 router.get('/subscription-status', authenticateToken, checkSubscriptionStatus);
 
-// Trial endpoints
-router.post('/trial/start', authenticateToken, startTrial);     // <-- matches frontend
-router.post('/start-trial', authenticateToken, startTrial);     // <-- backward compatible
+// ✅ trial endpoint (matches frontend: POST {API_URL}/trial/start)
+router.post('/trial/start', authenticateToken, startTrial);
+// (Optional backward-compat)
+router.post('/start-trial', authenticateToken, startTrial);
 
 router.post('/contact', submitContactForm);
 
