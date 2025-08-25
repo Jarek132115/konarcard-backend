@@ -30,7 +30,9 @@ router.post('/resend-code', resendVerificationCode);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
 
-const authenticateToken = require('../middleware/authenticateToken');
+// Use the actual middleware file (auth.js)
+const authenticateToken = require('../middleware/auth');
+
 router.get('/profile', authenticateToken, getProfile);
 router.put('/update-profile', authenticateToken, updateProfile);
 router.delete('/delete-account', authenticateToken, deleteAccount);
@@ -40,7 +42,9 @@ router.post('/subscribe', authenticateToken, subscribeUser);
 router.post('/cancel-subscription', authenticateToken, cancelSubscription);
 router.get('/subscription-status', authenticateToken, checkSubscriptionStatus);
 
-router.post('/start-trial', authenticateToken, startTrial);
+// Trial endpoints
+router.post('/trial/start', authenticateToken, startTrial);     // <-- matches frontend
+router.post('/start-trial', authenticateToken, startTrial);     // <-- backward compatible
 
 router.post('/contact', submitContactForm);
 
