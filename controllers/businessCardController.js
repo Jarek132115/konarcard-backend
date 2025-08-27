@@ -310,8 +310,34 @@ const getBusinessCardByUsername = async (req, res) => {
   }
 };
 
+// add this near other imports/exports
+const resetBusinessCard = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
+    }
+
+    // If you want to also delete S3 files, you can fetch the doc first and remove them here.
+    const deleted = await BusinessCard.findOneAndDelete({ user: userId }).lean();
+
+    // it’s ok if nothing existed — treat as success so UI can go to template
+    return res.status(200).json({
+      success: true,
+      message: 'Business card reset to default.',
+      deleted: !!deleted,
+    });
+  } catch (err) {
+    console.error('Backend: Error resetting business card:', err);
+    return res.status(500).json({ error: 'Failed to reset business card' });
+  }
+};
+
+
 module.exports = {
   createOrUpdateBusinessCard,
   getBusinessCardByUserId,
   getBusinessCardByUsername,
+  resetBusinessCard, // add this
 };
+
