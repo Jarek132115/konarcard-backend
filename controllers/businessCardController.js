@@ -15,7 +15,6 @@ const s3 = new S3Client({
 });
 
 const uploadToS3Util = require('../utils/uploadToS3');
-// const QRCode = require('qrcode'); // kept if used elsewhere
 
 // Helper: coerce possibly-undefined, string, or boolean into boolean with fallback
 const toBool = (v, fallback) => {
@@ -45,6 +44,16 @@ const createOrUpdateBusinessCard = async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
     }
 
+    // Auto-start trial if no subscription or trial yet
+    const user = await User.findById(userId);
+    if (user && !user.isSubscribed && !user.trialExpires) {
+      const fourteenDaysInMs = 14 * 24 * 60 * 60 * 1000;
+      user.trialExpires = new Date(Date.now() + fourteenDaysInMs);
+      user.isSubscribed = false;
+      user.trialEmailRemindersSent = [];
+      await user.save();
+    }
+
     const {
       business_card_name,
       page_theme,
@@ -66,7 +75,6 @@ const createOrUpdateBusinessCard = async (req, res) => {
       services_display_mode,
       reviews_display_mode,
       about_me_layout,
-      // Section visibility (may be omitted, string or boolean)
       show_main_section,
       show_about_me_section,
       show_work_section,
@@ -145,7 +153,7 @@ const createOrUpdateBusinessCard = async (req, res) => {
     }
     const finalWorks = [...parsedWorks, ...newWorkImageUrls];
 
-    // Build update object with simple fields
+    // Build update object
     const updateBusinessCardData = {
       business_card_name,
       page_theme,
@@ -169,56 +177,33 @@ const createOrUpdateBusinessCard = async (req, res) => {
       phone_number,
     };
 
-    // Only set visibility flags if provided; otherwise keep existing values (default true)
+    // Section visibility flags
     if (typeof show_main_section !== 'undefined') {
-      updateBusinessCardData.show_main_section = toBool(
-        show_main_section,
-        existingCard?.show_main_section ?? true
-      );
+      updateBusinessCardData.show_main_section = toBool(show_main_section, existingCard?.show_main_section ?? true);
     }
     if (typeof show_about_me_section !== 'undefined') {
-      updateBusinessCardData.show_about_me_section = toBool(
-        show_about_me_section,
-        existingCard?.show_about_me_section ?? true
-      );
+      updateBusinessCardData.show_about_me_section = toBool(show_about_me_section, existingCard?.show_about_me_section ?? true);
     }
     if (typeof show_work_section !== 'undefined') {
-      updateBusinessCardData.show_work_section = toBool(
-        show_work_section,
-        existingCard?.show_work_section ?? true
-      );
+      updateBusinessCardData.show_work_section = toBool(show_work_section, existingCard?.show_work_section ?? true);
     }
     if (typeof show_services_section !== 'undefined') {
-      updateBusinessCardData.show_services_section = toBool(
-        show_services_section,
-        existingCard?.show_services_section ?? true
-      );
+      updateBusinessCardData.show_services_section = toBool(show_services_section, existingCard?.show_services_section ?? true);
     }
     if (typeof show_reviews_section !== 'undefined') {
-      updateBusinessCardData.show_reviews_section = toBool(
-        show_reviews_section,
-        existingCard?.show_reviews_section ?? true
-      );
+      updateBusinessCardData.show_reviews_section = toBool(show_reviews_section, existingCard?.show_reviews_section ?? true);
     }
     if (typeof show_contact_section !== 'undefined') {
-      updateBusinessCardData.show_contact_section = toBool(
-        show_contact_section,
-        existingCard?.show_contact_section ?? true
-      );
+      updateBusinessCardData.show_contact_section = toBool(show_contact_section, existingCard?.show_contact_section ?? true);
     }
 
-    // Clean out undefined fields so we don't overwrite existing values with undefined
     Object.keys(updateBusinessCardData).forEach((k) => {
       if (typeof updateBusinessCardData[k] === 'undefined') delete updateBusinessCardData[k];
     });
 
-    // Upsert while ensuring new docs get the user field set
     const card = await BusinessCard.findOneAndUpdate(
       { user: userId },
-      {
-        $set: updateBusinessCardData,
-        $setOnInsert: { user: userId },
-      },
+      { $set: updateBusinessCardData, $setOnInsert: { user: userId } },
       { new: true, upsert: true, runValidators: true }
     ).lean();
 
@@ -242,9 +227,7 @@ const createOrUpdateBusinessCard = async (req, res) => {
     res.status(200).json({ message: 'Business card saved successfully', data: responseCard });
   } catch (error) {
     console.error('Backend: Error saving business card:', error);
-    res
-      .status(500)
-      .json({ message: 'Internal server error', error: error.message || 'Unknown error during save.' });
+    res.status(500).json({ message: 'Internal server error', error: error.message || 'Unknown error during save.' });
   }
 };
 
@@ -310,7 +293,6 @@ const getBusinessCardByUsername = async (req, res) => {
   }
 };
 
-// add this near other imports/exports
 const resetBusinessCard = async (req, res) => {
   try {
     const userId = req.user?.id;
@@ -318,10 +300,8 @@ const resetBusinessCard = async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized: User ID not found in token' });
     }
 
-    // If you want to also delete S3 files, you can fetch the doc first and remove them here.
     const deleted = await BusinessCard.findOneAndDelete({ user: userId }).lean();
 
-    // it’s ok if nothing existed — treat as success so UI can go to template
     return res.status(200).json({
       success: true,
       message: 'Business card reset to default.',
@@ -333,11 +313,9 @@ const resetBusinessCard = async (req, res) => {
   }
 };
 
-
 module.exports = {
   createOrUpdateBusinessCard,
   getBusinessCardByUserId,
   getBusinessCardByUsername,
-  resetBusinessCard, // add this
+  resetBusinessCard,
 };
-
