@@ -55,14 +55,17 @@ const registerUser = async (req, res) => {
 
         const qrBuffer = await QRCode.toBuffer(profileUrl, {
             width: 500,
-            color: {
-                dark: '#000000',
-                light: '#ffffff',
-            },
+            color: { dark: '#000000', light: '#ffffff' },
         });
 
         const fileKey = `qr-codes/${user._id}.png`;
-        const qrCodeUrl = await uploadToS3(qrBuffer, fileKey, process.env.AWS_QR_BUCKET_NAME, process.env.AWS_QR_BUCKET_REGION, 'image/png');
+        const qrCodeUrl = await uploadToS3(
+            qrBuffer,
+            fileKey,
+            process.env.AWS_QR_BUCKET_NAME,
+            process.env.AWS_QR_BUCKET_REGION,
+            'image/png'
+        );
         user.qrCode = qrCodeUrl;
         await user.save();
 
@@ -96,16 +99,13 @@ const verifyEmailCode = async (req, res) => {
         userToSend.name = userToSend.name || '';
         userToSend.email = userToSend.email || '';
 
-        // Generate a new JWT token for the now-verified user
         const token = jwt.sign(
             { email: user.email, id: user._id, name: user.name },
             process.env.JWT_SECRET,
             {}
         );
 
-        // Send both the token and the user data back to the client
         res.status(200).json({ success: true, message: 'Email verified successfully', user: userToSend, token });
-
     } catch (err) {
         res.status(500).json({ error: 'Verification failed' });
     }
@@ -175,7 +175,6 @@ const loginUser = async (req, res) => {
         userToSend.email = userToSend.email || '';
 
         res.status(200).json({ user: userToSend, token });
-
     } catch (error) {
         res.status(500).json({ error: 'Login failed' });
     }
@@ -255,7 +254,6 @@ const getProfile = async (req, res) => {
         user.email = user.email || '';
 
         res.status(200).json({ data: user });
-
     } catch (err) {
         res.status(500).json({ error: 'Failed to fetch user profile.' });
     }
@@ -290,7 +288,6 @@ const updateProfile = async (req, res) => {
         updatedUser.email = updatedUser.email || '';
 
         res.status(200).json({ success: true, data: updatedUser });
-
     } catch (err) {
         res.status(500).json({ error: 'Failed to update profile', details: err.message });
     }
@@ -315,7 +312,7 @@ const logoutUser = (req, res) => {
     res.status(200).json({ message: 'Logged out successfully' });
 };
 
-// STRIPE: Subscribe
+// STRIPE: Subscribe (recurring)
 const subscribeUser = async (req, res) => {
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -343,17 +340,10 @@ const subscribeUser = async (req, res) => {
             customer: customerId,
             payment_method_types: ['card'],
             mode: 'subscription',
-            line_items: [{
-                price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID,
-                quantity: 1,
-            }],
-
+            line_items: [{ price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
             success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/subscription`,
-
-            subscription_data: {
-                trial_period_days: 14,
-            },
+            subscription_data: { trial_period_days: 14 },
         });
 
         res.status(200).json({ url: session.url });
@@ -416,10 +406,9 @@ const checkSubscriptionStatus = async (req, res) => {
         const responseData = {
             active: isActive,
             status: subscription.status,
-            current_period_end: subscription.current_period_end
+            current_period_end: subscription.current_period_end,
         };
         return res.status(200).json(responseData);
-
     } catch (err) {
         if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
             const user = await User.findById(req.user.id);
@@ -460,13 +449,69 @@ const startTrial = async (req, res) => {
         res.status(200).json({
             success: true,
             message: '14-day free trial started successfully!',
-            trialExpires: user.trialExpires
+            trialExpires: user.trialExpires,
         });
     } catch (err) {
         res.status(500).json({ error: 'Failed to start trial', details: err.message });
     }
 };
 
+// STRIPE: One-time Card Checkout (Konar Card)
+const createCardCheckoutSession = async (req, res) => {
+    if (!req.user || !req.user.id) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    try {
+        if (!process.env.STRIPE_CARD_PRICE_ID) {
+            return res.status(500).json({ error: 'Server not configured: STRIPE_CARD_PRICE_ID missing' });
+        }
+
+        const rawQty = req.body?.quantity;
+        const qty = Math.max(1, parseInt(rawQty, 10) || 1);
+
+        const user = await User.findById(req.user.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        // Ensure Stripe customer
+        let customerId = user.stripeCustomerId;
+        if (!customerId) {
+            const customer = await stripe.customers.create({
+                email: user.email,
+                name: user.name,
+                metadata: { userId: user._id.toString() },
+            });
+            customerId = customer.id;
+            user.stripeCustomerId = customerId;
+            await user.save();
+        }
+
+        const session = await stripe.checkout.sessions.create({
+            customer: customerId,
+            mode: 'payment',
+            payment_method_types: ['card'],
+            allow_promotion_codes: true,
+            line_items: [
+                { price: process.env.STRIPE_CARD_PRICE_ID, quantity: qty },
+            ],
+            success_url: `${process.env.CLIENT_URL}/SuccessOrder?session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${process.env.CLIENT_URL}/productandplan/konarcard`,
+            metadata: {
+                userId: user._id.toString(),
+                kind: 'konar_card',
+                quantity: String(qty),
+            },
+        });
+
+        // Frontend expects { id } for redirectToCheckout
+        return res.status(200).json({ id: session.id, url: session.url });
+    } catch (err) {
+        return res.status(500).json({
+            error: 'Failed to create checkout session',
+            details: err.message,
+        });
+    }
+};
 
 // CONTACT FORM
 const submitContactForm = async (req, res) => {
@@ -482,7 +527,7 @@ const submitContactForm = async (req, res) => {
     <p><strong>Email:</strong> ${email}</p>
     <p><strong>Reason:</strong> ${reason}</p>
     <p><strong>Message:</strong><br/>${message}</p>
-`;
+  `;
 
     try {
         await sendEmail({ email: 'supportteam@konarcard.com', subject: `Contact Form: ${reason}`, message: html });
@@ -510,4 +555,5 @@ module.exports = {
     checkSubscriptionStatus,
     startTrial,
     submitContactForm,
+    createCardCheckoutSession, // <-- NEW export
 };
