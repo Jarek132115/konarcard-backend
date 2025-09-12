@@ -10,6 +10,8 @@ const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const uploadToS3 = require('../utils/uploadToS3');
 
+const normalizeEmail = (e) => (e || '').trim().toLowerCase();
+
 // TEST
 const test = (req, res) => {
     res.json('test is working');
@@ -27,23 +29,26 @@ const registerUser = async (req, res) => {
             return res.status(400).json({ error: 'Passwords do not match.' });
         }
 
-        const existingEmail = await User.findOne({ email });
+        const normalizedEmail = normalizeEmail(email);
+        const normalizedUsername = (username || '').trim().toLowerCase();
+
+        const existingEmail = await User.findOne({ email: normalizedEmail });
         if (existingEmail) return res.json({ error: 'This email is already registered. Please log in.' });
 
-        const existingUsername = await User.findOne({ username: username.toLowerCase() });
+        const existingUsername = await User.findOne({ username: normalizedUsername });
         if (existingUsername) return res.status(400).json({ error: 'Username already taken. Please choose another.' });
 
         const hashedPassword = await hashPassword(password);
 
-        const slug = username.toLowerCase();
+        const slug = normalizedUsername;
         const profileUrl = `${process.env.CLIENT_URL}/u/${slug}`;
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 10 * 60 * 1000;
 
         const user = await User.create({
             name,
-            email,
-            username: username.toLowerCase().trim(),
+            email: normalizedEmail,
+            username: normalizedUsername,
             password: hashedPassword,
             profileUrl,
             isVerified: false,
@@ -69,7 +74,7 @@ const registerUser = async (req, res) => {
         await user.save();
 
         const html = verificationEmailTemplate(name, code);
-        await sendEmail({ email: email, subject: 'Verify Your Email', message: html });
+        await sendEmail({ email: normalizedEmail, subject: 'Verify Your Email', message: html });
 
         res.json({ success: true, message: 'Verification email sent' });
     } catch (err) {
@@ -80,7 +85,8 @@ const registerUser = async (req, res) => {
 // VERIFY EMAIL
 const verifyEmailCode = async (req, res) => {
     try {
-        const { email, code } = req.body;
+        const email = normalizeEmail(req.body.email);
+        const { code } = req.body;
         const user = await User.findOne({ email });
 
         if (!user) return res.json({ error: 'User not found' });
@@ -113,7 +119,7 @@ const verifyEmailCode = async (req, res) => {
 // RESEND VERIFICATION CODE
 const resendVerificationCode = async (req, res) => {
     try {
-        const { email } = req.body;
+        const email = normalizeEmail(req.body.email);
         const user = await User.findOne({ email });
 
         if (!user) return res.json({ error: 'User not found' });
@@ -127,7 +133,7 @@ const resendVerificationCode = async (req, res) => {
         await user.save();
 
         const html = verificationEmailTemplate(user.name, newCode);
-        await sendEmail({ email: email, subject: 'Your New Verification Code', message: html });
+        await sendEmail({ email, subject: 'Your New Verification Code', message: html });
 
         res.json({ success: true, message: 'Verification code resent' });
     } catch {
@@ -138,7 +144,9 @@ const resendVerificationCode = async (req, res) => {
 // LOGIN
 const loginUser = async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const email = normalizeEmail(req.body.email);
+        const { password } = req.body;
+
         const user = await User.findOne({ email });
         if (!user) return res.json({ error: 'No user found' });
 
@@ -154,7 +162,7 @@ const loginUser = async (req, res) => {
             await user.save();
 
             const html = verificationEmailTemplate(user.name, newCode);
-            await sendEmail({ email: email, subject: 'Verify Your Email', message: html });
+            await sendEmail({ email, subject: 'Verify Your Email', message: html });
 
             return res.json({
                 error: 'Please verify your email before logging in.',
@@ -182,19 +190,25 @@ const loginUser = async (req, res) => {
 // FORGOT PASSWORD
 const forgotPassword = async (req, res) => {
     try {
-        const { email } = req.body;
+        const email = normalizeEmail(req.body.email);
         const user = await User.findOne({ email });
-        if (!user) return res.json({ error: 'User not found' });
+        if (!user) {
+            return res.json({ error: 'User not found' });
+        }
 
         const token = crypto.randomBytes(32).toString('hex');
         user.resetToken = token;
         user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
 
-        await user.save();
+        try {
+            await user.save();
+        } catch {
+            return res.status(500).json({ error: 'Failed to update user with reset token.' });
+        }
 
         const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
         const html = passwordResetTemplate(user.name, resetLink);
-        await sendEmail({ email: email, subject: 'Reset Your Password', message: html });
+        await sendEmail({ email, subject: 'Reset Your Password', message: html });
 
         res.json({ success: true, message: 'Password reset email sent' });
     } catch {
@@ -213,7 +227,9 @@ const resetPassword = async (req, res) => {
             resetTokenExpires: { $gt: Date.now() },
         });
 
-        if (!user) return res.json({ error: 'Invalid or expired token' });
+        if (!user) {
+            return res.json({ error: 'Invalid or expired token' });
+        }
 
         const hashed = await hashPassword(password);
         user.password = hashed;
@@ -240,7 +256,6 @@ const getProfile = async (req, res) => {
         user.id = user._id;
         user.name = user.name || '';
         user.email = user.email || '';
-
         res.status(200).json({ data: user });
     } catch {
         res.status(500).json({ error: 'Failed to fetch user profile.' });
@@ -255,9 +270,16 @@ const updateProfile = async (req, res) => {
 
     try {
         const { name, email, bio, job_title, password } = req.body;
-        const updateFields = { name, email, bio, job_title };
+        const updateFields = {
+            name,
+            bio,
+            job_title,
+            ...(email ? { email: normalizeEmail(email) } : {}),
+        };
 
-        if (password) updateFields.password = await hashPassword(password);
+        if (password) {
+            updateFields.password = await hashPassword(password);
+        }
 
         const updatedUser = await User.findByIdAndUpdate(
             req.user.id,
@@ -265,12 +287,13 @@ const updateProfile = async (req, res) => {
             { new: true, runValidators: true }
         ).select('-password').lean();
 
-        if (!updatedUser) return res.status(404).json({ error: 'User not found for update.' });
+        if (!updatedUser) {
+            return res.status(404).json({ error: 'User not found for update.' });
+        }
 
         updatedUser.id = updatedUser._id;
         updatedUser.name = updatedUser.name || '';
         updatedUser.email = updatedUser.email || '';
-
         res.status(200).json({ success: true, data: updatedUser });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update profile', details: err.message });
@@ -296,25 +319,20 @@ const logoutUser = (req, res) => {
     res.status(200).json({ message: 'Logged out successfully' });
 };
 
-// ===== STRIPE: Subscribe (recurring) =====
+// STRIPE: Subscribe (recurring)
 const subscribeUser = async (req, res) => {
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
     try {
-        // Guard: ensure env var exists
-        const priceId = process.env.STRIPE_SUBSCRIPTION_PRICE_ID;
-        if (!priceId) {
-            return res.status(500).json({ error: 'Server not configured: STRIPE_SUBSCRIPTION_PRICE_ID missing' });
-        }
-
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // Ensure Stripe customer
-        let customerId = user.stripeCustomerId;
-        if (!customerId) {
+        let customerId;
+        if (user.stripeCustomerId) {
+            customerId = user.stripeCustomerId;
+        } else {
             const customer = await stripe.customers.create({
                 email: user.email,
                 name: user.name,
@@ -329,7 +347,7 @@ const subscribeUser = async (req, res) => {
             customer: customerId,
             payment_method_types: ['card'],
             mode: 'subscription',
-            line_items: [{ price: priceId, quantity: 1 }],
+            line_items: [{ price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
             success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/subscription`,
             subscription_data: { trial_period_days: 14 },
@@ -337,11 +355,7 @@ const subscribeUser = async (req, res) => {
 
         res.status(200).json({ url: session.url });
     } catch (err) {
-        // Surface Stripe error reason for easier debugging in the UI
-        res.status(500).json({
-            error: 'Failed to start subscription',
-            details: err?.message || 'Unknown error',
-        });
+        res.status(500).json({ error: 'Failed to start subscription', details: err.message });
     }
 };
 
@@ -376,9 +390,7 @@ const checkSubscriptionStatus = async (req, res) => {
 
     try {
         const user = await User.findById(req.user.id);
-        if (!user) {
-            return res.status(200).json({ active: false, status: 'user_not_found' });
-        }
+        if (!user) return res.status(200).json({ active: false, status: 'user_not_found' });
 
         if (!user.stripeCustomerId || !user.stripeSubscriptionId) {
             return res.status(200).json({ active: false, status: 'no_stripe_data' });
@@ -396,11 +408,12 @@ const checkSubscriptionStatus = async (req, res) => {
             await user.save();
         }
 
-        return res.status(200).json({
+        const responseData = {
             active: isActive,
             status: subscription.status,
             current_period_end: subscription.current_period_end,
-        });
+        };
+        return res.status(200).json(responseData);
     } catch (err) {
         if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
             const user = await User.findById(req.user.id);
@@ -446,17 +459,15 @@ const startTrial = async (req, res) => {
     }
 };
 
-// ===== STRIPE: One-time Card Checkout (Konar Card) =====
+// One-time card checkout (kept unchanged from your working version)
 const createCardCheckoutSession = async (req, res) => {
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
     }
 
     try {
-        // IMPORTANT: match your env var name in Cloud Run
-        const priceId = process.env.STRIPE_WHITE_CARD_PRICE_ID;
-        if (!priceId) {
-            return res.status(500).json({ error: 'Server not configured: STRIPE_WHITE_CARD_PRICE_ID missing' });
+        if (!process.env.STRIPE_CARD_PRICE_ID) {
+            return res.status(500).json({ error: 'Server not configured: STRIPE_CARD_PRICE_ID missing' });
         }
 
         const rawQty = req.body?.quantity;
@@ -465,7 +476,6 @@ const createCardCheckoutSession = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // Ensure Stripe customer
         let customerId = user.stripeCustomerId;
         if (!customerId) {
             const customer = await stripe.customers.create({
@@ -483,27 +493,18 @@ const createCardCheckoutSession = async (req, res) => {
             mode: 'payment',
             payment_method_types: ['card'],
             allow_promotion_codes: true,
-            line_items: [{ price: priceId, quantity: qty }],
+            line_items: [{ price: process.env.STRIPE_CARD_PRICE_ID, quantity: qty }],
             success_url: `${process.env.CLIENT_URL}/SuccessOrder?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/productandplan/konarcard`,
-            metadata: {
-                userId: user._id.toString(),
-                kind: 'konar_card',
-                quantity: String(qty),
-            },
+            metadata: { userId: user._id.toString(), kind: 'konar_card', quantity: String(qty) },
         });
 
-        // Frontend expects { id } for redirectToCheckout
         return res.status(200).json({ id: session.id, url: session.url });
     } catch (err) {
-        return res.status(500).json({
-            error: 'Failed to create checkout session',
-            details: err.message,
-        });
+        return res.status(500).json({ error: 'Failed to create checkout session', details: err.message });
     }
 };
 
-// CONTACT FORM
 const submitContactForm = async (req, res) => {
     const { name, email, reason, message } = req.body;
 
@@ -527,7 +528,6 @@ const submitContactForm = async (req, res) => {
     }
 };
 
-// EXPORT ALL
 module.exports = {
     test,
     registerUser,
