@@ -1,5 +1,7 @@
+// routes/auth.js
 const express = require('express');
 const router = express.Router();
+
 const {
     test,
     registerUser,
@@ -17,7 +19,7 @@ const {
     checkSubscriptionStatus,
     submitContactForm,
     startTrial,
-    createCardCheckoutSession, // <-- NEW import
+    createCardCheckoutSession,
 } = require('../controllers/authController');
 
 router.use(express.json({ limit: '50mb' }));
@@ -31,7 +33,7 @@ router.post('/resend-code', resendVerificationCode);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
 
-// ✅ auth middleware you already use
+// auth middleware
 const authenticateToken = require('../middleware/authenticateToken');
 
 router.get('/profile', authenticateToken, getProfile);
@@ -51,7 +53,7 @@ router.post('/start-trial', authenticateToken, startTrial); // optional alias
 // Contact
 router.post('/contact', submitContactForm);
 
-// ✅ NEW: One-time checkout for Konar Card (matches frontend call)
+// One-time checkout for Konar Card (matches frontend call)
 router.post('/checkout/create-checkout-session', authenticateToken, createCardCheckoutSession);
 
 module.exports = router;
