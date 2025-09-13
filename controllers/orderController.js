@@ -16,12 +16,16 @@ const listOrders = async (req, res) => {
             .sort({ createdAt: -1 })
             .lean();
 
+        if (!orders || orders.length === 0) {
+            return res.status(200).json({ data: [] });
+        }
+
         // Shape/rename fields for the frontend
         const result = orders.map(o => ({
             id: o._id,
             type: o.type, // 'card' | 'subscription'
             status: o.status, // 'pending' | 'paid' | 'active' | 'canceled' | 'failed'
-            quantity: o.quantity || 1,
+            quantity: o.type === 'card' ? (o.quantity || 1) : null,
             amountTotal: o.amountTotal ?? null,
             currency: o.currency || 'gbp',
             stripeSessionId: o.stripeSessionId || null,

@@ -53,25 +53,33 @@ exports.handleStripeWebhook = async (req, res) => {
 
     try {
         switch (event.type) {
+            // ------------------------------------------------------------
+            // Checkout finished (card payment or subscription start)
+            // ------------------------------------------------------------
             case 'checkout.session.completed': {
                 const session = event.data.object;
+                // session.mode: "payment" | "subscription"
+                // session.customer: customer id
+                // session.subscription: subscription id (if mode === 'subscription')
+                // session.amount_total / session.currency
+                // session.metadata: we set kind/userId/quantity in checkout
 
                 console.log(
                     `checkout.session.completed: id=${session.id} mode=${session.mode} cust=${session.customer} sub=${session.subscription}`
                 );
 
-                // Try to resolve user
+                // Resolve user
                 let userId = session?.metadata?.userId || null;
                 if (!userId && session.customer) {
                     const u = await User.findOne({ stripeCustomerId: session.customer }).select('_id');
                     if (u) userId = u._id.toString();
                 }
-
                 if (!userId) {
                     console.warn(`No userId found for session ${session.id}`);
                 }
 
                 if (session.mode === 'payment') {
+                    // One-time Konar Card order
                     const quantity = toInt(session?.metadata?.quantity, 1);
 
                     await upsertOrderBy(
@@ -88,9 +96,12 @@ exports.handleStripeWebhook = async (req, res) => {
                             metadata: session.metadata || {},
                         }
                     );
+
+                    console.log(`Order (card) upserted for session ${session.id} user=${userId}`);
                 }
 
                 if (session.mode === 'subscription') {
+                    // Create/seed a subscription "order" record (status will be refined by sub events)
                     await upsertOrderBy(
                         { stripeSubscriptionId: session.subscription },
                         {
@@ -105,16 +116,23 @@ exports.handleStripeWebhook = async (req, res) => {
                             metadata: session.metadata || {},
                         }
                     );
+
+                    console.log(`Order (subscription seed) upserted for sub ${session.subscription} user=${userId}`);
                 }
+
                 break;
             }
 
+            // ------------------------------------------------------------
+            // Subscription lifecycle
+            // ------------------------------------------------------------
             case 'customer.subscription.created': {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
-                const status = subscription.status;
+                const status = subscription.status; // trialing/active/incomplete/...
                 const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
 
+                // Update user flags
                 const user = await User.findOne({ stripeCustomerId: customerId });
                 if (user) {
                     user.isSubscribed = isActive;
@@ -124,6 +142,7 @@ exports.handleStripeWebhook = async (req, res) => {
                     await user.save();
                 }
 
+                // Update/create order record for subscription
                 await upsertOrderBy(
                     { stripeSubscriptionId: subscription.id },
                     {
@@ -134,6 +153,8 @@ exports.handleStripeWebhook = async (req, res) => {
                         status: isActive ? 'active' : 'pending',
                     }
                 );
+
+                console.log(`subscription.created handled: sub=${subscription.id} active=${isActive}`);
                 break;
             }
 
@@ -161,6 +182,8 @@ exports.handleStripeWebhook = async (req, res) => {
                         status: isActive ? 'active' : 'pending',
                     }
                 );
+
+                console.log(`subscription.updated handled: sub=${subscription.id} active=${isActive}`);
                 break;
             }
 
@@ -186,9 +209,14 @@ exports.handleStripeWebhook = async (req, res) => {
                         status: 'canceled',
                     }
                 );
+
+                console.log(`subscription.deleted handled: sub=${subscription.id}`);
                 break;
             }
 
+            // ------------------------------------------------------------
+            // Invoices (mark subscription orders paid/active)
+            // ------------------------------------------------------------
             case 'invoice.payment_succeeded': {
                 const invoice = event.data.object;
                 console.log(
@@ -201,13 +229,16 @@ exports.handleStripeWebhook = async (req, res) => {
                         {
                             amountTotal: invoice.amount_paid ?? null,
                             currency: invoice.currency || 'gbp',
-                            status: 'active',
+                            status: 'active', // treat as active
                         }
                     );
                 }
                 break;
             }
 
+            // ------------------------------------------------------------
+            // Trial reminder (email only)
+            // ------------------------------------------------------------
             case 'customer.subscription.trial_will_end': {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
@@ -231,7 +262,7 @@ exports.handleStripeWebhook = async (req, res) => {
         res.status(200).send('OK');
     } catch (err) {
         console.error('Webhook handler error (non-fatal):', err);
-        // Always ack to prevent endless Stripe retries
+        // Always ack to prevent endless Stripe retries after a valid signature
         res.status(200).send('OK');
     }
 };
