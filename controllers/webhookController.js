@@ -9,9 +9,24 @@ const {
     trialFirstReminderTemplate,
     trialFinalWarningTemplate,
 } = require('../utils/emailTemplates');
+
 const User = require('../models/user');
-// If/when you want to persist orders, import your model here:
-// const Order = require('../models/Order');
+const Order = require('../models/Order'); // <-- IMPORTANT: capital "O"
+
+// Helper: safe int
+const toInt = (v, d = 0) => {
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) ? n : d;
+};
+
+// Helper: upsert an order by a unique key
+async function upsertOrderBy(where, updates) {
+    return Order.findOneAndUpdate(
+        where,
+        { $set: updates },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+}
 
 exports.handleStripeWebhook = async (req, res) => {
     const sig = req.headers['stripe-signature'];
@@ -25,7 +40,7 @@ exports.handleStripeWebhook = async (req, res) => {
             process.env.STRIPE_WEBHOOK_SECRET
         );
         console.log(
-            `Backend: Webhook constructed. Type: ${event.type} ID: ${event.id} Livemode: ${event.livemode}`
+            `Webhook OK: type=${event.type} id=${event.id} live=${event.livemode}`
         );
     } catch (err) {
         console.error('⚠️ Stripe webhook signature error:', err.message);
@@ -34,194 +49,225 @@ exports.handleStripeWebhook = async (req, res) => {
 
     try {
         switch (event.type) {
+            // ------------------------------------------------------------
+            // Checkout finished (card payment or subscription start)
+            // ------------------------------------------------------------
             case 'checkout.session.completed': {
                 const session = event.data.object;
+                // session.mode: "payment" | "subscription"
+                // session.customer: customer id
+                // session.subscription: subscription id (if mode === 'subscription')
+                // session.amount_total / session.currency
+                // session.metadata: we set kind=userId/quantity in your checkout
+
                 console.log(
-                    `Backend: checkout.session.completed for ${session.id} | customer ${session.customer} | subscription ${session.subscription} | mode ${session.mode}`
+                    `checkout.session.completed: id=${session.id} mode=${session.mode} cust=${session.customer} sub=${session.subscription}`
                 );
 
-                // Example: (optional) later we can persist an Order here based on session.mode
+                // Try to resolve user
+                let userId = session?.metadata?.userId || null;
+                if (!userId && session.customer) {
+                    const u = await User.findOne({ stripeCustomerId: session.customer }).select('_id');
+                    if (u) userId = u._id.toString();
+                }
+
+                // Fallback if still no user
+                if (!userId) {
+                    console.warn(
+                        `No userId found for session ${session.id}. (metadata.userId and customer lookup both failed)`
+                    );
+                }
+
+                if (session.mode === 'payment') {
+                    // One-time Konar Card order
+                    const quantity = toInt(session?.metadata?.quantity, 1);
+
+                    await upsertOrderBy(
+                        { stripeSessionId: session.id },
+                        {
+                            userId,
+                            type: 'card',
+                            stripeSessionId: session.id,
+                            stripeCustomerId: session.customer || null,
+                            quantity,
+                            amountTotal: session.amount_total ?? null,
+                            currency: session.currency || 'gbp',
+                            status: session.payment_status === 'paid' ? 'paid' : 'pending',
+                            metadata: session.metadata || {},
+                        }
+                    );
+
+                    // Optional: send confirmation email here if payment is paid
+                    // if (userId && session.payment_status === 'paid') { ... sendEmail(...) }
+
+                    console.log(`Order (card) upserted for session ${session.id}`);
+                }
+
+                if (session.mode === 'subscription') {
+                    // Create/seed a subscription "order" record (status will be refined by sub events)
+                    await upsertOrderBy(
+                        { stripeSubscriptionId: session.subscription },
+                        {
+                            userId,
+                            type: 'subscription',
+                            stripeSessionId: session.id,
+                            stripeSubscriptionId: session.subscription || null,
+                            stripeCustomerId: session.customer || null,
+                            status: 'pending',
+                            amountTotal: session.amount_total ?? null,
+                            currency: session.currency || 'gbp',
+                            metadata: session.metadata || {},
+                        }
+                    );
+
+                    console.log(`Order (subscription seed) upserted for sub ${session.subscription}`);
+                }
 
                 break;
             }
 
+            // ------------------------------------------------------------
+            // Subscription lifecycle
+            // ------------------------------------------------------------
             case 'customer.subscription.created': {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
-                console.log(
-                    `Backend: customer.subscription.created ${subscription.id} for customer ${customerId}`
+                const status = subscription.status; // trialing/active/incomplete/...
+                const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
+
+                // Update user flags
+                const user = await User.findOne({ stripeCustomerId: customerId });
+                if (user) {
+                    user.isSubscribed = isActive;
+                    user.stripeSubscriptionId = subscription.id;
+                    user.trialExpires = undefined;
+                    user.trialEmailRemindersSent = [];
+                    await user.save();
+                }
+
+                // Update/create order record for subscription
+                await upsertOrderBy(
+                    { stripeSubscriptionId: subscription.id },
+                    {
+                        userId: user ? user._id : undefined,
+                        type: 'subscription',
+                        stripeSubscriptionId: subscription.id,
+                        stripeCustomerId: customerId,
+                        status: isActive ? 'active' : 'pending',
+                    }
                 );
 
-                try {
-                    const user = await User.findOne({ stripeCustomerId: customerId });
-                    console.log(
-                        `Backend: subscription.created -> user found? ${!!user}`
-                    );
-
-                    if (user) {
-                        const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(
-                            subscription.status
-                        );
-                        user.isSubscribed = isActive;
-                        user.stripeSubscriptionId = subscription.id;
-                        user.trialExpires = undefined;
-                        user.trialEmailRemindersSent = [];
-                        await user.save();
-                        console.log(
-                            `Backend: user ${user._id} updated: isSubscribed=${isActive}, stripeSubscriptionId=${subscription.id}`
-                        );
-                    } else {
-                        console.warn(
-                            `Backend: No user found for stripeCustomerId ${customerId} (subscription.created)`
-                        );
-                    }
-                } catch (saveErr) {
-                    console.error(
-                        'Backend: ERROR while processing customer.subscription.created:',
-                        saveErr
-                    );
-                }
+                console.log(`subscription.created handled: sub=${subscription.id} active=${isActive}`);
                 break;
             }
 
             case 'customer.subscription.updated': {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
-                console.log(
-                    `Backend: customer.subscription.updated ${subscription.id} -> ${subscription.status}`
+                const status = subscription.status;
+                const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
+
+                const user = await User.findOne({ stripeCustomerId: customerId });
+                if (user) {
+                    user.isSubscribed = isActive;
+                    user.stripeSubscriptionId = subscription.id;
+                    if (isActive) user.trialExpires = undefined;
+                    await user.save();
+                }
+
+                await upsertOrderBy(
+                    { stripeSubscriptionId: subscription.id },
+                    {
+                        userId: user ? user._id : undefined,
+                        type: 'subscription',
+                        stripeSubscriptionId: subscription.id,
+                        stripeCustomerId: customerId,
+                        status: isActive ? 'active' : 'pending',
+                    }
                 );
 
-                try {
-                    const user = await User.findOne({ stripeCustomerId: customerId });
-                    if (user) {
-                        const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(
-                            subscription.status
-                        );
-                        user.isSubscribed = isActive;
-                        user.stripeSubscriptionId = subscription.id;
-                        if (isActive) user.trialExpires = undefined;
-
-                        await user.save();
-                        console.log(
-                            `Backend: user ${user._id} updated: isSubscribed=${isActive}`
-                        );
-                    } else {
-                        console.warn(
-                            `Backend: No user found for stripeCustomerId ${customerId} (subscription.updated)`
-                        );
-                    }
-                } catch (err) {
-                    console.error(
-                        'Backend: ERROR while processing customer.subscription.updated:',
-                        err
-                    );
-                }
+                console.log(`subscription.updated handled: sub=${subscription.id} active=${isActive}`);
                 break;
             }
 
             case 'customer.subscription.deleted': {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
-                console.log(
-                    `Backend: customer.subscription.deleted ${subscription.id}`
+
+                const user = await User.findOne({ stripeCustomerId: customerId });
+                if (user) {
+                    user.isSubscribed = false;
+                    user.stripeSubscriptionId = undefined;
+                    user.trialExpires = undefined;
+                    user.trialEmailRemindersSent = [];
+                    await user.save();
+                }
+
+                await upsertOrderBy(
+                    { stripeSubscriptionId: subscription.id },
+                    {
+                        type: 'subscription',
+                        stripeSubscriptionId: subscription.id,
+                        stripeCustomerId: customerId,
+                        status: 'canceled',
+                    }
                 );
 
-                try {
-                    const user = await User.findOne({ stripeCustomerId: customerId });
-                    if (user) {
-                        user.isSubscribed = false;
-                        user.stripeSubscriptionId = undefined;
-                        user.trialExpires = undefined;
-                        user.trialEmailRemindersSent = [];
-                        await user.save();
-                        console.log(
-                            `Backend: user ${user._id} set isSubscribed=false (subscription.deleted)`
-                        );
+                console.log(`subscription.deleted handled: sub=${subscription.id}`);
 
-                        // Optional: email user about cancellation if you want
-                        if (subscriptionConfirmationTemplate) {
-                            try {
-                                await sendEmail({
-                                    email: user.email,
-                                    subject:
-                                        'Your Konar Premium Subscription has been Cancelled',
-                                    message: subscriptionConfirmationTemplate(
-                                        user.name,
-                                        null,
-                                        'subscription_cancelled'
-                                    ),
-                                });
-                            } catch (emailErr) {
-                                console.error('Backend: cancellation email error:', emailErr);
-                            }
+                // Optional: cancellation email
+                // if (user) { await sendEmail(...); }
+                break;
+            }
+
+            // ------------------------------------------------------------
+            // Invoices (you can mark subscription orders paid here if you want)
+            // ------------------------------------------------------------
+            case 'invoice.payment_succeeded': {
+                const invoice = event.data.object;
+                console.log(
+                    `invoice.payment_succeeded: invoice=${invoice.id} sub=${invoice.subscription} amount=${invoice.amount_paid}`
+                );
+
+                if (invoice.subscription) {
+                    await upsertOrderBy(
+                        { stripeSubscriptionId: invoice.subscription },
+                        {
+                            amountTotal: invoice.amount_paid ?? undefined,
+                            currency: invoice.currency || 'gbp',
+                            status: 'active', // still treat it as active
                         }
-                    } else {
-                        console.warn(
-                            `Backend: No user found for stripeCustomerId ${customerId} (subscription.deleted)`
-                        );
-                    }
-                } catch (err) {
-                    console.error(
-                        'Backend: ERROR while processing customer.subscription.deleted:',
-                        err
                     );
                 }
                 break;
             }
 
-            case 'invoice.payment_succeeded': {
-                const invoice = event.data.object;
-                console.log(
-                    `Backend: invoice.payment_succeeded ${invoice.id} amount ${(invoice.amount_paid / 100).toFixed(
-                        2
-                    )}`
-                );
-                // Optional: persist invoice info or update order status
-                break;
-            }
-
+            // ------------------------------------------------------------
+            // Trial reminder (email only)
+            // ------------------------------------------------------------
             case 'customer.subscription.trial_will_end': {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
-                console.log(
-                    `Backend: customer.subscription.trial_will_end ${subscription.id}`
-                );
 
-                try {
-                    const user = await User.findOne({ stripeCustomerId: customerId });
-                    if (user && subscription.status === 'trialing') {
-                        console.log(
-                            `Backend: Sending final trial warning email to user ${user._id}`
-                        );
-                        await sendEmail({
-                            email: user.email,
-                            subject: 'Your Free Trial is Ending Soon!',
-                            message: trialFinalWarningTemplate(user.name),
-                        });
-                    } else {
-                        console.log(
-                            `Backend: No email sent. User not found or not trialing.`
-                        );
-                    }
-                } catch (err) {
-                    console.error(
-                        `Backend: Error in customer.subscription.trial_will_end:`,
-                        err
-                    );
+                const user = await User.findOne({ stripeCustomerId: customerId });
+                if (user && subscription.status === 'trialing') {
+                    await sendEmail({
+                        email: user.email,
+                        subject: 'Your Free Trial is Ending Soon!',
+                        message: trialFinalWarningTemplate(user.name),
+                    });
+                    console.log(`Sent final trial warning to ${user.email}`);
                 }
                 break;
             }
 
             default:
-                console.log(`Backend: Unhandled event ${event.type}`);
+                console.log(`Unhandled event: ${event.type}`);
         }
 
-        // Always 200 after successful handling
         res.status(200).send('OK');
-        console.log('Backend: Webhook processed and 200 returned.');
     } catch (err) {
-        // If your logic throws, still tell Stripe it failed so it can retry
-        console.error('Backend: Webhook handler error:', err);
+        console.error('Webhook handler error:', err);
         res.status(500).send('Webhook handler error');
     }
 };

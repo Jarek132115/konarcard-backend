@@ -23,7 +23,7 @@ const {
 } = require('../controllers/authController');
 
 // ✅ correct import name here
-const { listOrders } = require('../controllers/ordersController');
+const { listOrders } = require('../controllers/orderController');
 
 router.use(express.json({ limit: '50mb' }));
 router.use(express.urlencoded({ extended: true, limit: '50mb' }));
