@@ -1,29 +1,31 @@
+// server.js (or app.js)
 const express = require('express');
-const dotenv = require('dotenv').config();
+require('dotenv').config();
 const cors = require('cors');
 const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
-const path = require('path');
 
+// Routes
 const authRoutes = require('./routes/authRoutes');
 const checkoutRoutes = require('./routes/checkout');
-const stripeWebhookRoutes = require('./routes/stripe');
+const stripeWebhookRoutes = require('./routes/stripe'); // <-- webhook lives here (uses express.raw internally)
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
 
 const app = express();
 
 // ---- Health endpoint (Cloud Run will probe this) ----
-app.get('/healthz', (req, res) => res.status(200).send('ok'));
+app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
-// Connect to MongoDB (fail fast on bad URI to surface error in logs)
+// ---- DB ----
 mongoose.connect(process.env.MONGO_URL)
   .then(() => console.log('Database Connected Successfully!'))
   .catch((err) => {
     console.error('Database Connection Error:', err);
-    // Do not exit; let app still respond on /healthz for debugging if needed
+    // keep process alive so /healthz can still be hit
   });
 
+// ---- CORS ----
 app.use(cors({
   origin: [
     process.env.CLIENT_URL,
@@ -37,26 +39,33 @@ app.use(cors({
 
 app.use(cookieParser());
 
-// Basic request logs early (before body parsing)
-app.use((req, res, next) => {
-  console.log("Backend: Request", req.method, req.path);
+// ---- Basic request log (kept simple to avoid touching request body) ----
+app.use((req, _res, next) => {
+  console.log('Backend:', req.method, req.path);
   next();
 });
 
-// Stripe webhook FIRST if you need raw body (keep as you had it)
+/**
+ * IMPORTANT: Mount Stripe webhook BEFORE any JSON body parser.
+ * The route file itself uses `express.raw({ type: 'application/json' })`,
+ * so it must appear before the global `express.json()`.
+ */
 app.use('/api/stripe', stripeWebhookRoutes);
 
-// Body parsers AFTER webhook
+// ---- Body parsers for the rest of the app ----
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// App routes
+// ---- App routes ----
 app.use('/api/business-card', businessCardRoutes);
-app.use('/', authRoutes);
 app.use('/api/checkout', checkoutRoutes);
 app.use('/api/contact', contactRoutes);
 
-// Start server — bind to 0.0.0.0 for Cloud Run
+// You had auth routes at `/`, keep consistent with your frontend calls.
+// If your frontend calls `/login`, `/register` etc, leave this as `/`.
+app.use('/', authRoutes);
+
+// ---- Start server ----
 const port = process.env.PORT || 8080;
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
