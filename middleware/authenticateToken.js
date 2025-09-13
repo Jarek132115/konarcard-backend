@@ -4,16 +4,26 @@ const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
 
-    if (token == null) {
+    if (!token) {
         return res.status(401).json({ error: 'Access Denied: No token provided' });
     }
 
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
         if (err) {
             console.error("JWT Verification Error:", err.message);
             return res.status(403).json({ error: 'Access Denied: Invalid or expired token' });
         }
-        req.user = user;
+
+        // Normalize user object: always expose .id
+        req.user = {
+            ...decoded,
+            id: decoded.id || decoded._id || decoded.userId || null,
+        };
+
+        if (!req.user.id) {
+            return res.status(403).json({ error: 'Access Denied: Invalid token payload' });
+        }
+
         next();
     });
 };

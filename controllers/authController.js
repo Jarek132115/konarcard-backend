@@ -351,7 +351,19 @@ const subscribeUser = async (req, res) => {
             line_items: [{ price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
             success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/subscription`,
-            subscription_data: { trial_period_days: 14 },
+            subscription_data: {
+                trial_period_days: 14,
+                // ✅ Ensure user linkage is always present for webhooks
+                metadata: {
+                    userId: user._id.toString(),
+                    kind: 'subscription',
+                },
+            },
+            // ✅ Also put it at the session level (belt & braces)
+            metadata: {
+                userId: user._id.toString(),
+                kind: 'subscription',
+            },
         });
 
         // NEW: create a pending order for this subscription
@@ -363,6 +375,7 @@ const subscribeUser = async (req, res) => {
                 stripeSessionId: session.id,
                 stripeCustomerId: customerId,
                 // amount/currency will be filled via webhook if you want
+                metadata: { from: 'checkout', product: 'subscription' },
             });
         } catch (e) {
             // don't block checkout on order write
@@ -504,13 +517,15 @@ const createCardCheckoutSession = async (req, res) => {
             await user.save();
         }
 
+        // CARD (one-time)
         const session = await stripe.checkout.sessions.create({
             customer: customerId,
             mode: 'payment',
             payment_method_types: ['card'],
             allow_promotion_codes: true,
             line_items: [{ price: process.env.STRIPE_CARD_PRICE_ID, quantity: qty }],
-            success_url: `${process.env.CLIENT_URL}/SuccessOrder?session_id={CHECKOUT_SESSION_ID}`,
+            // ✅ FIX: your frontend route is /success
+            success_url: `${process.env.CLIENT_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/productandplan/konarcard`,
             metadata: { userId: user._id.toString(), kind: 'konar_card', quantity: String(qty) },
         });

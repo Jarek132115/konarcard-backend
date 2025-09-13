@@ -1,4 +1,4 @@
-// routes/auth.js
+// routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
 
@@ -22,8 +22,8 @@ const {
     createCardCheckoutSession,
 } = require('../controllers/authController');
 
-// ✅ correct import name here
 const { listOrders } = require('../controllers/orderController');
+const authenticateToken = require('../middleware/authenticateToken');
 
 router.use(express.json({ limit: '50mb' }));
 router.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -35,8 +35,6 @@ router.post('/verify-email', verifyEmailCode);
 router.post('/resend-code', resendVerificationCode);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
-
-const authenticateToken = require('../middleware/authenticateToken');
 
 router.get('/profile', authenticateToken, getProfile);
 router.put('/update-profile', authenticateToken, updateProfile);
@@ -58,7 +56,7 @@ router.post('/contact', submitContactForm);
 // One-time card checkout
 router.post('/checkout/create-checkout-session', authenticateToken, createCardCheckoutSession);
 
-// 🆕 Orders — fetch the logged-in user's orders
+// Orders — fetch the logged-in user's orders
 router.get('/me/orders', authenticateToken, listOrders);
 
 module.exports = router;

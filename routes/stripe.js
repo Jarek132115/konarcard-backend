@@ -2,7 +2,7 @@
 const express = require('express');
 const router = express.Router();
 
-// ✅ Make sure the file name is exactly "webhookController.js" (lowercase "h")
+// Import matches actual file name: "webHookController.js" (capital H)
 const { handleStripeWebhook } = require('../controllers/webHookController');
 
 // Stripe requires raw body for signature verification
@@ -13,3 +13,4 @@ router.post(
 );
 
 module.exports = router;
+  
