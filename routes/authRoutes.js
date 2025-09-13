@@ -22,6 +22,9 @@ const {
     createCardCheckoutSession,
 } = require('../controllers/authController');
 
+// ✅ correct import name here
+const { listOrders } = require('../controllers/ordersController');
+
 router.use(express.json({ limit: '50mb' }));
 router.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -33,7 +36,6 @@ router.post('/resend-code', resendVerificationCode);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
 
-// auth middleware
 const authenticateToken = require('../middleware/authenticateToken');
 
 router.get('/profile', authenticateToken, getProfile);
@@ -48,12 +50,15 @@ router.get('/subscription-status', authenticateToken, checkSubscriptionStatus);
 
 // Trials
 router.post('/trial/start', authenticateToken, startTrial);
-router.post('/start-trial', authenticateToken, startTrial); // optional alias
+router.post('/start-trial', authenticateToken, startTrial);
 
 // Contact
 router.post('/contact', submitContactForm);
 
-// One-time checkout for Konar Card (matches frontend call)
+// One-time card checkout
 router.post('/checkout/create-checkout-session', authenticateToken, createCardCheckoutSession);
+
+// 🆕 Orders — fetch the logged-in user's orders
+router.get('/me/orders', authenticateToken, listOrders);
 
 module.exports = router;

@@ -1,6 +1,7 @@
 // controllers/authController.js
 const { hashPassword, comparePassword } = require('../helpers/auth');
 const User = require('../models/user');
+const Order = require('../models/Order'); // <-- NEW: log orders
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const sendEmail = require('../utils/SendEmail');
@@ -353,6 +354,21 @@ const subscribeUser = async (req, res) => {
             subscription_data: { trial_period_days: 14 },
         });
 
+        // NEW: create a pending order for this subscription
+        try {
+            await Order.create({
+                userId: user._id,
+                type: 'subscription',
+                status: 'pending',
+                stripeSessionId: session.id,
+                stripeCustomerId: customerId,
+                // amount/currency will be filled via webhook if you want
+            });
+        } catch (e) {
+            // don't block checkout on order write
+            console.error('Failed to create subscription order record:', e.message);
+        }
+
         res.status(200).json({ url: session.url });
     } catch (err) {
         res.status(500).json({ error: 'Failed to start subscription', details: err.message });
@@ -459,7 +475,7 @@ const startTrial = async (req, res) => {
     }
 };
 
-// One-time card checkout (kept unchanged from your working version)
+// One-time card checkout
 const createCardCheckoutSession = async (req, res) => {
     if (!req.user || !req.user.id) {
         return res.status(401).json({ error: 'Unauthorized' });
@@ -498,6 +514,22 @@ const createCardCheckoutSession = async (req, res) => {
             cancel_url: `${process.env.CLIENT_URL}/productandplan/konarcard`,
             metadata: { userId: user._id.toString(), kind: 'konar_card', quantity: String(qty) },
         });
+
+        // NEW: create a pending order for this card purchase
+        try {
+            await Order.create({
+                userId: user._id,
+                type: 'card',
+                status: 'pending',
+                quantity: qty,
+                stripeSessionId: session.id,
+                stripeCustomerId: customerId,
+                // amountTotal/currency will be filled via webhook if you want
+                metadata: { from: 'checkout', product: 'konar_card' },
+            });
+        } catch (e) {
+            console.error('Failed to create card order record:', e.message);
+        }
 
         return res.status(200).json({ id: session.id, url: session.url });
     } catch (err) {
