@@ -11,19 +11,16 @@ const {
 } = require('../utils/emailTemplates');
 
 const User = require('../models/user');
-const Order = require('../models/Order'); // <-- IMPORTANT: capital "O"
+const Order = require('../models/Order');
 
-// Helper: safe int
+// Helpers
 const toInt = (v, d = 0) => {
     const n = parseInt(v, 10);
     return Number.isFinite(n) ? n : d;
 };
-
-// Helper: strip undefined/null
 const clean = (obj) =>
     Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v !== undefined && v !== null));
 
-// Helper: upsert an order by a unique key
 async function upsertOrderBy(where, updates) {
     return Order.findOneAndUpdate(
         where,
@@ -37,15 +34,12 @@ exports.handleStripeWebhook = async (req, res) => {
     let event;
 
     try {
-        // req.body is a Buffer because express.raw is used in the route
         event = stripe.webhooks.constructEvent(
             req.body,
             sig,
             process.env.STRIPE_WEBHOOK_SECRET
         );
-        console.log(
-            `Webhook OK: type=${event.type} id=${event.id} live=${event.livemode}`
-        );
+        console.log(`Webhook OK: type=${event.type} id=${event.id}`);
     } catch (err) {
         console.error('⚠️ Stripe webhook signature error:', err.message);
         return res.status(400).send(`Webhook Error: ${err.message}`);
@@ -58,14 +52,11 @@ exports.handleStripeWebhook = async (req, res) => {
             // ------------------------------------------------------------
             case 'checkout.session.completed': {
                 const session = event.data.object;
-                // session.mode: "payment" | "subscription"
-                // session.customer: customer id
-                // session.subscription: subscription id (if mode === 'subscription')
-                // session.amount_total / session.currency
-                // session.metadata: we set kind/userId/quantity in checkout
+                const isSub = session.mode === 'subscription';
+                const isCard = session.mode === 'payment';
 
                 console.log(
-                    `checkout.session.completed: id=${session.id} mode=${session.mode} cust=${session.customer} sub=${session.subscription}`
+                    `checkout.session.completed: id=${session.id} mode=${session.mode} cust=${session.customer} sub=${session.subscription || 'n/a'}`
                 );
 
                 // Resolve user
@@ -74,12 +65,9 @@ exports.handleStripeWebhook = async (req, res) => {
                     const u = await User.findOne({ stripeCustomerId: session.customer }).select('_id');
                     if (u) userId = u._id.toString();
                 }
-                if (!userId) {
-                    console.warn(`No userId found for session ${session.id}`);
-                }
+                if (!userId) console.warn(`No userId found for session ${session.id}`);
 
-                if (session.mode === 'payment') {
-                    // One-time Konar Card order
+                if (isCard) {
                     const quantity = toInt(session?.metadata?.quantity, 1);
 
                     await upsertOrderBy(
@@ -96,14 +84,32 @@ exports.handleStripeWebhook = async (req, res) => {
                             metadata: session.metadata || {},
                         }
                     );
-
-                    console.log(`Order (card) upserted for session ${session.id} user=${userId}`);
+                    console.log(`✅ Card order upserted by sessionId=${session.id}, user=${userId}`);
                 }
 
-                if (session.mode === 'subscription') {
-                    // Create/seed a subscription "order" record (status will be refined by sub events)
+                if (isSub) {
+                    // Primary: upsert by subscription id (when present)
+                    if (session.subscription) {
+                        await upsertOrderBy(
+                            { stripeSubscriptionId: session.subscription },
+                            {
+                                userId,
+                                type: 'subscription',
+                                stripeSessionId: session.id,
+                                stripeSubscriptionId: session.subscription,
+                                stripeCustomerId: session.customer || null,
+                                status: 'pending',
+                                amountTotal: session.amount_total ?? null,
+                                currency: session.currency || 'gbp',
+                                metadata: session.metadata || {},
+                            }
+                        );
+                        console.log(`✅ Sub seed upserted by subscriptionId=${session.subscription}, user=${userId}`);
+                    }
+
+                    // Fallback: also update any pending order we created at checkout by sessionId
                     await upsertOrderBy(
-                        { stripeSubscriptionId: session.subscription },
+                        { stripeSessionId: session.id },
                         {
                             userId,
                             type: 'subscription',
@@ -116,8 +122,7 @@ exports.handleStripeWebhook = async (req, res) => {
                             metadata: session.metadata || {},
                         }
                     );
-
-                    console.log(`Order (subscription seed) upserted for sub ${session.subscription} user=${userId}`);
+                    console.log(`✅ Sub seed ensured by sessionId=${session.id}, user=${userId}`);
                 }
 
                 break;
@@ -132,8 +137,8 @@ exports.handleStripeWebhook = async (req, res) => {
                 const status = subscription.status; // trialing/active/incomplete/...
                 const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
 
-                // Update user flags
                 const user = await User.findOne({ stripeCustomerId: customerId });
+
                 if (user) {
                     user.isSubscribed = isActive;
                     user.stripeSubscriptionId = subscription.id;
@@ -142,7 +147,7 @@ exports.handleStripeWebhook = async (req, res) => {
                     await user.save();
                 }
 
-                // Update/create order record for subscription
+                // Upsert by subscription id
                 await upsertOrderBy(
                     { stripeSubscriptionId: subscription.id },
                     {
@@ -150,6 +155,16 @@ exports.handleStripeWebhook = async (req, res) => {
                         type: 'subscription',
                         stripeSubscriptionId: subscription.id,
                         stripeCustomerId: customerId,
+                        status: isActive ? 'active' : 'pending',
+                    }
+                );
+
+                // Also connect any session-seeded order missing the sub id
+                await upsertOrderBy(
+                    { stripeCustomerId: customerId, type: 'subscription', stripeSubscriptionId: null },
+                    {
+                        userId: user ? user._id : null,
+                        stripeSubscriptionId: subscription.id,
                         status: isActive ? 'active' : 'pending',
                     }
                 );
@@ -215,7 +230,7 @@ exports.handleStripeWebhook = async (req, res) => {
             }
 
             // ------------------------------------------------------------
-            // Invoices (mark subscription orders paid/active)
+            // Invoices
             // ------------------------------------------------------------
             case 'invoice.payment_succeeded': {
                 const invoice = event.data.object;
@@ -229,16 +244,13 @@ exports.handleStripeWebhook = async (req, res) => {
                         {
                             amountTotal: invoice.amount_paid ?? null,
                             currency: invoice.currency || 'gbp',
-                            status: 'active', // treat as active
+                            status: 'active',
                         }
                     );
                 }
                 break;
             }
 
-            // ------------------------------------------------------------
-            // Trial reminder (email only)
-            // ------------------------------------------------------------
             case 'customer.subscription.trial_will_end': {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
@@ -262,7 +274,6 @@ exports.handleStripeWebhook = async (req, res) => {
         res.status(200).send('OK');
     } catch (err) {
         console.error('Webhook handler error (non-fatal):', err);
-        // Always ack to prevent endless Stripe retries after a valid signature
         res.status(200).send('OK');
     }
 };
