@@ -13,6 +13,30 @@ const uploadToS3 = require('../utils/uploadToS3');
 
 const normalizeEmail = (e) => (e || '').trim().toLowerCase();
 
+/**
+ * Ensure the user has a valid Stripe Customer *in the current Stripe mode*.
+ * If the saved ID is invalid/stale (e.g., test ID while using live key),
+ * we create a new customer, persist it, and return that ID.
+ */
+async function ensureStripeCustomer(user) {
+    if (user.stripeCustomerId) {
+        try {
+            const c = await stripe.customers.retrieve(user.stripeCustomerId);
+            if (!c.deleted) return user.stripeCustomerId;
+        } catch (_) {
+            // stale/invalid ID -> fall through to create a new one
+        }
+    }
+    const customer = await stripe.customers.create({
+        email: user.email,
+        name: user.name,
+        metadata: { userId: user._id.toString() },
+    });
+    user.stripeCustomerId = customer.id;
+    await user.save();
+    return customer.id;
+}
+
 // TEST
 const test = (req, res) => {
     res.json('test is working');
@@ -330,19 +354,8 @@ const subscribeUser = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        let customerId;
-        if (user.stripeCustomerId) {
-            customerId = user.stripeCustomerId;
-        } else {
-            const customer = await stripe.customers.create({
-                email: user.email,
-                name: user.name,
-                metadata: { userId: user._id.toString() },
-            });
-            customerId = customer.id;
-            user.stripeCustomerId = customerId;
-            await user.save();
-        }
+        // ✅ Validate existing customer or create a fresh one in this mode
+        const customerId = await ensureStripeCustomer(user);
 
         const session = await stripe.checkout.sessions.create({
             customer: customerId,
@@ -353,13 +366,11 @@ const subscribeUser = async (req, res) => {
             cancel_url: `${process.env.CLIENT_URL}/subscription`,
             subscription_data: {
                 trial_period_days: 14,
-                // ✅ Ensure user linkage is always present for webhooks
                 metadata: {
                     userId: user._id.toString(),
                     kind: 'subscription',
                 },
             },
-            // ✅ Also put it at the session level (belt & braces)
             metadata: {
                 userId: user._id.toString(),
                 kind: 'subscription',
@@ -374,17 +385,16 @@ const subscribeUser = async (req, res) => {
                 status: 'pending',
                 stripeSessionId: session.id,
                 stripeCustomerId: customerId,
-                // amount/currency will be filled via webhook if you want
                 metadata: { from: 'checkout', product: 'subscription' },
             });
         } catch (e) {
-            // don't block checkout on order write
             console.error('Failed to create subscription order record:', e.message);
         }
 
         res.status(200).json({ url: session.url });
     } catch (err) {
-        res.status(500).json({ error: 'Failed to start subscription', details: err.message });
+        const status = err?.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
+        res.status(status).json({ error: err?.message, type: err?.type, code: err?.code });
     }
 };
 
@@ -505,26 +515,15 @@ const createCardCheckoutSession = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        let customerId = user.stripeCustomerId;
-        if (!customerId) {
-            const customer = await stripe.customers.create({
-                email: user.email,
-                name: user.name,
-                metadata: { userId: user._id.toString() },
-            });
-            customerId = customer.id;
-            user.stripeCustomerId = customerId;
-            await user.save();
-        }
+        // ✅ Validate existing customer or create a fresh one in this mode
+        const customerId = await ensureStripeCustomer(user);
 
-        // CARD (one-time)
         const session = await stripe.checkout.sessions.create({
             customer: customerId,
             mode: 'payment',
             payment_method_types: ['card'],
             allow_promotion_codes: true,
             line_items: [{ price: process.env.STRIPE_CARD_PRICE_ID, quantity: qty }],
-            // ✅ FIX: your frontend route is /success
             success_url: `${process.env.CLIENT_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/productandplan/konarcard`,
             metadata: { userId: user._id.toString(), kind: 'konar_card', quantity: String(qty) },
@@ -539,7 +538,6 @@ const createCardCheckoutSession = async (req, res) => {
                 quantity: qty,
                 stripeSessionId: session.id,
                 stripeCustomerId: customerId,
-                // amountTotal/currency will be filled via webhook if you want
                 metadata: { from: 'checkout', product: 'konar_card' },
             });
         } catch (e) {
@@ -548,7 +546,8 @@ const createCardCheckoutSession = async (req, res) => {
 
         return res.status(200).json({ id: session.id, url: session.url });
     } catch (err) {
-        return res.status(500).json({ error: 'Failed to create checkout session', details: err.message });
+        const status = err?.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
+        return res.status(status).json({ error: err?.message, type: err?.type, code: err?.code });
     }
 };
 
