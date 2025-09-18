@@ -10,8 +10,9 @@ const authenticateToken = (req, res, next) => {
 
     jwt.verify(token, process.env.JWT_SECRET, (err, decoded) => {
         if (err) {
-            console.error("JWT Verification Error:", err.message);
-            return res.status(403).json({ error: 'Access Denied: Invalid or expired token' });
+            console.error('JWT Verification Error:', err.message);
+            // Use 401 so the frontend treats this like an auth-expired state
+            return res.status(401).json({ error: 'Access Denied: Invalid or expired token' });
         }
 
         // Normalize user object: always expose .id
@@ -21,7 +22,7 @@ const authenticateToken = (req, res, next) => {
         };
 
         if (!req.user.id) {
-            return res.status(403).json({ error: 'Access Denied: Invalid token payload' });
+            return res.status(401).json({ error: 'Access Denied: Invalid token payload' });
         }
 
         next();
