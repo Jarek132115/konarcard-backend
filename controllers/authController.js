@@ -12,6 +12,16 @@ const uploadToS3 = require('../utils/uploadToS3');
 
 const normalizeEmail = (e) => (e || '').trim().toLowerCase();
 
+// Prevent browser/proxy caching on auth-critical responses
+function setNoStore(res) {
+    res.set({
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        Pragma: 'no-cache',
+        Expires: '0',
+        'Surrogate-Control': 'no-store',
+    });
+}
+
 /**
  * Ensure the user has a valid Stripe Customer *in the current Stripe mode*.
  */
@@ -35,7 +45,7 @@ async function ensureStripeCustomer(user) {
 }
 
 // TEST
-const test = (req, res) => {
+const test = (_req, res) => {
     res.json('test is working');
 };
 
@@ -96,6 +106,7 @@ const registerUser = async (req, res) => {
         const html = verificationEmailTemplate(user.name, code);
         await sendEmail({ email: normalizedEmail, subject: 'Verify Your Email', message: html });
 
+        setNoStore(res);
         res.json({ success: true, message: 'Verification email sent' });
     } catch (err) {
         res.status(500).json({ error: 'Registration failed. Try again.' });
@@ -127,6 +138,7 @@ const verifyEmailCode = async (req, res) => {
             process.env.JWT_SECRET
         );
 
+        setNoStore(res);
         res.status(200).json({ success: true, message: 'Email verified successfully', user: userToSend, token });
     } catch {
         res.status(500).json({ error: 'Verification failed' });
@@ -152,6 +164,7 @@ const resendVerificationCode = async (req, res) => {
         const html = verificationEmailTemplate(user.name, newCode);
         await sendEmail({ email, subject: 'Your New Verification Code', message: html });
 
+        setNoStore(res);
         res.json({ success: true, message: 'Verification code resent' });
     } catch {
         res.status(500).json({ error: 'Could not resend code' });
@@ -181,6 +194,7 @@ const loginUser = async (req, res) => {
             const html = verificationEmailTemplate(user.name, newCode);
             await sendEmail({ email, subject: 'Verify Your Email', message: html });
 
+            setNoStore(res);
             return res.json({
                 error: 'Please verify your email before logging in.',
                 resend: true,
@@ -195,6 +209,7 @@ const loginUser = async (req, res) => {
         const userToSend = user.toObject({ getters: true, virtuals: true });
         userToSend.id = userToSend._id;
 
+        setNoStore(res);
         res.status(200).json({ user: userToSend, token });
     } catch {
         res.status(500).json({ error: 'Login failed' });
@@ -217,6 +232,7 @@ const forgotPassword = async (req, res) => {
         const html = passwordResetTemplate(user.name, resetLink);
         await sendEmail({ email, subject: 'Reset Your Password', message: html });
 
+        setNoStore(res);
         res.json({ success: true, message: 'Password reset email sent' });
     } catch {
         res.status(500).json({ error: 'Could not send password reset email' });
@@ -241,6 +257,7 @@ const resetPassword = async (req, res) => {
         user.resetTokenExpires = undefined;
         await user.save();
 
+        setNoStore(res);
         res.json({ success: true, message: 'Password updated successfully' });
     } catch {
         res.status(500).json({ error: 'Password reset failed' });
@@ -250,10 +267,16 @@ const resetPassword = async (req, res) => {
 // PROFILE (protected)
 const getProfile = async (req, res) => {
     try {
+        if (!req.user || !req.user.id) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+
         const user = await User.findById(req.user.id).select('-password').lean();
         if (!user) return res.status(404).json({ error: 'User not found.' });
 
         user.id = user._id;
+
+        setNoStore(res); // <-- critical: avoid 304, always return JSON
         res.status(200).json({ data: user });
     } catch {
         res.status(500).json({ error: 'Failed to fetch user profile.' });
@@ -284,6 +307,8 @@ const updateProfile = async (req, res) => {
         if (!updatedUser) return res.status(404).json({ error: 'User not found for update.' });
 
         updatedUser.id = updatedUser._id;
+
+        setNoStore(res);
         res.status(200).json({ success: true, data: updatedUser });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update profile', details: err.message });
@@ -291,9 +316,11 @@ const updateProfile = async (req, res) => {
 };
 
 // DELETE ACCOUNT (protected)
-const deleteAccount = async (req, res) => {
+const deleteAccount = async (_req, res) => {
     try {
-        await User.findByIdAndDelete(req.user.id);
+        // req.user.id is enforced by middleware
+        await User.findByIdAndDelete(_req.user.id);
+        setNoStore(res);
         res.status(200).json({ success: true, message: 'Account deleted successfully' });
     } catch {
         res.status(500).json({ error: 'Failed to delete account' });
@@ -301,7 +328,8 @@ const deleteAccount = async (req, res) => {
 };
 
 // LOGOUT
-const logoutUser = (req, res) => {
+const logoutUser = (_req, res) => {
+    setNoStore(res);
     res.status(200).json({ message: 'Logged out successfully' });
 };
 
@@ -341,6 +369,7 @@ const subscribeUser = async (req, res) => {
             console.error('Failed to create subscription order record:', e.message);
         }
 
+        setNoStore(res);
         res.status(200).json({ url: session.url });
     } catch (err) {
         const status = err?.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
@@ -362,6 +391,7 @@ const cancelSubscription = async (req, res) => {
             cancel_at_period_end: true,
         });
 
+        setNoStore(res);
         res.status(200).json({ success: true, message: 'Subscription will cancel at the end of the current billing period.' });
     } catch (err) {
         res.status(500).json({ error: 'Failed to cancel subscription', details: err.message });
@@ -390,6 +420,7 @@ const checkSubscriptionStatus = async (req, res) => {
             await user.save();
         }
 
+        setNoStore(res);
         return res.status(200).json({
             active: isActive,
             status: subscription.status,
@@ -404,6 +435,7 @@ const checkSubscriptionStatus = async (req, res) => {
                 user.stripeCustomerId = undefined;
                 await user.save();
             }
+            setNoStore(res);
             return res.status(200).json({ active: false, status: 'subscription_missing_in_stripe' });
         }
         res.status(500).json({ active: false, status: 'error_checking_stripe', details: err.message });
@@ -427,6 +459,7 @@ const startTrial = async (req, res) => {
 
         await user.save();
 
+        setNoStore(res);
         res.status(200).json({
             success: true,
             message: '14-day free trial started successfully!',
@@ -477,6 +510,7 @@ const createCardCheckoutSession = async (req, res) => {
             console.error('Failed to create card order record:', e.message);
         }
 
+        setNoStore(res);
         return res.status(200).json({ id: session.id, url: session.url });
     } catch (err) {
         const status = err?.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
