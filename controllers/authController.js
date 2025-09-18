@@ -1,7 +1,7 @@
 // controllers/authController.js
 const { hashPassword, comparePassword } = require('../helpers/auth');
 const User = require('../models/user');
-const Order = require('../models/Order'); // <-- NEW: log orders
+const Order = require('../models/Order');
 const jwt = require('jsonwebtoken');
 const QRCode = require('qrcode');
 const sendEmail = require('../utils/SendEmail');
@@ -15,8 +15,6 @@ const normalizeEmail = (e) => (e || '').trim().toLowerCase();
 
 /**
  * Ensure the user has a valid Stripe Customer *in the current Stripe mode*.
- * If the saved ID is invalid/stale (e.g., test ID while using live key),
- * we create a new customer, persist it, and return that ID.
  */
 async function ensureStripeCustomer(user) {
     if (user.stripeCustomerId) {
@@ -24,7 +22,7 @@ async function ensureStripeCustomer(user) {
             const c = await stripe.customers.retrieve(user.stripeCustomerId);
             if (!c.deleted) return user.stripeCustomerId;
         } catch (_) {
-            // stale/invalid ID -> fall through to create a new one
+            // stale / invalid -> create below
         }
     }
     const customer = await stripe.customers.create({
@@ -42,16 +40,13 @@ const test = (req, res) => {
     res.json('test is working');
 };
 
-// REGISTER
+// REGISTER — keep name, no confirmPassword
 const registerUser = async (req, res) => {
     try {
-        const { name, email, username, password, confirmPassword } = req.body;
+        const { name, email, username, password } = req.body;
 
-        if (!name || !email || !username || !password || !confirmPassword) {
+        if (!name || !email || !username || !password) {
             return res.status(400).json({ error: 'All fields are required.' });
-        }
-        if (password !== confirmPassword) {
-            return res.status(400).json({ error: 'Passwords do not match.' });
         }
 
         const normalizedEmail = normalizeEmail(email);
@@ -82,11 +77,11 @@ const registerUser = async (req, res) => {
             slug,
         });
 
+        // create QR + upload
         const qrBuffer = await QRCode.toBuffer(profileUrl, {
             width: 500,
             color: { dark: '#000000', light: '#ffffff' },
         });
-
         const fileKey = `qr-codes/${user._id}.png`;
         const qrCodeUrl = await uploadToS3(
             qrBuffer,
@@ -98,7 +93,8 @@ const registerUser = async (req, res) => {
         user.qrCode = qrCodeUrl;
         await user.save();
 
-        const html = verificationEmailTemplate(name, code);
+        // send verification email
+        const html = verificationEmailTemplate(user.name, code);
         await sendEmail({ email: normalizedEmail, subject: 'Verify Your Email', message: html });
 
         res.json({ success: true, message: 'Verification email sent' });
@@ -217,19 +213,13 @@ const forgotPassword = async (req, res) => {
     try {
         const email = normalizeEmail(req.body.email);
         const user = await User.findOne({ email });
-        if (!user) {
-            return res.json({ error: 'User not found' });
-        }
+        if (!user) return res.json({ error: 'User not found' });
 
         const token = crypto.randomBytes(32).toString('hex');
         user.resetToken = token;
         user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
 
-        try {
-            await user.save();
-        } catch {
-            return res.status(500).json({ error: 'Failed to update user with reset token.' });
-        }
+        await user.save();
 
         const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
         const html = passwordResetTemplate(user.name, resetLink);
@@ -252,9 +242,7 @@ const resetPassword = async (req, res) => {
             resetTokenExpires: { $gt: Date.now() },
         });
 
-        if (!user) {
-            return res.json({ error: 'Invalid or expired token' });
-        }
+        if (!user) return res.json({ error: 'Invalid or expired token' });
 
         const hashed = await hashPassword(password);
         user.password = hashed;
@@ -354,31 +342,23 @@ const subscribeUser = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // ✅ Validate existing customer or create a fresh one in this mode
         const customerId = await ensureStripeCustomer(user);
 
         const session = await stripe.checkout.sessions.create({
             customer: customerId,
             payment_method_types: ['card'],
             mode: 'subscription',
-            allow_promotion_codes: true,        // <-- add this
+            allow_promotion_codes: true,
             line_items: [{ price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
             success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/subscription`,
             subscription_data: {
                 trial_period_days: 14,
-                metadata: {
-                    userId: user._id.toString(),
-                    kind: 'subscription',
-                },
+                metadata: { userId: user._id.toString(), kind: 'subscription' },
             },
-            metadata: {
-                userId: user._id.toString(),
-                kind: 'subscription',
-            },
+            metadata: { userId: user._id.toString(), kind: 'subscription' },
         });
 
-        // NEW: create a pending order for this subscription
         try {
             await Order.create({
                 userId: user._id,
@@ -516,7 +496,6 @@ const createCardCheckoutSession = async (req, res) => {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // ✅ Validate existing customer or create a fresh one in this mode
         const customerId = await ensureStripeCustomer(user);
 
         const session = await stripe.checkout.sessions.create({
@@ -530,7 +509,6 @@ const createCardCheckoutSession = async (req, res) => {
             metadata: { userId: user._id.toString(), kind: 'konar_card', quantity: String(qty) },
         });
 
-        // NEW: create a pending order for this card purchase
         try {
             await Order.create({
                 userId: user._id,
