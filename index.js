@@ -14,6 +14,13 @@ const businessCardRoutes = require('./routes/businessCardRoutes');
 
 const app = express();
 
+/** 🔒 Avoid 304s/stale auth:
+ *  - Disable ETag generation (prevents If-None-Match revalidation)
+ *  - Remove X-Powered-By
+ */
+app.set('etag', false);
+app.disable('x-powered-by');
+
 // ---- Health endpoint (Cloud Run will probe this) ----
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
@@ -42,6 +49,29 @@ app.use(cookieParser());
 // ---- Basic request log (kept simple to avoid touching request body) ----
 app.use((req, _res, next) => {
   console.log('Backend:', req.method, req.path);
+  next();
+});
+
+/** 🚫 Cache-control for auth/user-specific endpoints
+ * Must run BEFORE body parsers and routes so every path is covered.
+ * Also add `Vary: Authorization` so shared proxies don't mix tokens.
+ */
+const NO_STORE_PATHS = new Set([
+  '/profile',
+  '/api/business-card/my_card',
+  // add more user-specific JSON endpoints here if needed
+]);
+
+app.use((req, res, next) => {
+  if (NO_STORE_PATHS.has(req.path)) {
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'Surrogate-Control': 'no-store',
+      'Vary': 'Authorization',
+    });
+  }
   next();
 });
 
