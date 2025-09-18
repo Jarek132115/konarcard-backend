@@ -1,4 +1,3 @@
-// routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
 
@@ -25,9 +24,7 @@ const {
 const { listOrders } = require('../controllers/orderController');
 const authenticateToken = require('../middleware/authenticateToken');
 
-router.use(express.json({ limit: '50mb' }));
-router.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
+// Public
 router.get('/', test);
 router.post('/register', registerUser);
 router.post('/login', loginUser);
@@ -35,10 +32,12 @@ router.post('/verify-email', verifyEmailCode);
 router.post('/resend-code', resendVerificationCode);
 router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
+router.post('/contact', submitContactForm);
 
+// Protected
 router.get('/profile', authenticateToken, getProfile);
-router.put('/update-profile', authenticateToken, updateProfile);
-router.delete('/delete-account', authenticateToken, deleteAccount);
+router.put('/profile', authenticateToken, updateProfile);
+router.delete('/profile', authenticateToken, deleteAccount);
 router.post('/logout', authenticateToken, logoutUser);
 
 // Subscriptions
@@ -48,15 +47,11 @@ router.get('/subscription-status', authenticateToken, checkSubscriptionStatus);
 
 // Trials
 router.post('/trial/start', authenticateToken, startTrial);
-router.post('/start-trial', authenticateToken, startTrial);
-
-// Contact
-router.post('/contact', submitContactForm);
 
 // One-time card checkout
-router.post('/checkout/create-checkout-session', authenticateToken, createCardCheckoutSession);
+router.post('/checkout/card', authenticateToken, createCardCheckoutSession);
 
-// Orders — fetch the logged-in user's orders
+// Orders
 router.get('/me/orders', authenticateToken, listOrders);
 
 module.exports = router;

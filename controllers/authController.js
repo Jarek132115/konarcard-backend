@@ -1,4 +1,3 @@
-// controllers/authController.js
 const { hashPassword, comparePassword } = require('../helpers/auth');
 const User = require('../models/user');
 const Order = require('../models/Order');
@@ -40,7 +39,7 @@ const test = (req, res) => {
     res.json('test is working');
 };
 
-// REGISTER — keep name, no confirmPassword
+// REGISTER
 const registerUser = async (req, res) => {
     try {
         const { name, email, username, password } = req.body;
@@ -77,7 +76,7 @@ const registerUser = async (req, res) => {
             slug,
         });
 
-        // create QR + upload
+        // generate QR and upload
         const qrBuffer = await QRCode.toBuffer(profileUrl, {
             width: 500,
             color: { dark: '#000000', light: '#ffffff' },
@@ -122,13 +121,10 @@ const verifyEmailCode = async (req, res) => {
 
         const userToSend = user.toObject({ getters: true, virtuals: true });
         userToSend.id = userToSend._id;
-        userToSend.name = userToSend.name || '';
-        userToSend.email = userToSend.email || '';
 
         const token = jwt.sign(
             { email: user.email, id: user._id, name: user.name },
-            process.env.JWT_SECRET,
-            {}
+            process.env.JWT_SECRET
         );
 
         res.status(200).json({ success: true, message: 'Email verified successfully', user: userToSend, token });
@@ -137,7 +133,7 @@ const verifyEmailCode = async (req, res) => {
     }
 };
 
-// RESEND VERIFICATION CODE
+// RESEND VERIFICATION
 const resendVerificationCode = async (req, res) => {
     try {
         const email = normalizeEmail(req.body.email);
@@ -193,14 +189,11 @@ const loginUser = async (req, res) => {
 
         const token = jwt.sign(
             { email: user.email, id: user._id, name: user.name },
-            process.env.JWT_SECRET,
-            {}
+            process.env.JWT_SECRET
         );
 
         const userToSend = user.toObject({ getters: true, virtuals: true });
         userToSend.id = userToSend._id;
-        userToSend.name = userToSend.name || '';
-        userToSend.email = userToSend.email || '';
 
         res.status(200).json({ user: userToSend, token });
     } catch {
@@ -218,7 +211,6 @@ const forgotPassword = async (req, res) => {
         const token = crypto.randomBytes(32).toString('hex');
         user.resetToken = token;
         user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
-
         await user.save();
 
         const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
@@ -244,8 +236,7 @@ const resetPassword = async (req, res) => {
 
         if (!user) return res.json({ error: 'Invalid or expired token' });
 
-        const hashed = await hashPassword(password);
-        user.password = hashed;
+        user.password = await hashPassword(password);
         user.resetToken = undefined;
         user.resetTokenExpires = undefined;
         await user.save();
@@ -256,31 +247,21 @@ const resetPassword = async (req, res) => {
     }
 };
 
-// PROFILE
+// PROFILE (protected)
 const getProfile = async (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: 'Unauthorized: User ID not found in token.' });
-    }
-
     try {
         const user = await User.findById(req.user.id).select('-password').lean();
         if (!user) return res.status(404).json({ error: 'User not found.' });
 
         user.id = user._id;
-        user.name = user.name || '';
-        user.email = user.email || '';
         res.status(200).json({ data: user });
     } catch {
         res.status(500).json({ error: 'Failed to fetch user profile.' });
     }
 };
 
-// UPDATE PROFILE
+// UPDATE PROFILE (protected)
 const updateProfile = async (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
-
     try {
         const { name, email, bio, job_title, password } = req.body;
         const updateFields = {
@@ -300,25 +281,17 @@ const updateProfile = async (req, res) => {
             { new: true, runValidators: true }
         ).select('-password').lean();
 
-        if (!updatedUser) {
-            return res.status(404).json({ error: 'User not found for update.' });
-        }
+        if (!updatedUser) return res.status(404).json({ error: 'User not found for update.' });
 
         updatedUser.id = updatedUser._id;
-        updatedUser.name = updatedUser.name || '';
-        updatedUser.email = updatedUser.email || '';
         res.status(200).json({ success: true, data: updatedUser });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update profile', details: err.message });
     }
 };
 
-// DELETE ACCOUNT
+// DELETE ACCOUNT (protected)
 const deleteAccount = async (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
-
     try {
         await User.findByIdAndDelete(req.user.id);
         res.status(200).json({ success: true, message: 'Account deleted successfully' });
@@ -332,12 +305,8 @@ const logoutUser = (req, res) => {
     res.status(200).json({ message: 'Logged out successfully' });
 };
 
-// STRIPE: Subscribe (recurring)
+// STRIPE: Subscribe (protected)
 const subscribeUser = async (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
-
     try {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
@@ -379,12 +348,8 @@ const subscribeUser = async (req, res) => {
     }
 };
 
-// STRIPE: Cancel Subscription
+// STRIPE: Cancel Subscription (protected)
 const cancelSubscription = async (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
-
     try {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
@@ -392,6 +357,7 @@ const cancelSubscription = async (req, res) => {
         if (!user.stripeCustomerId || !user.stripeSubscriptionId) {
             return res.status(400).json({ error: 'No active subscription found for this user.' });
         }
+
         await stripe.subscriptions.update(user.stripeSubscriptionId, {
             cancel_at_period_end: true,
         });
@@ -402,12 +368,8 @@ const cancelSubscription = async (req, res) => {
     }
 };
 
-// STRIPE: Check Subscription Status
+// STRIPE: Check Subscription Status (protected)
 const checkSubscriptionStatus = async (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(200).json({ active: false, status: 'unauthenticated' });
-    }
-
     try {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(200).json({ active: false, status: 'user_not_found' });
@@ -428,12 +390,11 @@ const checkSubscriptionStatus = async (req, res) => {
             await user.save();
         }
 
-        const responseData = {
+        return res.status(200).json({
             active: isActive,
             status: subscription.status,
             current_period_end: subscription.current_period_end,
-        };
-        return res.status(200).json(responseData);
+        });
     } catch (err) {
         if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
             const user = await User.findById(req.user.id);
@@ -449,11 +410,8 @@ const checkSubscriptionStatus = async (req, res) => {
     }
 };
 
+// TRIAL (protected)
 const startTrial = async (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
-
     try {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found.' });
@@ -479,12 +437,8 @@ const startTrial = async (req, res) => {
     }
 };
 
-// One-time card checkout
+// One-time card checkout (protected)
 const createCardCheckoutSession = async (req, res) => {
-    if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: 'Unauthorized' });
-    }
-
     try {
         if (!process.env.STRIPE_CARD_PRICE_ID) {
             return res.status(500).json({ error: 'Server not configured: STRIPE_CARD_PRICE_ID missing' });
@@ -530,6 +484,7 @@ const createCardCheckoutSession = async (req, res) => {
     }
 };
 
+// CONTACT FORM
 const submitContactForm = async (req, res) => {
     const { name, email, reason, message } = req.body;
 
