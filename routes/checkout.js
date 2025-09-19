@@ -72,29 +72,27 @@ router.post('/create-checkout-session', async (req, res) => {
 
         const session = await stripe.checkout.sessions.create({
             mode: 'payment',
-            customer: customerId,                           // <<— CRITICAL: tie session to user
-            client_reference_id: user._id.toString(),       // <<— helpful in webhooks / dashboard
+            customer: customerId,                           // <<— tie session to user
+            client_reference_id: user._id.toString(),
             payment_method_types: ['card'],
             line_items: [lineItem],
             allow_promotion_codes: true,
 
-            // (Optional) collect shipping so you can show address later
-            // shipping_address_collection: { allowed_countries: ['GB'] },
+            // ✅ Collect shipping address so we can mirror it into the order
+            shipping_address_collection: { allowed_countries: ['GB'] },
 
             // Include session id on success for easier debugging if you want
             success_url: `${clientUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${clientUrl}/productandplan/konarcard`,
 
             metadata: {
-                // Make webhooks able to resolve the user & order cleanly
-                userId: user._id.toString(),                  // <<— CRITICAL: your webhook reads this
+                userId: user._id.toString(),
                 kind: 'konar_card',
                 quantity: String(quantity),
                 env_has_price_id: String(Boolean(priceId)),
             },
         });
 
-        // Frontend can still do redirectToCheckout({ sessionId })
         return res.status(200).json({ id: session.id, url: session.url });
     } catch (err) {
         console.error('Stripe error creating checkout session:', {

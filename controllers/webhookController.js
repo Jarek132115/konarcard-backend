@@ -41,6 +41,20 @@ function applyTrialMirror(user, subscription) {
     }
 }
 
+// Format a single-line shipping address
+function formatAddress(addr) {
+    if (!addr) return null;
+    const parts = [
+        addr.line1,
+        addr.line2,
+        addr.city,
+        addr.state,
+        addr.postal_code,
+        addr.country,
+    ].filter(Boolean);
+    return parts.join(', ');
+}
+
 exports.handleStripeWebhook = async (req, res) => {
     const sig = req.headers['stripe-signature'];
     let event;
@@ -78,6 +92,20 @@ exports.handleStripeWebhook = async (req, res) => {
                     if (u) userId = u._id.toString();
                 }
                 if (!userId) console.warn(`No userId found for session ${session.id}`);
+
+                // Capture shipping details from Checkout
+                const shippingDetails = session.shipping_details || session.shipping || null;
+                const customerDetails = session.customer_details || null;
+
+                const deliveryName =
+                    shippingDetails?.name ||
+                    customerDetails?.name ||
+                    null;
+
+                const deliveryAddress =
+                    formatAddress(shippingDetails?.address) ||
+                    formatAddress(customerDetails?.address) ||
+                    null;
 
                 // ---------------- Card (one-time) ----------------
                 if (isCard) {
@@ -119,11 +147,19 @@ exports.handleStripeWebhook = async (req, res) => {
                             currency: session.currency || 'gbp',
                             status: session.payment_status === 'paid' ? 'paid' : 'pending',
                             deliveryWindow,
-                            metadata: session.metadata || {},
+                            // ✅ new fields mirrored from Checkout
+                            deliveryName,
+                            deliveryAddress,
+                            fulfillmentStatus: 'order_placed',
+                            metadata: {
+                                ...(session.metadata || {}),
+                                _shipping_details: shippingDetails || undefined,
+                                _customer_details: customerDetails || undefined,
+                            },
                         }
                     );
                     console.log(
-                        `✅ Card order upserted with deliveryWindow="${deliveryWindow}", sessionId=${session.id}, user=${userId}`
+                        `✅ Card order upserted with deliveryWindow="${deliveryWindow}", sessionId=${session.id}, user=${userId}, deliveryName="${deliveryName || ''}"`
                     );
                 }
 
