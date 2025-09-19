@@ -1,4 +1,4 @@
-// server.js (a.k.a. index.js)
+// index.js (entry point Cloud Run runs)
 const express = require('express');
 require('dotenv').config();
 const cors = require('cors');
@@ -12,30 +12,26 @@ const checkoutRoutes = require('./routes/checkout');
 const stripeWebhookRoutes = require('./routes/stripe'); // uses express.raw() internally
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
-const orderRoutes = require('./routes/order'); // exposes GET /me/orders
+const orderRoutes = require('./routes/orders'); // <-- PLURAL
 
 const app = express();
 
-/** 🔒 Avoid 304s/stale auth:
- *  - Disable ETag generation (prevents If-None-Match revalidation)
- *  - Remove X-Powered-By
- */
+/** Avoid 304s/stale auth */
 app.set('etag', false);
 app.disable('x-powered-by');
 
-// ---- Health endpoint ----
+// Health
 app.get('/healthz', (_req, res) => res.status(200).send('ok'));
 
-// ---- DB ----
+// DB
 mongoose
   .connect(process.env.MONGO_URL)
   .then(() => console.log('Database Connected Successfully!'))
   .catch((err) => {
     console.error('Database Connection Error:', err);
-    // Keep process alive so /healthz can still be hit
   });
 
-// ---- CORS ----
+// CORS
 app.use(
   cors({
     origin: [
@@ -59,22 +55,14 @@ app.use(
 
 app.use(cookieParser());
 
-// ---- Basic request log (doesn't touch body) ----
+// Simple request log
 app.use((req, _res, next) => {
   console.log(`Backend: ${req.method} ${req.path}`);
   next();
 });
 
-/** 🚫 Cache-control for auth/user-specific endpoints
- * Must run BEFORE body parsers and routes so every path is covered.
- * Also add `Vary: Authorization` so shared proxies don't mix tokens.
- */
-const NO_STORE_PATHS = new Set([
-  '/profile',
-  '/me/orders',
-  '/api/business-card/my_card',
-]);
-
+// No-store for user-specific endpoints
+const NO_STORE_PATHS = new Set(['/profile', '/me/orders', '/api/business-card/my_card']);
 app.use((req, res, next) => {
   if (NO_STORE_PATHS.has(req.path)) {
     res.set({
@@ -88,57 +76,40 @@ app.use((req, res, next) => {
   next();
 });
 
-/**
- * ⚠️ IMPORTANT: Mount Stripe webhook BEFORE any JSON body parser.
- * The route file itself uses `express.raw({ type: 'application/json' })`,
- * so it must appear before the global `express.json()`.
- */
+/** Mount Stripe webhook BEFORE JSON body parser */
 app.use('/api/stripe', stripeWebhookRoutes);
 
-/**
- * 🪪 Optional JWT decode (so req.user is available for routes like /api/checkout)
- * This does NOT enforce auth; it just populates req.user if a valid Bearer token
- * is present. Route handlers can decide to require it.
- */
+/** Optional JWT decode (populate req.user if Bearer present) */
 app.use((req, _res, next) => {
   try {
     const auth = req.headers.authorization || '';
     if (auth.startsWith('Bearer ')) {
       const token = auth.slice(7);
       const payload = jwt.verify(token, process.env.JWT_SECRET);
-      // normalize shape used in controllers
-      req.user = {
-        id: payload.id,
-        email: payload.email,
-        name: payload.name,
-      };
+      req.user = { id: payload.id, email: payload.email, name: payload.name };
     }
   } catch {
-    // ignore bad/expired token — route can still return 401 where required
+    // ignore bad/expired token
   }
   next();
 });
 
-// ---- Body parsers for the rest of the app ----
+// Body parsers
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ---- App routes ----
+// App routes
 app.use('/api/business-card', businessCardRoutes);
-
-// NOTE: checkout route expects req.user to exist; the optional JWT decode above
-// makes that available when the frontend sends Authorization: Bearer <token>.
 app.use('/api/checkout', checkoutRoutes);
-
 app.use('/api/contact', contactRoutes);
 
-// Orders list: GET /me/orders (controller reads req.user.id)
+// Orders list: GET /me/orders
 app.use('/', orderRoutes);
 
-// Auth routes at root (/login, /register, /profile, etc.)
+// Auth routes: /login, /register, /profile, etc.
 app.use('/', authRoutes);
 
-// ---- Start server ----
+// Start server
 const port = process.env.PORT || 8080;
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
