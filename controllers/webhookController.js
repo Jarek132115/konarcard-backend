@@ -3,9 +3,7 @@ const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
 const sendEmail = require('../utils/SendEmail');
-const {
-    trialFinalWarningTemplate,
-} = require('../utils/emailTemplates');
+const { trialFinalWarningTemplate } = require('../utils/emailTemplates');
 
 const User = require('../models/user');
 const Order = require('../models/Order');
@@ -26,15 +24,13 @@ async function upsertOrderBy(where, updates) {
     );
 }
 
-// Map Stripe subscription.status to our boolean
 function computeIsSubscribed(status) {
     return ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
 }
 
-// Mirror Stripe trial to our user model
 function applyTrialMirror(user, subscription) {
     if (subscription.status === 'trialing') {
-        const trialEndSec = subscription.trial_end; // UNIX seconds
+        const trialEndSec = subscription.trial_end;
         user.trialExpires = trialEndSec ? new Date(trialEndSec * 1000) : undefined;
     } else {
         user.trialExpires = undefined;
@@ -59,9 +55,6 @@ exports.handleStripeWebhook = async (req, res) => {
 
     try {
         switch (event.type) {
-            // ------------------------------------------------------------
-            // Checkout finished (card payment or subscription start)
-            // ------------------------------------------------------------
             case 'checkout.session.completed': {
                 const session = event.data.object;
                 const isSub = session.mode === 'subscription';
@@ -82,6 +75,30 @@ exports.handleStripeWebhook = async (req, res) => {
                 if (isCard) {
                     const quantity = toInt(session?.metadata?.quantity, 1);
 
+                    // 🔹 Calculate delivery window (today+1 → today+4)
+                    const today = new Date();
+                    const start = new Date(today);
+                    start.setDate(today.getDate() + 1);
+                    const end = new Date(today);
+                    end.setDate(today.getDate() + 4);
+
+                    const monthNames = [
+                        'January', 'February', 'March', 'April', 'May', 'June',
+                        'July', 'August', 'September', 'October', 'November', 'December'
+                    ];
+                    const shortMonth = (d) => monthNames[d.getMonth()].slice(0, 3);
+
+                    let deliveryWindow;
+                    const sameMonth =
+                        start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
+                    if (sameMonth) {
+                        deliveryWindow = `${start.getDate()}–${end.getDate()} ${monthNames[start.getMonth()]}`;
+                    } else if (start.getFullYear() === end.getFullYear()) {
+                        deliveryWindow = `${start.getDate()} ${shortMonth(start)} – ${end.getDate()} ${shortMonth(end)}`;
+                    } else {
+                        deliveryWindow = `${start.getDate()} ${shortMonth(start)} ${start.getFullYear()} – ${end.getDate()} ${shortMonth(end)} ${end.getFullYear()}`;
+                    }
+
                     await upsertOrderBy(
                         { stripeSessionId: session.id },
                         {
@@ -93,11 +110,13 @@ exports.handleStripeWebhook = async (req, res) => {
                             amountTotal: session.amount_total ?? null,
                             currency: session.currency || 'gbp',
                             status: session.payment_status === 'paid' ? 'paid' : 'pending',
-                            // keep all metadata: include deliveryAddress, estimatedDeliveryDate if passed
+                            deliveryWindow,
                             metadata: session.metadata || {},
                         }
                     );
-                    console.log(`✅ Card order upserted by sessionId=${session.id}, user=${userId}`);
+                    console.log(
+                        `✅ Card order upserted with deliveryWindow="${deliveryWindow}", sessionId=${session.id}, user=${userId}`
+                    );
                 }
 
                 if (isSub) {
@@ -116,7 +135,9 @@ exports.handleStripeWebhook = async (req, res) => {
                                 metadata: session.metadata || {},
                             }
                         );
-                        console.log(`✅ Sub seed upserted by subscriptionId=${session.subscription}, user=${userId}`);
+                        console.log(
+                            `✅ Sub seed upserted by subscriptionId=${session.subscription}, user=${userId}`
+                        );
                     }
 
                     await upsertOrderBy(
@@ -139,9 +160,6 @@ exports.handleStripeWebhook = async (req, res) => {
                 break;
             }
 
-            // ------------------------------------------------------------
-            // Subscription lifecycle
-            // ------------------------------------------------------------
             case 'customer.subscription.created':
             case 'customer.subscription.updated': {
                 const subscription = event.data.object;
@@ -164,7 +182,7 @@ exports.handleStripeWebhook = async (req, res) => {
                         type: 'subscription',
                         stripeSubscriptionId: subscription.id,
                         stripeCustomerId: customerId,
-                        status: isSubscribed ? status : 'pending', // keep actual Stripe status
+                        status: isSubscribed ? status : 'pending',
                         amountTotal: subscription.items?.data?.[0]?.price?.unit_amount || null,
                         currency: subscription.currency || 'gbp',
                         metadata: subscription.metadata || {},
@@ -202,9 +220,6 @@ exports.handleStripeWebhook = async (req, res) => {
                 break;
             }
 
-            // ------------------------------------------------------------
-            // Invoices
-            // ------------------------------------------------------------
             case 'invoice.payment_succeeded': {
                 const invoice = event.data.object;
                 console.log(
