@@ -12,8 +12,7 @@ const checkoutRoutes = require('./routes/checkout');
 const stripeWebhookRoutes = require('./routes/stripe'); // uses express.raw() internally
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
-// NEW: admin routes
-const adminRoutes = require('./routes/adminRoutes'); // <-- added
+const adminRoutes = require('./routes/adminRoutes'); // ✅ NEW
 
 const app = express();
 
@@ -104,8 +103,8 @@ app.use('/api/business-card', businessCardRoutes);
 app.use('/api/checkout', checkoutRoutes);
 app.use('/api/contact', contactRoutes);
 
-// NEW: Admin endpoints (e.g., /admin/orders, /admin/orders/:id/status, etc.)
-app.use('/', adminRoutes); // <-- added
+// ✅ Mount admin routes (they define /admin/... paths internally)
+app.use('/', adminRoutes);
 
 // `/me/orders` is handled inside authRoutes
 app.use('/', authRoutes); // /login, /register, /profile, /me/orders, etc.
