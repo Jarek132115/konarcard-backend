@@ -334,12 +334,46 @@ const logoutUser = (_req, res) => {
 };
 
 // STRIPE: Subscribe (protected)
+// STRIPE: Subscribe (protected)
 const subscribeUser = async (req, res) => {
     try {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
         const customerId = await ensureStripeCustomer(user);
+
+        // ----- Trial logic (no double-dipping) -----
+        // If user already has a trial running, only grant the remaining time.
+        // If no trial has ever been started, you can choose to give the full 14 days (set giveFullIfNeverStarted = true)
+        // If a past trial exists and already expired, give NO extra trial time.
+        const nowMs = Date.now();
+        const giveFullIfNeverStarted = true; // set to false if you NEVER want trials on paid signup
+        let trialOption = null; // either { trial_end: <unix_seconds> } or { trial_period_days: 14 } or null
+
+        if (user.trialExpires) {
+            const trialMs = new Date(user.trialExpires).getTime();
+            if (!Number.isNaN(trialMs) && trialMs > nowMs) {
+                // Remaining trial exists → use exact same end in Stripe (no extra days)
+                trialOption = { trial_end: Math.floor(trialMs / 1000) };
+            } else {
+                // Trial exists but is over → no trial on subscription
+                trialOption = null;
+            }
+        } else if (giveFullIfNeverStarted) {
+            // User never started the in-app trial → optionally give full 14 on subscription
+            trialOption = { trial_period_days: 14 };
+        }
+
+        // Build subscription_data without mixing trial_end and trial_period_days
+        const subscription_data = {
+            metadata: { userId: user._id.toString(), kind: 'subscription' },
+            ...(trialOption && ('trial_end' in trialOption)
+                ? { trial_end: trialOption.trial_end }
+                : {}),
+            ...(trialOption && ('trial_period_days' in trialOption)
+                ? { trial_period_days: trialOption.trial_period_days }
+                : {}),
+        };
 
         const session = await stripe.checkout.sessions.create({
             customer: customerId,
@@ -349,13 +383,11 @@ const subscribeUser = async (req, res) => {
             line_items: [{ price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
             success_url: `${process.env.CLIENT_URL}/SuccessSubscription?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/subscription`,
-            subscription_data: {
-                trial_period_days: 14,
-                metadata: { userId: user._id.toString(), kind: 'subscription' },
-            },
+            subscription_data,
             metadata: { userId: user._id.toString(), kind: 'subscription' },
         });
 
+        // Save a pending order record for reconciliation
         try {
             await Order.create({
                 userId: user._id,
@@ -363,19 +395,25 @@ const subscribeUser = async (req, res) => {
                 status: 'pending',
                 stripeSessionId: session.id,
                 stripeCustomerId: customerId,
-                metadata: { from: 'checkout', product: 'subscription' },
+                metadata: { from: 'checkout', product: 'subscription', ...trialOption },
             });
         } catch (e) {
             console.error('Failed to create subscription order record:', e.message);
         }
 
+        // Important: DO NOT mutate user.trialExpires here.
+        // Let your webhook keep it as-is (so UI keeps showing the same end date).
+        // When the trial ends, Stripe transitions status automatically.
+
         setNoStore(res);
         res.status(200).json({ url: session.url });
     } catch (err) {
-        const status = err?.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
+        const status =
+            err?.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
         res.status(status).json({ error: err?.message, type: err?.type, code: err?.code });
     }
 };
+
 
 // STRIPE: Cancel Subscription (protected)
 const cancelSubscription = async (req, res) => {
