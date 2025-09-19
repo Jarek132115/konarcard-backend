@@ -40,8 +40,7 @@ app.use(
       'https://konarcard.com',
     ].filter(Boolean),
     credentials: true,
-    // ✅ allow PATCH (and HEAD). OPTIONS is handled automatically.
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'], // ✅ includes PATCH
     allowedHeaders: [
       'Content-Type',
       'Authorization',
@@ -50,14 +49,18 @@ app.use(
       'Cookie',
       'Cache-Control',
       'Pragma',
+      'Origin',
     ],
     preflightContinue: false,
     optionsSuccessStatus: 204,
   })
 );
 
-// ✅ respond to preflight for any route
-app.options('*', cors());
+// ✅ Generic OPTIONS responder without using a wildcard path
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 
 app.use(cookieParser());
 
@@ -109,11 +112,11 @@ app.use('/api/business-card', businessCardRoutes);
 app.use('/api/checkout', checkoutRoutes);
 app.use('/api/contact', contactRoutes);
 
-// ✅ Mount admin routes UNDER /admin (routes file uses relative paths)
+// ✅ Admin routes mounted under /admin (adminRoutes defines relative paths)
 app.use('/admin', adminRoutes);
 
-// `/me/orders` + auth flows
-app.use('/', authRoutes); // /login, /register, /profile, /me/orders, etc.
+// Auth + user routes (includes /me/orders)
+app.use('/', authRoutes);
 
 // Start server
 const port = process.env.PORT || 8080;
