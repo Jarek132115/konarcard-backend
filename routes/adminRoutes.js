@@ -49,21 +49,15 @@ function safeFulfillmentStatus(s) {
 
 function statusBadgeText(s) {
     switch (s) {
-        case 'order_placed':
-            return 'Order placed';
-        case 'designing_card':
-            return 'Designing your card';
-        case 'packaged':
-            return 'Packaged';
-        case 'shipped':
-            return 'Shipped';
-        default:
-            return 'Order update';
+        case 'order_placed': return 'Order placed';
+        case 'designing_card': return 'Designing your card';
+        case 'packaged': return 'Packaged';
+        case 'shipped': return 'Shipped';
+        default: return 'Order update';
     }
 }
 
 function orderLinkForUser() {
-    // Send customers to their orders page
     return `${CLIENT_URL}/myorders`;
 }
 
@@ -72,14 +66,12 @@ function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
     <div style="font-family:Arial,Helvetica,sans-serif; color:#222;">
       <h2 style="margin:0 0 8px;">${headline}</h2>
       <div style="line-height:1.6; font-size:15px;">${bodyHtml}</div>
-      ${ctaUrl
-            ? `
+      ${ctaUrl ? `
         <div style="margin:18px 0;">
           <a href="${ctaUrl}" style="display:inline-block; padding:10px 16px; background:#111; color:#fff; text-decoration:none; border-radius:10px; font-weight:700;">
             ${ctaLabel || 'View your order'}
           </a>
-        </div>`
-            : ''
+        </div>` : ''
         }
     </div>
   `;
@@ -88,7 +80,7 @@ function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
 // -------------------- Routes --------------------
 
 /**
- * GET /admin/orders  (mounted with /admin prefix in index.js)
+ * GET /admin/orders
  * Optional query:
  *  - type=card|subscription  (defaults to card)
  *  - status=pending|paid|active|canceled|failed
@@ -102,7 +94,7 @@ router.get('/orders', requireAuth, requireAdmin, async (req, res) => {
         const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
 
         const where = {};
-        // Default to *card* orders only (you asked to manage only card orders here)
+        // Default to card orders here
         if (type) where.type = String(type).toLowerCase();
         else where.type = 'card';
 
@@ -113,7 +105,7 @@ router.get('/orders', requireAuth, requireAdmin, async (req, res) => {
             const qstr = q.trim();
             const isObjectId = /^[a-f\d]{24}$/i.test(qstr);
 
-            // Find matching users by email/name/username (partial, case-insensitive)
+            // Find users by email/name/username (partial, case-insensitive)
             const users = await User.find({
                 $or: [
                     { email: { $regex: qstr, $options: 'i' } },
@@ -126,19 +118,43 @@ router.get('/orders', requireAuth, requireAdmin, async (req, res) => {
             if (users.length) ors.push({ userId: { $in: users.map((u) => u._id) } });
             if (isObjectId) ors.push({ _id: qstr });
 
-            if (ors.length) {
-                where.$or = ors;
-            } else {
-                // No match: return empty
-                where._id = null;
-            }
+            if (ors.length) where.$or = ors;
+            else where._id = null; // force empty if nothing matches
         }
 
-        const orders = await Order.find(where)
+        // Populate the user so we can expose a stable customerEmail field
+        const found = await Order.find(where)
             .sort({ createdAt: -1 })
             .limit(limit)
-            .populate('userId', 'email name username') // ✅ include customer info
+            .populate('userId', 'email name username')
             .lean();
+
+        // Shape response so the frontend can always read customerEmail
+        const orders = found.map((o) => {
+            const user =
+                o && o.userId && typeof o.userId === 'object' && o.userId.email
+                    ? o.userId
+                    : null;
+
+            const customerEmail =
+                user?.email ||
+                o.customerEmail ||                  // if ever stored on the doc
+                o?.metadata?.customerEmail || null; // legacy fallback
+
+            const customerName =
+                user?.name ||
+                o.deliveryName ||
+                o?.metadata?.deliveryName || null;
+
+            return {
+                ...o,
+                // helpful aliases for UIs
+                user,                               // { email, name, username } (populated user)
+                userEmail: user?.email || null,     // alias
+                customerEmail,                      // <- what your Admin UI reads first
+                customerName,                       // optional convenience
+            };
+        });
 
         res.json({ data: orders });
     } catch (err) {
@@ -150,7 +166,6 @@ router.get('/orders', requireAuth, requireAdmin, async (req, res) => {
 /**
  * PATCH /admin/orders/:orderId/status
  * Body: { fulfillmentStatus: 'order_placed'|'designing_card'|'packaged'|'shipped', notify?: boolean }
- * Sends a generic "order updated" email if notify=true.
  */
 router.patch('/orders/:orderId/status', requireAuth, requireAdmin, async (req, res) => {
     try {
@@ -167,7 +182,6 @@ router.patch('/orders/:orderId/status', requireAuth, requireAdmin, async (req, r
         );
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
-        // Optionally notify
         if (notify) {
             const user = await User.findById(order.userId).select('email name');
             if (user?.email) {
@@ -199,7 +213,6 @@ router.patch('/orders/:orderId/status', requireAuth, requireAdmin, async (req, r
 /**
  * PATCH /admin/orders/:orderId/tracking
  * Body: { trackingUrl?: string, deliveryWindow?: string, notify?: boolean }
- * If trackingUrl is provided and notify=true, sends "your order has been shipped" email with the tracking link.
  */
 router.patch('/orders/:orderId/tracking', requireAuth, requireAdmin, async (req, res) => {
     try {
@@ -213,7 +226,6 @@ router.patch('/orders/:orderId/tracking', requireAuth, requireAdmin, async (req,
         const order = await Order.findByIdAndUpdate(orderId, { $set: updates }, { new: true });
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
-        // If tracking provided and notify, send shipped email
         if (notify && updates.trackingUrl) {
             const user = await User.findById(order.userId).select('email name');
             if (user?.email) {
@@ -247,8 +259,6 @@ router.patch('/orders/:orderId/tracking', requireAuth, requireAdmin, async (req,
 
 /**
  * POST /admin/subscription/:orderId/cancel
- * Cancels a subscription at period end in Stripe.
- * (Kept for completeness – your admin UI can ignore this if you only manage card orders.)
  */
 router.post('/subscription/:orderId/cancel', requireAuth, requireAdmin, async (req, res) => {
     try {
