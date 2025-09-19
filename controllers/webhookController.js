@@ -14,7 +14,9 @@ const toInt = (v, d = 0) => {
     return Number.isFinite(n) ? n : d;
 };
 const clean = (obj) =>
-    Object.fromEntries(Object.entries(obj || {}).filter(([, v]) => v !== undefined && v !== null));
+    Object.fromEntries(
+        Object.entries(obj || {}).filter(([, v]) => v !== undefined && v !== null)
+    );
 
 async function upsertOrderBy(where, updates) {
     return Order.findOneAndUpdate(
@@ -24,13 +26,15 @@ async function upsertOrderBy(where, updates) {
     );
 }
 
+// Map Stripe subscription.status to our boolean
 function computeIsSubscribed(status) {
     return ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
 }
 
+// Mirror Stripe trial to our user model
 function applyTrialMirror(user, subscription) {
     if (subscription.status === 'trialing') {
-        const trialEndSec = subscription.trial_end;
+        const trialEndSec = subscription.trial_end; // UNIX seconds
         user.trialExpires = trialEndSec ? new Date(trialEndSec * 1000) : undefined;
     } else {
         user.trialExpires = undefined;
@@ -55,6 +59,9 @@ exports.handleStripeWebhook = async (req, res) => {
 
     try {
         switch (event.type) {
+            // ------------------------------------------------------------
+            // Checkout finished (card payment or subscription start)
+            // ------------------------------------------------------------
             case 'checkout.session.completed': {
                 const session = event.data.object;
                 const isSub = session.mode === 'subscription';
@@ -72,10 +79,11 @@ exports.handleStripeWebhook = async (req, res) => {
                 }
                 if (!userId) console.warn(`No userId found for session ${session.id}`);
 
+                // ---------------- Card (one-time) ----------------
                 if (isCard) {
                     const quantity = toInt(session?.metadata?.quantity, 1);
 
-                    // 🔹 Calculate delivery window (today+1 → today+4)
+                    // Calculate estimated delivery window (today+1 → today+4)
                     const today = new Date();
                     const start = new Date(today);
                     start.setDate(today.getDate() + 1);
@@ -119,47 +127,49 @@ exports.handleStripeWebhook = async (req, res) => {
                     );
                 }
 
+                // ---------------- Subscription ----------------
                 if (isSub) {
-                    if (session.subscription) {
-                        await upsertOrderBy(
-                            { stripeSubscriptionId: session.subscription },
-                            {
-                                userId,
-                                type: 'subscription',
-                                stripeSessionId: session.id,
-                                stripeSubscriptionId: session.subscription,
-                                stripeCustomerId: session.customer || null,
-                                status: 'pending',
-                                amountTotal: session.amount_total ?? null,
-                                currency: session.currency || 'gbp',
-                                metadata: session.metadata || {},
-                            }
-                        );
-                        console.log(
-                            `✅ Sub seed upserted by subscriptionId=${session.subscription}, user=${userId}`
-                        );
-                    }
+                    const subId = session.subscription || null;
 
-                    await upsertOrderBy(
-                        { stripeSessionId: session.id },
-                        {
-                            userId,
-                            type: 'subscription',
-                            stripeSessionId: session.id,
-                            stripeSubscriptionId: session.subscription || null,
-                            stripeCustomerId: session.customer || null,
-                            status: 'pending',
-                            amountTotal: session.amount_total ?? null,
-                            currency: session.currency || 'gbp',
-                            metadata: session.metadata || {},
-                        }
-                    );
-                    console.log(`✅ Sub seed ensured by sessionId=${session.id}, user=${userId}`);
+                    const base = {
+                        userId,
+                        type: 'subscription',
+                        stripeSessionId: session.id,            // keep sessionId on the same doc
+                        stripeSubscriptionId: subId || null,
+                        stripeCustomerId: session.customer || null,
+                        status: 'pending',
+                        amountTotal: session.amount_total ?? null,
+                        currency: session.currency || 'gbp',
+                        metadata: session.metadata || {},
+                    };
+
+                    let doc;
+                    if (subId) {
+                        // Primary key for subscriptions is the subscription id.
+                        doc = await upsertOrderBy({ stripeSubscriptionId: subId }, base);
+
+                        // 🔹 Clean up any stray duplicates from earlier logic
+                        await Order.deleteMany({
+                            $or: [
+                                { stripeSubscriptionId: subId, _id: { $ne: doc._id } },
+                                { stripeSessionId: session.id, _id: { $ne: doc._id } },
+                            ],
+                        });
+
+                        console.log(`✅ Sub seed upserted by subscriptionId=${subId}, user=${userId}`);
+                    } else {
+                        // Rare: session exists but sub not attached yet; seed by sessionId
+                        doc = await upsertOrderBy({ stripeSessionId: session.id }, base);
+                        console.log(`✅ Sub seed upserted by sessionId=${session.id}, user=${userId}`);
+                    }
                 }
 
                 break;
             }
 
+            // ------------------------------------------------------------
+            // Subscription lifecycle
+            // ------------------------------------------------------------
             case 'customer.subscription.created':
             case 'customer.subscription.updated': {
                 const subscription = event.data.object;
@@ -175,19 +185,25 @@ exports.handleStripeWebhook = async (req, res) => {
                     await user.save();
                 }
 
-                await upsertOrderBy(
+                const doc = await upsertOrderBy(
                     { stripeSubscriptionId: subscription.id },
                     {
                         userId: user ? user._id : null,
                         type: 'subscription',
                         stripeSubscriptionId: subscription.id,
                         stripeCustomerId: customerId,
-                        status: isSubscribed ? status : 'pending',
+                        status: isSubscribed ? status : 'pending', // keep actual Stripe status
                         amountTotal: subscription.items?.data?.[0]?.price?.unit_amount || null,
                         currency: subscription.currency || 'gbp',
                         metadata: subscription.metadata || {},
                     }
                 );
+
+                // 🔹 Cleanup any duplicate docs for the same subscription
+                await Order.deleteMany({
+                    stripeSubscriptionId: subscription.id,
+                    _id: { $ne: doc._id },
+                });
 
                 console.log(`${event.type} handled: sub=${subscription.id} status=${status}`);
                 break;
@@ -220,6 +236,9 @@ exports.handleStripeWebhook = async (req, res) => {
                 break;
             }
 
+            // ------------------------------------------------------------
+            // Invoices
+            // ------------------------------------------------------------
             case 'invoice.payment_succeeded': {
                 const invoice = event.data.object;
                 console.log(
