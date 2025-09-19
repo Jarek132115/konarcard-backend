@@ -21,10 +21,10 @@ const {
     createCardCheckoutSession,
 } = require('../controllers/authController');
 
-const { listOrders } = require('../controllers/orderController');
+const { listOrders } = require('../controllers/ordersController');
 const authenticateToken = require('../middleware/authenticateToken');
 
-// Public
+// ---------- Public ----------
 router.get('/', test);
 router.post('/register', registerUser);
 router.post('/login', loginUser);
@@ -34,7 +34,7 @@ router.post('/forgot-password', forgotPassword);
 router.post('/reset-password/:token', resetPassword);
 router.post('/contact', submitContactForm);
 
-// Protected
+// ---------- Protected (JWT) ----------
 router.get('/profile', authenticateToken, getProfile);
 router.put('/profile', authenticateToken, updateProfile);
 router.delete('/profile', authenticateToken, deleteAccount);
@@ -43,7 +43,11 @@ router.post('/logout', authenticateToken, logoutUser);
 // Subscriptions
 router.post('/subscribe', authenticateToken, subscribeUser);
 router.post('/cancel-subscription', authenticateToken, cancelSubscription);
+
+// Status aliases (cover all paths seen in your logs/frontend)
 router.get('/subscription-status', authenticateToken, checkSubscriptionStatus);
+router.get('/subscription/status', authenticateToken, checkSubscriptionStatus);
+router.get('/check-subscription', authenticateToken, checkSubscriptionStatus);
 
 // Trials
 router.post('/trial/start', authenticateToken, startTrial);
@@ -51,7 +55,7 @@ router.post('/trial/start', authenticateToken, startTrial);
 // One-time card checkout
 router.post('/checkout/card', authenticateToken, createCardCheckoutSession);
 
-// Orders
+// Orders (list)
 router.get('/me/orders', authenticateToken, listOrders);
 
 module.exports = router;
