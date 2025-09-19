@@ -16,13 +16,13 @@ const Order = require('../models/Order');
 const User = require('../models/user');
 const sendEmail = require('../utils/SendEmail');
 
-// ------- auth gate (index.js already decodes JWT into req.user if present) -------
+// --- auth gate (index.js already decodes JWT into req.user if present) ---
 function requireAuth(req, res, next) {
   if (req.user?.id) return next();
   return res.status(401).json({ error: 'Unauthorized' });
 }
 
-// ---------- helpers ----------
+// ---------------- helpers ----------------
 function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
   return `
     <div style="font-family:Arial,Helvetica,sans-serif; color:#222;">
@@ -140,8 +140,6 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     // shipping / delivery fields
     deliveryName: ship.deliveryName || undefined,
     deliveryAddress: ship.deliveryAddress || undefined,
-    // keep any existing ETA if set previously by checkout route
-    // (don’t clear deliveryWindow here)
 
     // only for cards
     fulfillmentStatus: isSubscription ? undefined : 'order_placed',
@@ -153,12 +151,12 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     },
   };
 
-  // Find by session id (idempotent)
+  // Idempotent by session id
   let order = await Order.findOne({ stripeSessionId: session.id });
   if (order) {
     order.set({
       ...base,
-      // preserve an ETA if it already exists
+      // preserve an ETA if present (set earlier by /checkout/card)
       deliveryWindow: order.deliveryWindow || undefined,
     });
     order = await order.save();
@@ -168,8 +166,8 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
   return order;
 }
 
-// ---------- webhook endpoint ----------
-// IMPORTANT: raw parser here. index.js mounts this BEFORE any JSON parser.
+// ---------------- webhook endpoint ----------------
+// IMPORTANT: raw parser here. index.js mounts this router BEFORE any JSON parser.
 router.post(
   '/',
   express.raw({ type: 'application/json' }),
@@ -215,8 +213,9 @@ router.post(
             user = await User.findById(order.userId).select('email name');
           }
           if (!user && session.customer_details?.email) {
-            user = await User.findOne({ email: (session.customer_details.email || '').toLowerCase() })
-              .select('email name');
+            user = await User.findOne({
+              email: (session.customer_details.email || '').toLowerCase(),
+            }).select('email name');
           }
 
           // Send email
@@ -259,21 +258,25 @@ router.post(
 );
 
 /**
- * ✅ NEW: GET /api/stripe/confirm?session_id=cs_test_...
- * Auth required. Immediately fetches the Checkout Session and mirrors it
- * into your Order, so the Success page has fresh data without waiting for the webhook.
+ * GET /api/stripe/confirm?session_id=cs_...
+ * Auth required. Immediately mirrors the Checkout Session into your Order,
+ * so the Success page has fresh data without waiting for the webhook.
  */
 router.get('/confirm', requireAuth, async (req, res) => {
   try {
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
-    const sessionId = req.query.session_id;
+
+    const sessionId = String(req.query.session_id || '').trim();
     if (!sessionId) return res.status(400).json({ error: 'Missing session_id' });
 
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    // Pull full details needed for delivery name/address (expand helps, but these fields
+    // are usually present post-checkout even without expand).
+    const session = await stripe.checkout.sessions.retrieve(sessionId, {
+      expand: ['customer_details', 'shipping_details'],
+    });
     if (!session) return res.status(404).json({ error: 'Session not found' });
 
     const isSubscription = session.mode === 'subscription';
-
     const order = await upsertOrderFromSession(session, {
       isSubscription,
       fallbackUserId: req.user.id,
@@ -281,8 +284,8 @@ router.get('/confirm', requireAuth, async (req, res) => {
 
     res.json({ success: true, data: order });
   } catch (err) {
-    console.error('[stripe] confirm error:', err);
-    res.status(500).json({ error: 'Failed to confirm session' });
+    console.error('[stripe] /confirm error:', err);
+    res.status(500).json({ error: 'Failed to confirm order' });
   }
 });
 
