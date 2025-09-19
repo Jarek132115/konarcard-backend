@@ -1,7 +1,6 @@
 // backend/routes/adminRoutes.js
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose');
 
 const Order = require('../models/Order');
 const User = require('../models/user');
@@ -14,6 +13,10 @@ const stripe = process.env.STRIPE_SECRET_KEY
 const CLIENT_URL = (process.env.CLIENT_URL || 'https://www.konarcard.com').replace(/\/+$/, '');
 
 // -------------------- Admin Auth --------------------
+// JWT has already been decoded into req.user in index.js
+// Allow-list via env:
+//   ADMIN_EMAILS = "owner@site.com,other@site.com"
+//   ADMIN_USER_IDS = "64a...,64b..."
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
     .split(',')
     .map((s) => s.trim().toLowerCase())
@@ -30,10 +33,10 @@ function requireAuth(req, res, next) {
 
 function requireAdmin(req, res, next) {
     const email = (req.user?.email || '').toLowerCase();
-    const id = String(req.user?.id || '');
+    const id = req.user?.id;
     const isAdmin =
         (email && ADMIN_EMAILS.includes(email)) ||
-        (id && ADMIN_USER_IDS.includes(id));
+        (id && ADMIN_USER_IDS.includes(String(id)));
     if (!isAdmin) return res.status(403).json({ error: 'Admin only' });
     next();
 }
@@ -46,15 +49,21 @@ function safeFulfillmentStatus(s) {
 
 function statusBadgeText(s) {
     switch (s) {
-        case 'order_placed': return 'Order placed';
-        case 'designing_card': return 'Designing your card';
-        case 'packaged': return 'Packaged';
-        case 'shipped': return 'Shipped';
-        default: return 'Order update';
+        case 'order_placed':
+            return 'Order placed';
+        case 'designing_card':
+            return 'Designing your card';
+        case 'packaged':
+            return 'Packaged';
+        case 'shipped':
+            return 'Shipped';
+        default:
+            return 'Order update';
     }
 }
 
 function orderLinkForUser() {
+    // Send customers to their orders page
     return `${CLIENT_URL}/myorders`;
 }
 
@@ -63,70 +72,72 @@ function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
     <div style="font-family:Arial,Helvetica,sans-serif; color:#222;">
       <h2 style="margin:0 0 8px;">${headline}</h2>
       <div style="line-height:1.6; font-size:15px;">${bodyHtml}</div>
-      ${ctaUrl ? `
+      ${ctaUrl
+            ? `
         <div style="margin:18px 0;">
           <a href="${ctaUrl}" style="display:inline-block; padding:10px 16px; background:#111; color:#fff; text-decoration:none; border-radius:10px; font-weight:700;">
             ${ctaLabel || 'View your order'}
           </a>
-        </div>` : ''}
+        </div>`
+            : ''
+        }
     </div>
   `;
 }
 
-const isObjectId = (v) => /^[a-f0-9]{24}$/i.test(String(v || ''));
-
 // -------------------- Routes --------------------
 
 /**
- * GET /admin/orders
- * Query:
- *  - type=card|subscription
+ * GET /admin/orders  (mounted with /admin prefix in index.js)
+ * Optional query:
+ *  - type=card|subscription  (defaults to card)
  *  - status=pending|paid|active|canceled|failed
  *  - fulfillmentStatus=order_placed|designing_card|packaged|shipped
- *  - q=<partial email/username/name OR exact orderId/userId>
- *  - limit (default 50; max 200)
+ *  - q=<email or name or username or orderId>
+ *  - limit (default 50, max 200)
  */
 router.get('/orders', requireAuth, requireAdmin, async (req, res) => {
     try {
-        const { type, status, fulfillmentStatus, q } = req.query;
+        let { type, status, fulfillmentStatus, q } = req.query;
         const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
 
         const where = {};
-        if (type) where.type = type;
+        // Default to *card* orders only (you asked to manage only card orders here)
+        if (type) where.type = String(type).toLowerCase();
+        else where.type = 'card';
+
         if (status) where.status = status;
         if (fulfillmentStatus) where.fulfillmentStatus = fulfillmentStatus;
 
-        if (q) {
-            // Direct order id match
-            if (isObjectId(q)) {
-                where._id = q;
-            } else {
-                // Find users by partial email/username/name
-                const users = await User.find({
-                    $or: [
-                        { email: new RegExp(q, 'i') },
-                        { username: new RegExp(q, 'i') },
-                        { name: new RegExp(q, 'i') },
-                    ],
-                }).select('_id').lean();
+        if (q && typeof q === 'string') {
+            const qstr = q.trim();
+            const isObjectId = /^[a-f\d]{24}$/i.test(qstr);
 
-                if (users.length) {
-                    where.userId = { $in: users.map((u) => u._id) };
-                } else if (isObjectId(q)) {
-                    // If they pasted a userId exactly
-                    where.userId = q;
-                } else {
-                    // No matches -> empty result
-                    where._id = null;
-                }
+            // Find matching users by email/name/username (partial, case-insensitive)
+            const users = await User.find({
+                $or: [
+                    { email: { $regex: qstr, $options: 'i' } },
+                    { name: { $regex: qstr, $options: 'i' } },
+                    { username: { $regex: qstr, $options: 'i' } },
+                ],
+            }).select('_id');
+
+            const ors = [];
+            if (users.length) ors.push({ userId: { $in: users.map((u) => u._id) } });
+            if (isObjectId) ors.push({ _id: qstr });
+
+            if (ors.length) {
+                where.$or = ors;
+            } else {
+                // No match: return empty
+                where._id = null;
             }
         }
 
         const orders = await Order.find(where)
             .sort({ createdAt: -1 })
             .limit(limit)
-            // ✅ include customer info so the UI can show name/email
-            .populate('userId', 'name email username')
+            .populate('userId', 'email name username') // ✅ include customer info
             .lean();
 
         res.json({ data: orders });
@@ -139,6 +150,7 @@ router.get('/orders', requireAuth, requireAdmin, async (req, res) => {
 /**
  * PATCH /admin/orders/:orderId/status
  * Body: { fulfillmentStatus: 'order_placed'|'designing_card'|'packaged'|'shipped', notify?: boolean }
+ * Sends a generic "order updated" email if notify=true.
  */
 router.patch('/orders/:orderId/status', requireAuth, requireAdmin, async (req, res) => {
     try {
@@ -155,9 +167,11 @@ router.patch('/orders/:orderId/status', requireAuth, requireAdmin, async (req, r
         );
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
+        // Optionally notify
         if (notify) {
             const user = await User.findById(order.userId).select('email name');
             if (user?.email) {
+                const link = orderLinkForUser(order);
                 await sendEmail({
                     email: user.email,
                     subject: `Your KonarCard order was updated: ${statusBadgeText(order.fulfillmentStatus)}`,
@@ -169,7 +183,7 @@ router.patch('/orders/:orderId/status', requireAuth, requireAdmin, async (req, r
               <p>For the latest information about your delivery, visit your order page.</p>
             `,
                         ctaLabel: 'View your order',
-                        ctaUrl: orderLinkForUser(order),
+                        ctaUrl: link,
                     }),
                 });
             }
@@ -185,6 +199,7 @@ router.patch('/orders/:orderId/status', requireAuth, requireAdmin, async (req, r
 /**
  * PATCH /admin/orders/:orderId/tracking
  * Body: { trackingUrl?: string, deliveryWindow?: string, notify?: boolean }
+ * If trackingUrl is provided and notify=true, sends "your order has been shipped" email with the tracking link.
  */
 router.patch('/orders/:orderId/tracking', requireAuth, requireAdmin, async (req, res) => {
     try {
@@ -195,16 +210,14 @@ router.patch('/orders/:orderId/tracking', requireAuth, requireAdmin, async (req,
         if (typeof trackingUrl === 'string') updates.trackingUrl = trackingUrl.trim();
         if (typeof deliveryWindow === 'string') updates.deliveryWindow = deliveryWindow.trim();
 
-        const order = await Order.findByIdAndUpdate(
-            orderId,
-            { $set: updates },
-            { new: true }
-        );
+        const order = await Order.findByIdAndUpdate(orderId, { $set: updates }, { new: true });
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
+        // If tracking provided and notify, send shipped email
         if (notify && updates.trackingUrl) {
             const user = await User.findById(order.userId).select('email name');
             if (user?.email) {
+                const ordersLink = orderLinkForUser(order);
                 await sendEmail({
                     email: user.email,
                     subject: 'Your KonarCard order has shipped 🚚',
@@ -219,7 +232,7 @@ router.patch('/orders/:orderId/tracking', requireAuth, requireAdmin, async (req,
               <p>For the latest order information, visit your orders page.</p>
             `,
                         ctaLabel: 'View my orders',
-                        ctaUrl: orderLinkForUser(order),
+                        ctaUrl: ordersLink,
                     }),
                 });
             }
@@ -235,6 +248,7 @@ router.patch('/orders/:orderId/tracking', requireAuth, requireAdmin, async (req,
 /**
  * POST /admin/subscription/:orderId/cancel
  * Cancels a subscription at period end in Stripe.
+ * (Kept for completeness – your admin UI can ignore this if you only manage card orders.)
  */
 router.post('/subscription/:orderId/cancel', requireAuth, requireAdmin, async (req, res) => {
     try {

@@ -109,7 +109,7 @@ app.use('/api/business-card', businessCardRoutes);
 app.use('/api/checkout', checkoutRoutes);
 app.use('/api/contact', contactRoutes);
 
-// ✅ Mount admin routes UNDER /admin (the routes file uses relative paths)
+// ✅ Mount admin routes UNDER /admin (routes file uses relative paths)
 app.use('/admin', adminRoutes);
 
 // `/me/orders` + auth flows
