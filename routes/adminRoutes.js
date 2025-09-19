@@ -1,21 +1,27 @@
 // backend/routes/adminRoutes.js
 const express = require('express');
 const router = express.Router();
-const Stripe = require('stripe');
+const mongoose = require('mongoose');
 
 const Order = require('../models/Order');
 const User = require('../models/user');
 const sendEmail = require('../utils/SendEmail');
 
-const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
+const stripe = process.env.STRIPE_SECRET_KEY
+    ? new (require('stripe'))(process.env.STRIPE_SECRET_KEY)
+    : null;
 
 const CLIENT_URL = (process.env.CLIENT_URL || 'https://www.konarcard.com').replace(/\/+$/, '');
 
 // -------------------- Admin Auth --------------------
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
-    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
 function requireAuth(req, res, next) {
     if (req.user?.id) return next();
@@ -24,10 +30,10 @@ function requireAuth(req, res, next) {
 
 function requireAdmin(req, res, next) {
     const email = (req.user?.email || '').toLowerCase();
-    const id = req.user?.id;
+    const id = String(req.user?.id || '');
     const isAdmin =
         (email && ADMIN_EMAILS.includes(email)) ||
-        (id && ADMIN_USER_IDS.includes(String(id)));
+        (id && ADMIN_USER_IDS.includes(id));
     if (!isAdmin) return res.status(403).json({ error: 'Admin only' });
     next();
 }
@@ -67,23 +73,22 @@ function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
   `;
 }
 
-function escapeRegex(s) {
-    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+const isObjectId = (v) => /^[a-f0-9]{24}$/i.test(String(v || ''));
 
 // -------------------- Routes --------------------
 
 /**
  * GET /admin/orders
  * Query:
- *  - q   : partial email | name | username | userId | orderId | stripe ids | tracking url
- *  - type, status, fulfillmentStatus
- *  - limit (<=200)
+ *  - type=card|subscription
+ *  - status=pending|paid|active|canceled|failed
+ *  - fulfillmentStatus=order_placed|designing_card|packaged|shipped
+ *  - q=<partial email/username/name OR exact orderId/userId>
+ *  - limit (default 50; max 200)
  */
-router.get('/admin/orders', requireAuth, requireAdmin, async (req, res) => {
+router.get('/orders', requireAuth, requireAdmin, async (req, res) => {
     try {
-        const { type, status, fulfillmentStatus } = req.query;
-        const q = (req.query.q || '').trim();
+        const { type, status, fulfillmentStatus, q } = req.query;
         const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
 
         const where = {};
@@ -92,39 +97,39 @@ router.get('/admin/orders', requireAuth, requireAdmin, async (req, res) => {
         if (fulfillmentStatus) where.fulfillmentStatus = fulfillmentStatus;
 
         if (q) {
-            const looksObjectId = /^[a-f0-9]{24}$/i.test(q);
-            if (looksObjectId) {
-                where.$or = [{ _id: q }, { userId: q }];
+            // Direct order id match
+            if (isObjectId(q)) {
+                where._id = q;
             } else {
-                const rx = new RegExp(escapeRegex(q), 'i');
+                // Find users by partial email/username/name
                 const users = await User.find({
-                    $or: [{ email: rx }, { name: rx }, { username: rx }],
+                    $or: [
+                        { email: new RegExp(q, 'i') },
+                        { username: new RegExp(q, 'i') },
+                        { name: new RegExp(q, 'i') },
+                    ],
                 }).select('_id').lean();
 
-                const userIds = users.map(u => u._id);
-                const orderFieldOr = [{ stripeSessionId: rx }, { stripeSubscriptionId: rx }, { trackingUrl: rx }];
-
-                where.$or = userIds.length ? [{ userId: { $in: userIds } }, ...orderFieldOr] : orderFieldOr;
+                if (users.length) {
+                    where.userId = { $in: users.map((u) => u._id) };
+                } else if (isObjectId(q)) {
+                    // If they pasted a userId exactly
+                    where.userId = q;
+                } else {
+                    // No matches -> empty result
+                    where._id = null;
+                }
             }
         }
 
-        // Populate user for name/email/username so UI can show it
-        const docs = await Order.find(where)
+        const orders = await Order.find(where)
             .sort({ createdAt: -1 })
             .limit(limit)
-            .populate({ path: 'userId', select: 'email name username' })
+            // ✅ include customer info so the UI can show name/email
+            .populate('userId', 'name email username')
             .lean();
 
-        // Normalize payload to include `user` consistently
-        const data = docs.map(o => ({
-            ...o,
-            user: o.userId
-                ? { id: o.userId._id, email: o.userId.email || null, name: o.userId.name || null, username: o.userId.username || null }
-                : null,
-            userId: o.userId?._id || o.userId,
-        }));
-
-        res.json({ data });
+        res.json({ data: orders });
     } catch (err) {
         console.error('Admin list orders error:', err);
         res.status(500).json({ error: 'Failed to fetch orders' });
@@ -133,8 +138,9 @@ router.get('/admin/orders', requireAuth, requireAdmin, async (req, res) => {
 
 /**
  * PATCH /admin/orders/:orderId/status
+ * Body: { fulfillmentStatus: 'order_placed'|'designing_card'|'packaged'|'shipped', notify?: boolean }
  */
-router.patch('/admin/orders/:orderId/status', requireAuth, requireAdmin, async (req, res) => {
+router.patch('/orders/:orderId/status', requireAuth, requireAdmin, async (req, res) => {
     try {
         const { orderId } = req.params;
         const { fulfillmentStatus, notify } = req.body;
@@ -142,7 +148,11 @@ router.patch('/admin/orders/:orderId/status', requireAuth, requireAdmin, async (
         const next = safeFulfillmentStatus(fulfillmentStatus);
         if (!next) return res.status(400).json({ error: 'Invalid fulfillmentStatus' });
 
-        const order = await Order.findByIdAndUpdate(orderId, { $set: { fulfillmentStatus: next } }, { new: true });
+        const order = await Order.findByIdAndUpdate(
+            orderId,
+            { $set: { fulfillmentStatus: next } },
+            { new: true }
+        );
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
         if (notify) {
@@ -174,17 +184,22 @@ router.patch('/admin/orders/:orderId/status', requireAuth, requireAdmin, async (
 
 /**
  * PATCH /admin/orders/:orderId/tracking
+ * Body: { trackingUrl?: string, deliveryWindow?: string, notify?: boolean }
  */
-router.patch('/admin/orders/:orderId/tracking', requireAuth, requireAdmin, async (req, res) => {
+router.patch('/orders/:orderId/tracking', requireAuth, requireAdmin, async (req, res) => {
     try {
         const { orderId } = req.params;
-        const { trackingUrl, deliveryWindow, notify } = req.body;
+        let { trackingUrl, deliveryWindow, notify } = req.body;
 
         const updates = {};
         if (typeof trackingUrl === 'string') updates.trackingUrl = trackingUrl.trim();
         if (typeof deliveryWindow === 'string') updates.deliveryWindow = deliveryWindow.trim();
 
-        const order = await Order.findByIdAndUpdate(orderId, { $set: updates }, { new: true });
+        const order = await Order.findByIdAndUpdate(
+            orderId,
+            { $set: updates },
+            { new: true }
+        );
         if (!order) return res.status(404).json({ error: 'Order not found' });
 
         if (notify && updates.trackingUrl) {
@@ -219,8 +234,9 @@ router.patch('/admin/orders/:orderId/tracking', requireAuth, requireAdmin, async
 
 /**
  * POST /admin/subscription/:orderId/cancel
+ * Cancels a subscription at period end in Stripe.
  */
-router.post('/admin/subscription/:orderId/cancel', requireAuth, requireAdmin, async (req, res) => {
+router.post('/subscription/:orderId/cancel', requireAuth, requireAdmin, async (req, res) => {
     try {
         if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
 
@@ -235,7 +251,14 @@ router.post('/admin/subscription/:orderId/cancel', requireAuth, requireAdmin, as
             cancel_at_period_end: true,
         });
 
-        res.json({ success: true, data: { id: updated.id, status: updated.status, cancel_at_period_end: updated.cancel_at_period_end } });
+        res.json({
+            success: true,
+            data: {
+                id: updated.id,
+                status: updated.status,
+                cancel_at_period_end: updated.cancel_at_period_end,
+            },
+        });
     } catch (err) {
         console.error('Admin cancel subscription error:', err);
         res.status(500).json({ error: 'Failed to cancel subscription' });

@@ -12,7 +12,7 @@ const checkoutRoutes = require('./routes/checkout');
 const stripeWebhookRoutes = require('./routes/stripe'); // uses express.raw() internally
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
-const adminRoutes = require('./routes/adminRoutes'); // ✅ NEW
+const adminRoutes = require('./routes/adminRoutes'); // ✅ admin endpoints
 
 const app = express();
 
@@ -40,7 +40,8 @@ app.use(
       'https://konarcard.com',
     ].filter(Boolean),
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    // ✅ allow PATCH (and HEAD). OPTIONS is handled automatically.
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
     allowedHeaders: [
       'Content-Type',
       'Authorization',
@@ -50,8 +51,13 @@ app.use(
       'Cache-Control',
       'Pragma',
     ],
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   })
 );
+
+// ✅ respond to preflight for any route
+app.options('*', cors());
 
 app.use(cookieParser());
 
@@ -103,10 +109,10 @@ app.use('/api/business-card', businessCardRoutes);
 app.use('/api/checkout', checkoutRoutes);
 app.use('/api/contact', contactRoutes);
 
-// ✅ Mount admin routes (they define /admin/... paths internally)
-app.use('/', adminRoutes);
+// ✅ Mount admin routes UNDER /admin (the routes file uses relative paths)
+app.use('/admin', adminRoutes);
 
-// `/me/orders` is handled inside authRoutes
+// `/me/orders` + auth flows
 app.use('/', authRoutes); // /login, /register, /profile, /me/orders, etc.
 
 // Start server
