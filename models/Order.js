@@ -1,3 +1,4 @@
+// backend/models/Order.js
 const mongoose = require('mongoose');
 
 const OrderSchema = new mongoose.Schema(
@@ -31,21 +32,21 @@ const OrderSchema = new mongoose.Schema(
             index: true,
         },
 
-        /** 🔹 Fulfillment workflow */
+        // --- New admin-managed shipping/fulfilment fields ---
         fulfillmentStatus: {
             type: String,
             enum: ['order_placed', 'designing_card', 'packaged', 'shipped'],
             default: 'order_placed',
             index: true,
         },
+        trackingUrl: { type: String },
 
-        /** 🔹 Tracking + delivery */
-        trackingUrl: { type: String },   // link to Royal Mail / DPD etc.
-        deliveryWindow: { type: String }, // ETA or date string
-
-        /** 🔹 Customer shipping info */
+        // Displayed to the customer (also mirrored from metadata if present)
         deliveryName: { type: String },
         deliveryAddress: { type: String },
+
+        // Your pre-existing ETA field
+        deliveryWindow: { type: String },
 
         metadata: { type: mongoose.Schema.Types.Mixed },
     },

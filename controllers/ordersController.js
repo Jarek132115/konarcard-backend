@@ -1,3 +1,4 @@
+// backend/controllers/ordersController.js
 const Order = require('../models/Order');
 
 /**
@@ -12,16 +13,13 @@ const listOrders = async (req, res) => {
     }
 
     try {
-        const orders = await Order.find({ userId })
-            .sort({ createdAt: -1 })
-            .lean();
+        const orders = await Order.find({ userId }).sort({ createdAt: -1 }).lean();
 
         if (!orders || orders.length === 0) {
             return res.status(200).json({ data: [] });
         }
 
-        // Shape/rename fields for the frontend
-        const result = orders.map(o => ({
+        const result = orders.map((o) => ({
             id: o._id,
             type: o.type, // 'card' | 'subscription'
             status: o.status, // 'pending' | 'paid' | 'active' | 'canceled' | 'failed'
@@ -32,7 +30,16 @@ const listOrders = async (req, res) => {
             stripeSubscriptionId: o.stripeSubscriptionId || null,
             createdAt: o.createdAt,
             updatedAt: o.updatedAt,
-            deliveryWindow: o.deliveryWindow || null, // 🔹 expose delivery window
+
+            // NEW: shipping/admin fields
+            fulfillmentStatus: o.fulfillmentStatus || 'order_placed',
+            trackingUrl: o.trackingUrl || null,
+            deliveryName: o.deliveryName || o?.metadata?.deliveryName || null,
+            deliveryAddress: o.deliveryAddress || o?.metadata?.deliveryAddress || null,
+
+            // Existing ETA
+            deliveryWindow: o.deliveryWindow || null,
+
             metadata: o.metadata || {},
         }));
 
@@ -43,6 +50,4 @@ const listOrders = async (req, res) => {
     }
 };
 
-module.exports = {
-    listOrders,
-};
+module.exports = { listOrders };
