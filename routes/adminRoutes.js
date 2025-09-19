@@ -7,7 +7,7 @@ const Order = require('../models/Order');
 const User = require('../models/user');
 const sendEmail = require('../utils/SendEmail');
 
-const stripe = process.env.STRIPE_SECRET_KEY ? new (require('stripe'))(process.env.STRIPE_SECRET_KEY) : null;
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
 const CLIENT_URL = (process.env.CLIENT_URL || 'https://www.konarcard.com').replace(/\/+$/, '');
 
@@ -17,9 +17,14 @@ const CLIENT_URL = (process.env.CLIENT_URL || 'https://www.konarcard.com').repla
 //   ADMIN_EMAILS = "owner@site.com,other@site.com"
 //   ADMIN_USER_IDS = "64a...,64b..."
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || '')
-    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+
 const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
 function requireAuth(req, res, next) {
     if (req.user?.id) return next();
@@ -72,6 +77,10 @@ function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
   `;
 }
 
+function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // -------------------- Routes --------------------
 
 /**
@@ -80,12 +89,13 @@ function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
  *  - type=card|subscription
  *  - status=pending|paid|active|canceled|failed
  *  - fulfillmentStatus=order_placed|designing_card|packaged|shipped
- *  - q=<email or userId>
- *  - limit (default 50)
+ *  - q=<email | name | username | userId | orderId | stripe id | tracking url> (partial for text fields)
+ *  - limit (default 50, max 200)
  */
 router.get('/admin/orders', requireAuth, requireAdmin, async (req, res) => {
     try {
-        const { type, status, fulfillmentStatus, q } = req.query;
+        const { type, status, fulfillmentStatus } = req.query;
+        const q = (req.query.q || '').trim();
         const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
 
         const where = {};
@@ -93,19 +103,49 @@ router.get('/admin/orders', requireAuth, requireAdmin, async (req, res) => {
         if (status) where.status = status;
         if (fulfillmentStatus) where.fulfillmentStatus = fulfillmentStatus;
 
-        // Basic search: by user email or userId
         if (q) {
-            const user = await User.findOne({
-                $or: [
-                    { email: new RegExp(`^${q}$`, 'i') },
-                    { _id: q.match(/^[a-f0-9]{24}$/i) ? q : null },
-                ].filter(Boolean),
-            }).select('_id');
-            if (user) where.userId = user._id;
-            else where._id = null; // return empty if no match
+            const looksObjectId = /^[a-f0-9]{24}$/i.test(q);
+
+            if (looksObjectId) {
+                // If q looks like an ObjectId: match either order _id or userId
+                where.$or = [
+                    { _id: q },
+                    { userId: q },
+                ];
+            } else {
+                // Partial search on users (email, name, username)
+                const rx = new RegExp(escapeRegex(q), 'i');
+
+                const users = await User.find({
+                    $or: [
+                        { email: rx },
+                        { name: rx },
+                        { username: rx },
+                    ],
+                }).select('_id').lean();
+
+                const userIds = users.map((u) => u._id);
+
+                // Build an $or that also checks some order fields directly
+                // (stripe ids, tracking url) in case no user text match exists.
+                const orderFieldOr = [
+                    { stripeSessionId: rx },
+                    { stripeSubscriptionId: rx },
+                    { trackingUrl: rx },
+                ];
+
+                if (userIds.length) {
+                    where.$or = [{ userId: { $in: userIds } }, ...orderFieldOr];
+                } else {
+                    where.$or = orderFieldOr;
+                }
+            }
         }
 
-        const orders = await Order.find(where).sort({ createdAt: -1 }).limit(limit).lean();
+        const orders = await Order.find(where)
+            .sort({ createdAt: -1 })
+            .limit(limit)
+            .lean();
 
         res.json({ data: orders });
     } catch (err) {
@@ -231,7 +271,10 @@ router.post('/admin/subscription/:orderId/cancel', requireAuth, requireAdmin, as
             cancel_at_period_end: true,
         });
 
-        res.json({ success: true, data: { id: updated.id, status: updated.status, cancel_at_period_end: updated.cancel_at_period_end } });
+        res.json({
+            success: true,
+            data: { id: updated.id, status: updated.status, cancel_at_period_end: updated.cancel_at_period_end },
+        });
     } catch (err) {
         console.error('Admin cancel subscription error:', err);
         res.status(500).json({ error: 'Failed to cancel subscription' });
