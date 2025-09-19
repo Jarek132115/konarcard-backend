@@ -12,7 +12,7 @@ const checkoutRoutes = require('./routes/checkout');
 const stripeWebhookRoutes = require('./routes/stripe'); // uses express.raw() internally
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
-const orderRoutes = require('./routes/orders'); // exposes GET /me/orders
+const orderRoutes = require('./routes/order'); // exposes GET /me/orders
 
 const app = express();
 
