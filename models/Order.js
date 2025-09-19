@@ -31,8 +31,21 @@ const OrderSchema = new mongoose.Schema(
             index: true,
         },
 
-        // 🔹 New field for shipping/delivery info
-        deliveryWindow: { type: String },
+        /** 🔹 Fulfillment workflow */
+        fulfillmentStatus: {
+            type: String,
+            enum: ['order_placed', 'designing_card', 'packaged', 'shipped'],
+            default: 'order_placed',
+            index: true,
+        },
+
+        /** 🔹 Tracking + delivery */
+        trackingUrl: { type: String },   // link to Royal Mail / DPD etc.
+        deliveryWindow: { type: String }, // ETA or date string
+
+        /** 🔹 Customer shipping info */
+        deliveryName: { type: String },
+        deliveryAddress: { type: String },
 
         metadata: { type: mongoose.Schema.Types.Mixed },
     },

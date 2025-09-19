@@ -12,7 +12,8 @@ const checkoutRoutes = require('./routes/checkout');
 const stripeWebhookRoutes = require('./routes/stripe'); // uses express.raw() internally
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
-// ❌ removed: const orderRoutes = require('./routes/orders');
+// NEW: admin routes
+const adminRoutes = require('./routes/adminRoutes'); // <-- added
 
 const app = express();
 
@@ -103,7 +104,9 @@ app.use('/api/business-card', businessCardRoutes);
 app.use('/api/checkout', checkoutRoutes);
 app.use('/api/contact', contactRoutes);
 
-// ❌ removed: app.use('/', orderRoutes);
+// NEW: Admin endpoints (e.g., /admin/orders, /admin/orders/:id/status, etc.)
+app.use('/', adminRoutes); // <-- added
+
 // `/me/orders` is handled inside authRoutes
 app.use('/', authRoutes); // /login, /register, /profile, /me/orders, etc.
 
