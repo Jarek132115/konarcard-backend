@@ -262,30 +262,34 @@ router.post(
  * Auth required. Immediately mirrors the Checkout Session into your Order,
  * so the Success page has fresh data without waiting for the webhook.
  */
-router.get('/confirm', requireAuth, async (req, res) => {
+// --- replace the existing /confirm handler with this ---
+router.get('/confirm', async (req, res) => {
   try {
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
-
-    const sessionId = String(req.query.session_id || '').trim();
+    const sessionId = req.query.session_id;
     if (!sessionId) return res.status(400).json({ error: 'Missing session_id' });
 
-    // Pull full details needed for delivery name/address (expand helps, but these fields
-    // are usually present post-checkout even without expand).
-    const session = await stripe.checkout.sessions.retrieve(sessionId, {
-      expand: ['customer_details', 'shipping_details'],
-    });
+    // Verify session server-side
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
     if (!session) return res.status(404).json({ error: 'Session not found' });
 
     const isSubscription = session.mode === 'subscription';
-    const order = await upsertOrderFromSession(session, {
-      isSubscription,
-      fallbackUserId: req.user.id,
-    });
 
-    res.json({ success: true, data: order });
+    // Try to link to a user
+    let fallbackUserId = null;
+    // if a token was present, index.js has already decoded req.user
+    if (req.user?.id) fallbackUserId = req.user.id;
+    if (!fallbackUserId && session.customer_details?.email) {
+      const u = await User.findOne({ email: (session.customer_details.email || '').toLowerCase() })
+        .select('_id');
+      if (u) fallbackUserId = u._id;
+    }
+
+    const order = await upsertOrderFromSession(session, { isSubscription, fallbackUserId });
+    return res.json({ success: true, data: order });
   } catch (err) {
-    console.error('[stripe] /confirm error:', err);
-    res.status(500).json({ error: 'Failed to confirm order' });
+    console.error('[stripe] confirm error:', err);
+    return res.status(500).json({ error: 'Failed to confirm session' });
   }
 });
 
