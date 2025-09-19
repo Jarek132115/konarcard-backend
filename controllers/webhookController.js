@@ -29,6 +29,24 @@ async function upsertOrderBy(where, updates) {
     );
 }
 
+// Map Stripe subscription.status to our boolean
+function computeIsSubscribed(status) {
+    // Treat these as "subscribed" for app access; adjust if your business rules differ
+    return ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
+}
+
+// Mirror Stripe trial to our user model
+function applyTrialMirror(user, subscription) {
+    const status = subscription.status;
+    if (status === 'trialing') {
+        const trialEndSec = subscription.trial_end; // UNIX seconds
+        user.trialExpires = trialEndSec ? new Date(trialEndSec * 1000) : undefined;
+    } else {
+        // Not trialing anymore -> clear any stored trial
+        user.trialExpires = undefined;
+    }
+}
+
 exports.handleStripeWebhook = async (req, res) => {
     const sig = req.headers['stripe-signature'];
     let event;
@@ -134,16 +152,20 @@ exports.handleStripeWebhook = async (req, res) => {
             case 'customer.subscription.created': {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
-                const status = subscription.status; // trialing/active/incomplete/...
-                const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
+                const status = subscription.status;
+                const isSubscribed = computeIsSubscribed(status);
 
                 const user = await User.findOne({ stripeCustomerId: customerId });
 
                 if (user) {
-                    user.isSubscribed = isActive;
+                    user.isSubscribed = isSubscribed;
                     user.stripeSubscriptionId = subscription.id;
-                    user.trialExpires = undefined;
-                    user.trialEmailRemindersSent = [];
+
+                    // Mirror Stripe's trial to our DB (do NOT create new trials)
+                    applyTrialMirror(user, subscription);
+
+                    // Optional: only clear reminders on brand new creation
+                    user.trialEmailRemindersSent = user.trialExpires ? user.trialEmailRemindersSent : [];
                     await user.save();
                 }
 
@@ -155,7 +177,7 @@ exports.handleStripeWebhook = async (req, res) => {
                         type: 'subscription',
                         stripeSubscriptionId: subscription.id,
                         stripeCustomerId: customerId,
-                        status: isActive ? 'active' : 'pending',
+                        status: isSubscribed ? 'active' : 'pending',
                     }
                 );
 
@@ -165,11 +187,11 @@ exports.handleStripeWebhook = async (req, res) => {
                     {
                         userId: user ? user._id : null,
                         stripeSubscriptionId: subscription.id,
-                        status: isActive ? 'active' : 'pending',
+                        status: isSubscribed ? 'active' : 'pending',
                     }
                 );
 
-                console.log(`subscription.created handled: sub=${subscription.id} active=${isActive}`);
+                console.log(`subscription.created handled: sub=${subscription.id} status=${status}`);
                 break;
             }
 
@@ -177,13 +199,16 @@ exports.handleStripeWebhook = async (req, res) => {
                 const subscription = event.data.object;
                 const customerId = subscription.customer;
                 const status = subscription.status;
-                const isActive = ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
+                const isSubscribed = computeIsSubscribed(status);
 
                 const user = await User.findOne({ stripeCustomerId: customerId });
                 if (user) {
-                    user.isSubscribed = isActive;
+                    user.isSubscribed = isSubscribed;
                     user.stripeSubscriptionId = subscription.id;
-                    if (isActive) user.trialExpires = undefined;
+
+                    // Mirror Stripe's trial exactly
+                    applyTrialMirror(user, subscription);
+
                     await user.save();
                 }
 
@@ -194,11 +219,11 @@ exports.handleStripeWebhook = async (req, res) => {
                         type: 'subscription',
                         stripeSubscriptionId: subscription.id,
                         stripeCustomerId: customerId,
-                        status: isActive ? 'active' : 'pending',
+                        status: isSubscribed ? 'active' : 'pending',
                     }
                 );
 
-                console.log(`subscription.updated handled: sub=${subscription.id} active=${isActive}`);
+                console.log(`subscription.updated handled: sub=${subscription.id} status=${status}`);
                 break;
             }
 
@@ -210,7 +235,7 @@ exports.handleStripeWebhook = async (req, res) => {
                 if (user) {
                     user.isSubscribed = false;
                     user.stripeSubscriptionId = undefined;
-                    user.trialExpires = undefined;
+                    user.trialExpires = undefined; // no trial after deletion
                     user.trialEmailRemindersSent = [];
                     await user.save();
                 }
@@ -271,8 +296,10 @@ exports.handleStripeWebhook = async (req, res) => {
                 console.log(`Unhandled event: ${event.type}`);
         }
 
+        // Always acknowledge quickly so Stripe doesn't retry forever
         res.status(200).send('OK');
     } catch (err) {
+        // Log error but still return 200 to prevent Stripe retries
         console.error('Webhook handler error (non-fatal):', err);
         res.status(200).send('OK');
     }
