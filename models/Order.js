@@ -31,6 +31,9 @@ const OrderSchema = new mongoose.Schema(
             index: true,
         },
 
+        // 🔹 New field for shipping/delivery info
+        deliveryWindow: { type: String },
+
         metadata: { type: mongoose.Schema.Types.Mixed },
     },
     { timestamps: true }

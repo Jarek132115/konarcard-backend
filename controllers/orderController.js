@@ -32,6 +32,7 @@ const listOrders = async (req, res) => {
             stripeSubscriptionId: o.stripeSubscriptionId || null,
             createdAt: o.createdAt,
             updatedAt: o.updatedAt,
+            deliveryWindow: o.deliveryWindow || null, // 🔹 expose delivery window
             metadata: o.metadata || {},
         }));
 

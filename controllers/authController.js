@@ -24,6 +24,31 @@ function setNoStore(res) {
 }
 
 /**
+ * Utility: get delivery window (today+1 → today+4)
+ */
+function computeDeliveryWindow() {
+    const today = new Date();
+    const start = new Date(today);
+    start.setDate(today.getDate() + 1);
+    const end = new Date(today);
+    end.setDate(today.getDate() + 4);
+
+    const monthNames = [
+        'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    const shortMonth = (d) => monthNames[d.getMonth()].slice(0, 3);
+
+    const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
+    if (sameMonth) return `${start.getDate()}–${end.getDate()} ${monthNames[start.getMonth()]}`;
+
+    const sameYear = start.getFullYear() === end.getFullYear();
+    if (sameYear) return `${start.getDate()} ${shortMonth(start)} – ${end.getDate()} ${shortMonth(end)}`;
+
+    return `${start.getDate()} ${shortMonth(start)} ${start.getFullYear()} – ${end.getDate()} ${shortMonth(end)} ${end.getFullYear()}`;
+}
+
+/**
  * Ensure the user has a valid Stripe Customer *in this Stripe mode*.
  */
 async function ensureStripeCustomer(user) {
@@ -342,16 +367,15 @@ const subscribeUser = async (req, res) => {
 
         // ----- Trial logic: no double-dipping -----
         const nowMs = Date.now();
-        const giveFullIfNeverStarted = true; // flip to false to disable trial when user never used app-trial
-        let trialOption = null; // { trial_end } or { trial_period_days } or null
+        const giveFullIfNeverStarted = true;
+        let trialOption = null;
 
         if (user.trialExpires) {
             const trialMs = new Date(user.trialExpires).getTime();
             if (!Number.isNaN(trialMs) && trialMs > nowMs) {
-                // Keep the same end (remaining days only)
                 trialOption = { trial_end: Math.floor(trialMs / 1000) };
             } else {
-                trialOption = null; // trial elapsed → no trial on subscription
+                trialOption = null;
             }
         } else if (giveFullIfNeverStarted) {
             trialOption = { trial_period_days: 14 };
@@ -377,7 +401,6 @@ const subscribeUser = async (req, res) => {
             metadata: { userId: user._id.toString(), kind: 'subscription' },
         });
 
-        // Record pending order
         try {
             await Order.create({
                 userId: user._id,
@@ -391,7 +414,6 @@ const subscribeUser = async (req, res) => {
             console.error('Failed to create subscription order record:', e.message);
         }
 
-        // Do NOT modify user.trialExpires here.
         setNoStore(res);
         res.status(200).json({ url: session.url });
     } catch (err) {
@@ -446,7 +468,6 @@ const checkSubscriptionStatus = async (req, res) => {
         return res.status(200).json({
             active: isActive,
             status: sub.status,
-            // unix seconds (let client format)
             trial_end: sub.trial_end || null,
             current_period_end: sub.current_period_end || null,
             cancel_at_period_end: sub.cancel_at_period_end || false,
@@ -529,6 +550,7 @@ const createCardCheckoutSession = async (req, res) => {
                 quantity: qty,
                 stripeSessionId: session.id,
                 stripeCustomerId: customerId,
+                deliveryWindow: computeDeliveryWindow(), // NEW FIELD
                 metadata: { from: 'checkout', product: 'konar_card' },
             });
         } catch (e) {
