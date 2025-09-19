@@ -537,8 +537,16 @@ const createCardCheckoutSession = async (req, res) => {
             payment_method_types: ['card'],
             allow_promotion_codes: true,
             line_items: [{ price: process.env.STRIPE_CARD_PRICE_ID, quantity: qty }],
+
+            // ✅ Collect shipping address so we can mirror name/address
+            shipping_address_collection: {
+                // add/remove countries as you ship
+                allowed_countries: ['GB', 'IE', 'US', 'CA', 'AU', 'NZ', 'FR', 'DE', 'ES', 'IT', 'NL', 'BE'],
+            },
+
             success_url: `${process.env.CLIENT_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
             cancel_url: `${process.env.CLIENT_URL}/productandplan/konarcard`,
+
             metadata: { userId: user._id.toString(), kind: 'konar_card', quantity: String(qty) },
         });
 
@@ -550,20 +558,28 @@ const createCardCheckoutSession = async (req, res) => {
                 quantity: qty,
                 stripeSessionId: session.id,
                 stripeCustomerId: customerId,
-                deliveryWindow: computeDeliveryWindow(), // NEW FIELD
+                deliveryWindow: computeDeliveryWindow(), // show an ETA immediately
                 metadata: { from: 'checkout', product: 'konar_card' },
             });
         } catch (e) {
             console.error('Failed to create card order record:', e.message);
         }
 
-        setNoStore(res);
+        // no-store
+        res.set({
+            'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+            Pragma: 'no-cache',
+            Expires: '0',
+            'Surrogate-Control': 'no-store',
+        });
+
         return res.status(200).json({ id: session.id, url: session.url });
     } catch (err) {
         const status = err?.statusCode && err.statusCode >= 400 && err.statusCode < 500 ? err.statusCode : 500;
         return res.status(status).json({ error: err?.message, type: err?.type, code: err?.code });
     }
 };
+
 
 // CONTACT FORM
 const submitContactForm = async (req, res) => {

@@ -16,6 +16,12 @@ const Order = require('../models/Order');
 const User = require('../models/user');
 const sendEmail = require('../utils/SendEmail');
 
+// ------- auth gate (index.js already decodes JWT into req.user if present) -------
+function requireAuth(req, res, next) {
+  if (req.user?.id) return next();
+  return res.status(401).json({ error: 'Unauthorized' });
+}
+
 // ---------- helpers ----------
 function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
   return `
@@ -33,7 +39,6 @@ function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
 }
 
 function formatAddress(addr = {}) {
-  // Stripe returns { line1, line2, city, state, postal_code, country }
   const parts = [
     addr.line1,
     addr.line2,
@@ -44,27 +49,22 @@ function formatAddress(addr = {}) {
   return parts.join(', ');
 }
 
-// Derive deliveryName + deliveryAddress from session
 function shippingFromSession(session) {
-  // Prefer shipping_details (if you enabled shipping address collection)
   const ship = session.shipping_details || {};
   const cust = session.customer_details || {};
   const name = (ship.name || cust.name || '').trim();
-
   const addr = ship.address || cust.address || {};
   const addressOneLine = formatAddress(addr);
-
   return {
     deliveryName: name || null,
     deliveryAddress: addressOneLine || null,
   };
 }
 
-// Send emails (card vs subscription)
 async function sendOrderEmail({ order, user, isSubscription }) {
   if (!user?.email) return;
-
   const ordersUrl = `${CLIENT_URL}/myorders`;
+
   if (isSubscription) {
     await sendEmail({
       email: user.email,
@@ -102,18 +102,20 @@ async function sendOrderEmail({ order, user, isSubscription }) {
   }
 }
 
-// Upsert Order by stripeSessionId
-async function upsertOrderFromSession(session, { isSubscription }) {
-  // Pull shipping info
+/**
+ * Upsert Order by stripeSessionId. Mirrors shipping + line item qty + totals.
+ * Accepts a `fallbackUserId` to attach the order if session.metadata.userId is missing.
+ */
+async function upsertOrderFromSession(session, { isSubscription, fallbackUserId } = {}) {
+  // Shipping
   const ship = shippingFromSession(session);
 
-  // Quantity – get from line items if possible
+  // Quantity (sum of all items)
   let quantity = 1;
   try {
     if (stripe && session.id) {
-      const items = await stripe.checkout.sessions.listLineItems(session.id, { limit: 10 });
+      const items = await stripe.checkout.sessions.listLineItems(session.id, { limit: 20 });
       if (items?.data?.length) {
-        // Sum quantities (in case of multiple)
         quantity = items.data.reduce((sum, li) => sum + (li.quantity || 0), 0) || 1;
       }
     }
@@ -123,7 +125,7 @@ async function upsertOrderFromSession(session, { isSubscription }) {
 
   const type = isSubscription ? 'subscription' : 'card';
   const base = {
-    userId: session.metadata?.userId || null, // ensure you passed this when creating the session
+    userId: session.metadata?.userId || fallbackUserId || null,
     type,
     stripeSessionId: session.id,
     stripeCustomerId: session.customer || null,
@@ -133,13 +135,15 @@ async function upsertOrderFromSession(session, { isSubscription }) {
     amountTotal: typeof session.amount_total === 'number' ? session.amount_total : null,
     currency: session.currency || 'gbp',
 
-    status: isSubscription ? 'active' : 'paid',
+    status: isSubscription ? 'active' : (session.payment_status === 'paid' ? 'paid' : 'pending'),
 
     // shipping / delivery fields
     deliveryName: ship.deliveryName || undefined,
     deliveryAddress: ship.deliveryAddress || undefined,
-    deliveryWindow: undefined, // left for admin to fill later
+    // keep any existing ETA if set previously by checkout route
+    // (don’t clear deliveryWindow here)
 
+    // only for cards
     fulfillmentStatus: isSubscription ? undefined : 'order_placed',
 
     metadata: {
@@ -152,8 +156,11 @@ async function upsertOrderFromSession(session, { isSubscription }) {
   // Find by session id (idempotent)
   let order = await Order.findOne({ stripeSessionId: session.id });
   if (order) {
-    // Update existing (e.g., fill in shipping later)
-    order.set(base);
+    order.set({
+      ...base,
+      // preserve an ETA if it already exists
+      deliveryWindow: order.deliveryWindow || undefined,
+    });
     order = await order.save();
   } else {
     order = await Order.create(base);
@@ -184,7 +191,6 @@ router.post(
         return res.status(400).send(`Webhook Error: ${err.message}`);
       }
     } else {
-      // Fallback: accept as-is (not recommended for production)
       try {
         event = JSON.parse(req.body.toString());
       } catch (e) {
@@ -203,13 +209,13 @@ router.post(
           // Upsert order
           const order = await upsertOrderFromSession(session, { isSubscription });
 
-          // Find user by id from order (fallback to stripe customer email if needed)
+          // Find user by id from order (fallback to stripe customer email)
           let user = null;
           if (order.userId) {
             user = await User.findById(order.userId).select('email name');
           }
           if (!user && session.customer_details?.email) {
-            user = await User.findOne({ email: session.customer_details.email.toLowerCase() })
+            user = await User.findOne({ email: (session.customer_details.email || '').toLowerCase() })
               .select('email name');
           }
 
@@ -223,12 +229,9 @@ router.post(
           break;
         }
 
-        // Optional: fires on successful invoice payments (recurring and sometimes initial)
         case 'invoice.payment_succeeded': {
           const invoice = event.data.object;
-          // If you want to send an email on first subscription charge (not free trial)
           if (invoice.billing_reason === 'subscription_create') {
-            // Try to find order by subscription id and update it active/paid
             const subId = invoice.subscription;
             if (subId) {
               let order = await Order.findOne({ stripeSubscriptionId: subId });
@@ -244,7 +247,6 @@ router.post(
         }
 
         default:
-          // swallow other events
           break;
       }
 
@@ -255,5 +257,33 @@ router.post(
     }
   }
 );
+
+/**
+ * ✅ NEW: GET /api/stripe/confirm?session_id=cs_test_...
+ * Auth required. Immediately fetches the Checkout Session and mirrors it
+ * into your Order, so the Success page has fresh data without waiting for the webhook.
+ */
+router.get('/confirm', requireAuth, async (req, res) => {
+  try {
+    if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
+    const sessionId = req.query.session_id;
+    if (!sessionId) return res.status(400).json({ error: 'Missing session_id' });
+
+    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+
+    const isSubscription = session.mode === 'subscription';
+
+    const order = await upsertOrderFromSession(session, {
+      isSubscription,
+      fallbackUserId: req.user.id,
+    });
+
+    res.json({ success: true, data: order });
+  } catch (err) {
+    console.error('[stripe] confirm error:', err);
+    res.status(500).json({ error: 'Failed to confirm session' });
+  }
+});
 
 module.exports = router;
