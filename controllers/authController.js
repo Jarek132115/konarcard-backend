@@ -1,3 +1,4 @@
+// controllers/authController.js
 const { hashPassword, comparePassword } = require('../helpers/auth');
 const User = require('../models/user');
 const Order = require('../models/Order');
@@ -23,15 +24,15 @@ function setNoStore(res) {
 }
 
 /**
- * Ensure the user has a valid Stripe Customer *in the current Stripe mode*.
+ * Ensure the user has a valid Stripe Customer *in this Stripe mode*.
  */
 async function ensureStripeCustomer(user) {
     if (user.stripeCustomerId) {
         try {
             const c = await stripe.customers.retrieve(user.stripeCustomerId);
             if (!c.deleted) return user.stripeCustomerId;
-        } catch (_) {
-            // stale / invalid -> create below
+        } catch {
+            // fall through to create
         }
     }
     const customer = await stripe.customers.create({
@@ -53,7 +54,6 @@ const test = (_req, res) => {
 const registerUser = async (req, res) => {
     try {
         const { name, email, username, password } = req.body;
-
         if (!name || !email || !username || !password) {
             return res.status(400).json({ error: 'All fields are required.' });
         }
@@ -276,7 +276,7 @@ const getProfile = async (req, res) => {
 
         user.id = user._id;
 
-        setNoStore(res); // <-- critical: avoid 304, always return JSON
+        setNoStore(res); // avoid 304
         res.status(200).json({ data: user });
     } catch {
         res.status(500).json({ error: 'Failed to fetch user profile.' });
@@ -318,7 +318,6 @@ const updateProfile = async (req, res) => {
 // DELETE ACCOUNT (protected)
 const deleteAccount = async (_req, res) => {
     try {
-        // req.user.id is enforced by middleware
         await User.findByIdAndDelete(_req.user.id);
         setNoStore(res);
         res.status(200).json({ success: true, message: 'Account deleted successfully' });
@@ -334,7 +333,6 @@ const logoutUser = (_req, res) => {
 };
 
 // STRIPE: Subscribe (protected)
-// STRIPE: Subscribe (protected)
 const subscribeUser = async (req, res) => {
     try {
         const user = await User.findById(req.user.id);
@@ -342,35 +340,27 @@ const subscribeUser = async (req, res) => {
 
         const customerId = await ensureStripeCustomer(user);
 
-        // ----- Trial logic (no double-dipping) -----
-        // If user already has a trial running, only grant the remaining time.
-        // If no trial has ever been started, you can choose to give the full 14 days (set giveFullIfNeverStarted = true)
-        // If a past trial exists and already expired, give NO extra trial time.
+        // ----- Trial logic: no double-dipping -----
         const nowMs = Date.now();
-        const giveFullIfNeverStarted = true; // set to false if you NEVER want trials on paid signup
-        let trialOption = null; // either { trial_end: <unix_seconds> } or { trial_period_days: 14 } or null
+        const giveFullIfNeverStarted = true; // flip to false to disable trial when user never used app-trial
+        let trialOption = null; // { trial_end } or { trial_period_days } or null
 
         if (user.trialExpires) {
             const trialMs = new Date(user.trialExpires).getTime();
             if (!Number.isNaN(trialMs) && trialMs > nowMs) {
-                // Remaining trial exists → use exact same end in Stripe (no extra days)
+                // Keep the same end (remaining days only)
                 trialOption = { trial_end: Math.floor(trialMs / 1000) };
             } else {
-                // Trial exists but is over → no trial on subscription
-                trialOption = null;
+                trialOption = null; // trial elapsed → no trial on subscription
             }
         } else if (giveFullIfNeverStarted) {
-            // User never started the in-app trial → optionally give full 14 on subscription
             trialOption = { trial_period_days: 14 };
         }
 
-        // Build subscription_data without mixing trial_end and trial_period_days
         const subscription_data = {
             metadata: { userId: user._id.toString(), kind: 'subscription' },
-            ...(trialOption && ('trial_end' in trialOption)
-                ? { trial_end: trialOption.trial_end }
-                : {}),
-            ...(trialOption && ('trial_period_days' in trialOption)
+            ...(trialOption && 'trial_end' in trialOption ? { trial_end: trialOption.trial_end } : {}),
+            ...(trialOption && 'trial_period_days' in trialOption
                 ? { trial_period_days: trialOption.trial_period_days }
                 : {}),
         };
@@ -387,7 +377,7 @@ const subscribeUser = async (req, res) => {
             metadata: { userId: user._id.toString(), kind: 'subscription' },
         });
 
-        // Save a pending order record for reconciliation
+        // Record pending order
         try {
             await Order.create({
                 userId: user._id,
@@ -401,10 +391,7 @@ const subscribeUser = async (req, res) => {
             console.error('Failed to create subscription order record:', e.message);
         }
 
-        // Important: DO NOT mutate user.trialExpires here.
-        // Let your webhook keep it as-is (so UI keeps showing the same end date).
-        // When the trial ends, Stripe transitions status automatically.
-
+        // Do NOT modify user.trialExpires here.
         setNoStore(res);
         res.status(200).json({ url: session.url });
     } catch (err) {
@@ -413,7 +400,6 @@ const subscribeUser = async (req, res) => {
         res.status(status).json({ error: err?.message, type: err?.type, code: err?.code });
     }
 };
-
 
 // STRIPE: Cancel Subscription (protected)
 const cancelSubscription = async (req, res) => {
@@ -446,12 +432,10 @@ const checkSubscriptionStatus = async (req, res) => {
             return res.status(200).json({ active: false, status: 'no_stripe_data' });
         }
 
-        const subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
+        const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
 
-        let isActive = false;
-        if (['active', 'trialing', 'past_due', 'unpaid'].includes(subscription.status)) {
-            isActive = true;
-        }
+        const activeStatuses = ['active', 'trialing', 'past_due', 'unpaid'];
+        const isActive = activeStatuses.includes(sub.status);
 
         if (user.isSubscribed !== isActive) {
             user.isSubscribed = isActive;
@@ -461,8 +445,11 @@ const checkSubscriptionStatus = async (req, res) => {
         setNoStore(res);
         return res.status(200).json({
             active: isActive,
-            status: subscription.status,
-            current_period_end: subscription.current_period_end,
+            status: sub.status,
+            // unix seconds (let client format)
+            trial_end: sub.trial_end || null,
+            current_period_end: sub.current_period_end || null,
+            cancel_at_period_end: sub.cancel_at_period_end || false,
         });
     } catch (err) {
         if (err.type === 'StripeInvalidRequestError' && err.raw?.code === 'resource_missing') {
