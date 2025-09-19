@@ -16,12 +16,6 @@ const Order = require('../models/Order');
 const User = require('../models/user');
 const sendEmail = require('../utils/SendEmail');
 
-// --- auth gate (index.js already decodes JWT into req.user if present) ---
-function requireAuth(req, res, next) {
-  if (req.user?.id) return next();
-  return res.status(401).json({ error: 'Unauthorized' });
-}
-
 // ---------------- helpers ----------------
 function htmlEmail({ headline, bodyHtml, ctaLabel, ctaUrl }) {
   return `
@@ -61,50 +55,72 @@ function shippingFromSession(session) {
   };
 }
 
-async function sendOrderEmail({ order, user, isSubscription }) {
-  if (!user?.email) return;
-  const ordersUrl = `${CLIENT_URL}/myorders`;
+function computeDeliveryWindow() {
+  const today = new Date();
+  const start = new Date(today); start.setDate(today.getDate() + 1);
+  const end = new Date(today); end.setDate(today.getDate() + 4);
 
-  if (isSubscription) {
-    await sendEmail({
-      email: user.email,
-      subject: 'Your Konar Profile subscription is active 🎉',
-      message: htmlEmail({
-        headline: 'Subscription confirmed',
-        bodyHtml: `
-          <p>Hi ${user.name || 'there'},</p>
-          <p>Thanks for subscribing to the <strong>Konar Profile</strong>.</p>
-          <p>Your subscription is now active. You can manage it anytime from your dashboard.</p>
-        `,
-        ctaLabel: 'View my orders',
-        ctaUrl: ordersUrl,
-      }),
-    });
-  } else {
-    await sendEmail({
-      email: user.email,
-      subject: 'Order confirmed — thanks for your purchase!',
-      message: htmlEmail({
-        headline: 'Thanks for your order',
-        bodyHtml: `
-          <p>Hi ${user.name || 'there'},</p>
-          <p>We’ve received your order for the Konar Card.</p>
-          ${order.deliveryName || order.deliveryAddress
-            ? `<p><strong>Deliver to:</strong><br/>${[order.deliveryName, order.deliveryAddress].filter(Boolean).join('<br/>')}</p>`
-            : ''
-          }
-          <p>We’ll email you tracking details as soon as it ships.</p>
-        `,
-        ctaLabel: 'View my orders',
-        ctaUrl: ordersUrl,
-      }),
-    });
+  const long = (d) => d.toLocaleString('en-GB', { month: 'long' });
+  const short = (d) => d.toLocaleString('en-GB', { month: 'short' });
+
+  const sameMonth = start.getMonth() === end.getMonth() && start.getFullYear() === end.getFullYear();
+  if (sameMonth) return `${start.getDate()}–${end.getDate()} ${long(start)}`;
+
+  const sameYear = start.getFullYear() === end.getFullYear();
+  if (sameYear) return `${start.getDate()} ${short(start)} – ${end.getDate()} ${short(end)}`;
+
+  return `${start.getDate()} ${short(start)} ${start.getFullYear()} – ${end.getDate()} ${short(end)} ${end.getFullYear()}`;
+}
+
+async function safeSendOrderEmail({ order, user, isSubscription }) {
+  try {
+    if (!user?.email) return;
+    const ordersUrl = `${CLIENT_URL}/myorders`;
+
+    if (isSubscription) {
+      await sendEmail({
+        email: user.email,
+        subject: 'Your Konar Profile subscription is active 🎉',
+        message: htmlEmail({
+          headline: 'Subscription confirmed',
+          bodyHtml: `
+            <p>Hi ${user.name || 'there'},</p>
+            <p>Thanks for subscribing to the <strong>Konar Profile</strong>.</p>
+            <p>Your subscription is now active. You can manage it anytime from your dashboard.</p>
+          `,
+          ctaLabel: 'View my orders',
+          ctaUrl: ordersUrl,
+        }),
+      });
+    } else {
+      await sendEmail({
+        email: user.email,
+        subject: 'Order confirmed — thanks for your purchase!',
+        message: htmlEmail({
+          headline: 'Thanks for your order',
+          bodyHtml: `
+            <p>Hi ${user.name || 'there'},</p>
+            <p>We’ve received your order for the Konar Card.</p>
+            ${order.deliveryName || order.deliveryAddress
+              ? `<p><strong>Deliver to:</strong><br/>${[order.deliveryName, order.deliveryAddress].filter(Boolean).join('<br/>')}</p>`
+              : ''
+            }
+            <p>We’ll email you tracking details as soon as it ships.</p>
+          `,
+          ctaLabel: 'View my orders',
+          ctaUrl: ordersUrl,
+        }),
+      });
+    }
+  } catch (err) {
+    console.error('[email] sendOrderEmail failed:', err?.message || err);
   }
 }
 
 /**
  * Upsert Order by stripeSessionId. Mirrors shipping + line item qty + totals.
- * Accepts a `fallbackUserId` to attach the order if session.metadata.userId is missing.
+ * - Preserves existing deliveryWindow; if missing for card orders, sets a fresh ETA.
+ * - Idempotent by session.id
  */
 async function upsertOrderFromSession(session, { isSubscription, fallbackUserId } = {}) {
   // Shipping
@@ -123,10 +139,9 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     console.warn('[stripe] listLineItems failed:', e?.message);
   }
 
-  const type = isSubscription ? 'subscription' : 'card';
   const base = {
     userId: session.metadata?.userId || fallbackUserId || null,
-    type,
+    type: isSubscription ? 'subscription' : 'card',
     stripeSessionId: session.id,
     stripeCustomerId: session.customer || null,
     stripeSubscriptionId: isSubscription ? (session.subscription || null) : null,
@@ -134,14 +149,13 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     quantity,
     amountTotal: typeof session.amount_total === 'number' ? session.amount_total : null,
     currency: session.currency || 'gbp',
-
     status: isSubscription ? 'active' : (session.payment_status === 'paid' ? 'paid' : 'pending'),
 
     // shipping / delivery fields
     deliveryName: ship.deliveryName || undefined,
     deliveryAddress: ship.deliveryAddress || undefined,
 
-    // only for cards
+    // for cards
     fulfillmentStatus: isSubscription ? undefined : 'order_placed',
 
     metadata: {
@@ -151,17 +165,21 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     },
   };
 
-  // Idempotent by session id
   let order = await Order.findOne({ stripeSessionId: session.id });
   if (order) {
-    order.set({
-      ...base,
-      // preserve an ETA if present (set earlier by /checkout/card)
-      deliveryWindow: order.deliveryWindow || undefined,
-    });
+    const prevETA = order.deliveryWindow;
+    order.set(base);
+    // Preserve existing ETA, or set one now if this is a card and we don't have it yet
+    if (!isSubscription) {
+      order.deliveryWindow = prevETA || computeDeliveryWindow();
+    } else if (prevETA) {
+      order.deliveryWindow = prevETA;
+    }
     order = await order.save();
   } else {
-    order = await Order.create(base);
+    const doc = { ...base };
+    if (!isSubscription) doc.deliveryWindow = computeDeliveryWindow();
+    order = await Order.create(doc);
   }
   return order;
 }
@@ -191,7 +209,7 @@ router.post(
     } else {
       try {
         event = JSON.parse(req.body.toString());
-      } catch (e) {
+      } catch {
         return res.status(400).send('Invalid payload');
       }
     }
@@ -200,14 +218,10 @@ router.post(
       switch (event.type) {
         case 'checkout.session.completed': {
           const session = event.data.object;
-
           const isSubscription = session.mode === 'subscription';
-          const isCardPayment = session.mode === 'payment';
-
-          // Upsert order
           const order = await upsertOrderFromSession(session, { isSubscription });
 
-          // Find user by id from order (fallback to stripe customer email)
+          // Find user (by order.userId or email)
           let user = null;
           if (order.userId) {
             user = await User.findById(order.userId).select('email name');
@@ -218,13 +232,15 @@ router.post(
             }).select('email name');
           }
 
-          // Send email
-          await sendOrderEmail({
-            order,
-            user,
-            isSubscription: !!isSubscription && !isCardPayment,
-          });
-
+          // Idempotent email: send only if not marked sent
+          const alreadySent = !!(order.metadata && order.metadata.confirmEmailSent);
+          if (!alreadySent && session.payment_status === 'paid') {
+            await safeSendOrderEmail({ order, user, isSubscription: !!isSubscription });
+            await Order.updateOne(
+              { _id: order._id },
+              { $set: { 'metadata.confirmEmailSent': true } }
+            );
+          }
           break;
         }
 
@@ -235,10 +251,18 @@ router.post(
             if (subId) {
               let order = await Order.findOne({ stripeSubscriptionId: subId });
               if (order) {
+                const alreadySent = !!(order.metadata && order.metadata.confirmEmailSent);
                 order.status = 'active';
                 await order.save();
-                const user = await User.findById(order.userId).select('email name');
-                await sendOrderEmail({ order, user, isSubscription: true });
+
+                if (!alreadySent) {
+                  const user = await User.findById(order.userId).select('email name');
+                  await safeSendOrderEmail({ order, user, isSubscription: true });
+                  await Order.updateOne(
+                    { _id: order._id },
+                    { $set: { 'metadata.confirmEmailSent': true } }
+                  );
+                }
               }
             }
           }
@@ -246,6 +270,7 @@ router.post(
         }
 
         default:
+          // ignore
           break;
       }
 
@@ -259,33 +284,48 @@ router.post(
 
 /**
  * GET /api/stripe/confirm?session_id=cs_...
- * Auth required. Immediately mirrors the Checkout Session into your Order,
- * so the Success page has fresh data without waiting for the webhook.
+ * Public (no auth needed). Mirrors the Checkout Session into your Order so the
+ * Success page has fresh data immediately. Also sends the confirmation email
+ * if the webhook hasn’t done it yet (idempotent).
  */
-// --- replace the existing /confirm handler with this ---
 router.get('/confirm', async (req, res) => {
   try {
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
     const sessionId = req.query.session_id;
     if (!sessionId) return res.status(400).json({ error: 'Missing session_id' });
 
-    // Verify session server-side
+    // Retrieve session
     const session = await stripe.checkout.sessions.retrieve(sessionId);
     if (!session) return res.status(404).json({ error: 'Session not found' });
 
     const isSubscription = session.mode === 'subscription';
 
-    // Try to link to a user
+    // Try to attach to a user if order has no userId
     let fallbackUserId = null;
-    // if a token was present, index.js has already decoded req.user
-    if (req.user?.id) fallbackUserId = req.user.id;
-    if (!fallbackUserId && session.customer_details?.email) {
-      const u = await User.findOne({ email: (session.customer_details.email || '').toLowerCase() })
-        .select('_id');
+    if (session.customer_details?.email) {
+      const u = await User.findOne({ email: (session.customer_details.email || '').toLowerCase() }).select('_id');
       if (u) fallbackUserId = u._id;
     }
 
-    const order = await upsertOrderFromSession(session, { isSubscription, fallbackUserId });
+    let order = await upsertOrderFromSession(session, { isSubscription, fallbackUserId });
+
+    // Fallback email (only if paid and not yet sent)
+    const isPaid = session.payment_status === 'paid';
+    const alreadySent = !!(order.metadata && order.metadata.confirmEmailSent);
+    if (isPaid && !alreadySent) {
+      let user = null;
+      if (order.userId) user = await User.findById(order.userId).select('email name');
+      if (!user && session.customer_details?.email) {
+        user = await User.findOne({ email: (session.customer_details.email || '').toLowerCase() }).select('email name');
+      }
+      await safeSendOrderEmail({ order, user, isSubscription });
+      await Order.updateOne(
+        { _id: order._id },
+        { $set: { 'metadata.confirmEmailSent': true } }
+      );
+      order = await Order.findById(order._id).lean();
+    }
+
     return res.json({ success: true, data: order });
   } catch (err) {
     console.error('[stripe] confirm error:', err);
