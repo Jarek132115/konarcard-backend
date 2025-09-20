@@ -424,13 +424,11 @@ const subscribeUser = async (req, res) => {
 };
 
 // STRIPE: Cancel Subscription (protected)
-// STRIPE: Cancel Subscription (protected)
 const cancelSubscription = async (req, res) => {
     try {
         const user = await User.findById(req.user.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
 
-        // optional order id from UI (recommended)
         const orderId = req.body?.id;
 
         let stripeSubscriptionId = user.stripeSubscriptionId || null;
@@ -438,9 +436,7 @@ const cancelSubscription = async (req, res) => {
 
         if (orderId) {
             orderToUpdate = await Order.findOne({ _id: orderId, userId: user._id, type: 'subscription' });
-            if (!orderToUpdate) {
-                return res.status(404).json({ error: 'Subscription order not found' });
-            }
+            if (!orderToUpdate) return res.status(404).json({ error: 'Subscription order not found' });
             if (orderToUpdate.stripeSubscriptionId) {
                 stripeSubscriptionId = orderToUpdate.stripeSubscriptionId;
             }
@@ -450,14 +446,14 @@ const cancelSubscription = async (req, res) => {
             return res.status(400).json({ error: 'No active subscription found for this user.' });
         }
 
-        // Set cancel at period end in Stripe
         const sub = await stripe.subscriptions.update(stripeSubscriptionId, {
             cancel_at_period_end: true,
         });
 
-        // Mark this order record as canceled (so UI switches to the resubscribe button)
         if (orderToUpdate) {
             orderToUpdate.status = 'canceled';
+            // ⬇️ record *when* we cancelled
+            orderToUpdate.metadata = { ...(orderToUpdate.metadata || {}), cancelledAt: new Date() };
             orderToUpdate.currentPeriodEnd = sub.current_period_end
                 ? new Date(sub.current_period_end * 1000)
                 : orderToUpdate.currentPeriodEnd || null;
@@ -473,6 +469,7 @@ const cancelSubscription = async (req, res) => {
         return res.status(500).json({ error: 'Failed to cancel subscription', details: err.message });
     }
 };
+
 
 
 // STRIPE: Check Subscription Status (protected)
