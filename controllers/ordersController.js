@@ -1,3 +1,4 @@
+// backend/controllers/ordersController.js
 const Order = require('../models/Order');
 
 /**
@@ -12,16 +13,23 @@ const listOrders = async (req, res) => {
     }
 
     try {
-        const orders = await Order.find({ userId }).sort({ createdAt: -1 }).lean();
+        const orders = await Order.find({ userId })
+            .sort({ createdAt: -1 })
+            .lean();
 
         if (!orders || orders.length === 0) {
             return res.status(200).json({ data: [] });
         }
 
-        const result = orders.map((o) => ({
+        // 🚫 filter out any "pending" card orders
+        const filtered = orders.filter(
+            (o) => !(o.type === 'card' && o.status === 'pending')
+        );
+
+        const result = filtered.map((o) => ({
             id: o._id,
             type: o.type, // 'card' | 'subscription'
-            status: o.status, // 'pending' | 'paid' | 'active' | 'canceled' | 'failed'
+            status: o.status, // 'paid' | 'active' | 'canceled' | 'failed'
             quantity: o.type === 'card' ? (o.quantity || 1) : null,
             amountTotal: o.amountTotal ?? null,
             currency: o.currency || 'gbp',
@@ -43,16 +51,13 @@ const listOrders = async (req, res) => {
             trialEnd: o.trialEnd || null,
             currentPeriodEnd: o.currentPeriodEnd || null,
 
-            // raw metadata
             metadata: o.metadata || {},
         }));
 
         res.status(200).json({ data: result });
     } catch (err) {
         console.error('Error fetching orders:', err);
-        res
-            .status(500)
-            .json({ error: 'Failed to fetch orders', details: err.message });
+        res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
     }
 };
 

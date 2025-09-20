@@ -118,11 +118,16 @@ async function safeSendOrderEmail({ order, user, isSubscription }) {
 
 /**
  * Upsert Order
- * - Deduplicates by `stripeSessionId` for card purchases
- * - Deduplicates by `stripeSubscriptionId` for subscriptions
- * - Saves subscription trial/billing dates
+ * - Deduplicates by `stripeSessionId` or `stripeSubscriptionId`
+ * - Skips creating card orders if not paid
  */
 async function upsertOrderFromSession(session, { isSubscription, fallbackUserId } = {}) {
+  // ⛔ Skip creating card orders if they are not paid
+  if (!isSubscription && session.payment_status !== 'paid') {
+    console.log('[orders] Skipping unpaid card order for session', session.id);
+    return null;
+  }
+
   const ship = shippingFromSession(session);
 
   // Quantity
@@ -148,7 +153,7 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     quantity,
     amountTotal: typeof session.amount_total === 'number' ? session.amount_total : null,
     currency: session.currency || 'gbp',
-    status: isSubscription ? 'active' : (session.payment_status === 'paid' ? 'paid' : 'pending'),
+    status: isSubscription ? 'active' : 'paid',
 
     deliveryName: ship.deliveryName || undefined,
     deliveryAddress: ship.deliveryAddress || undefined,
@@ -161,7 +166,7 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     },
   };
 
-  // For subscriptions, fetch subscription object to get trial and billing info
+  // Subscriptions: fetch trial and billing info
   if (isSubscription && session.subscription) {
     try {
       const sub = await stripe.subscriptions.retrieve(session.subscription);
@@ -176,8 +181,13 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
 
   // Deduplication
   let order = null;
-  if (isSubscription && base.stripeSubscriptionId) {
-    order = await Order.findOne({ stripeSubscriptionId: base.stripeSubscriptionId });
+  if (isSubscription) {
+    order = await Order.findOne({
+      $or: [
+        { stripeSubscriptionId: base.stripeSubscriptionId },
+        { stripeSessionId: session.id }
+      ]
+    });
   } else {
     order = await Order.findOne({ stripeSessionId: session.id });
   }
@@ -233,6 +243,8 @@ router.post(
           const session = event.data.object;
           const isSubscription = session.mode === 'subscription';
           const order = await upsertOrderFromSession(session, { isSubscription });
+
+          if (!order) break; // ⛔ skip unpaid card orders
 
           // Find user
           let user = null;
@@ -312,6 +324,10 @@ router.get('/confirm', async (req, res) => {
     }
 
     let order = await upsertOrderFromSession(session, { isSubscription, fallbackUserId });
+
+    if (!order) {
+      return res.json({ success: false, message: 'No order created (unpaid card checkout)' });
+    }
 
     const isPaid = session.payment_status === 'paid';
     const alreadySent = !!(order.metadata && order.metadata.confirmEmailSent);
