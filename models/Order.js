@@ -1,4 +1,3 @@
-// backend/models/Order.js
 const mongoose = require('mongoose');
 
 const OrderSchema = new mongoose.Schema(
@@ -32,7 +31,7 @@ const OrderSchema = new mongoose.Schema(
             index: true,
         },
 
-        // --- New admin-managed shipping/fulfilment fields ---
+        // --- Shipping / fulfillment fields (for card orders) ---
         fulfillmentStatus: {
             type: String,
             enum: ['order_placed', 'designing_card', 'packaged', 'shipped'],
@@ -41,18 +40,24 @@ const OrderSchema = new mongoose.Schema(
         },
         trackingUrl: { type: String },
 
-        // Displayed to the customer (also mirrored from metadata if present)
+        // Displayed to the customer
         deliveryName: { type: String },
         deliveryAddress: { type: String },
 
-        // Your pre-existing ETA field
+        // ETA (for card orders)
         deliveryWindow: { type: String },
 
+        // --- Subscription-specific fields ---
+        trialEnd: { type: Date },            // When free trial ends (if any)
+        currentPeriodEnd: { type: Date },    // When current billing cycle ends
+
+        // Arbitrary Stripe metadata
         metadata: { type: mongoose.Schema.Types.Mixed },
     },
     { timestamps: true }
 );
 
+// Optimize common queries
 OrderSchema.index({ userId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Order', OrderSchema);

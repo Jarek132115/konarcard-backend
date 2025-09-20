@@ -1,4 +1,3 @@
-// backend/controllers/ordersController.js
 const Order = require('../models/Order');
 
 /**
@@ -31,22 +30,29 @@ const listOrders = async (req, res) => {
             createdAt: o.createdAt,
             updatedAt: o.updatedAt,
 
-            // NEW: shipping/admin fields
+            // shipping/admin fields
             fulfillmentStatus: o.fulfillmentStatus || 'order_placed',
             trackingUrl: o.trackingUrl || null,
             deliveryName: o.deliveryName || o?.metadata?.deliveryName || null,
             deliveryAddress: o.deliveryAddress || o?.metadata?.deliveryAddress || null,
 
-            // Existing ETA
+            // ETA (for card orders)
             deliveryWindow: o.deliveryWindow || null,
 
+            // subscription-specific fields
+            trialEnd: o.trialEnd || null,
+            currentPeriodEnd: o.currentPeriodEnd || null,
+
+            // raw metadata
             metadata: o.metadata || {},
         }));
 
         res.status(200).json({ data: result });
     } catch (err) {
         console.error('Error fetching orders:', err);
-        res.status(500).json({ error: 'Failed to fetch orders', details: err.message });
+        res
+            .status(500)
+            .json({ error: 'Failed to fetch orders', details: err.message });
     }
 };
 

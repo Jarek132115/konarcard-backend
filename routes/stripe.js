@@ -1,4 +1,3 @@
-// backend/routes/stripe.js
 const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
@@ -9,7 +8,7 @@ if (!stripeSecret) {
 }
 const stripe = stripeSecret ? new Stripe(stripeSecret, { apiVersion: '2024-06-20' }) : null;
 
-const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET; // set this in Cloud Run (from Stripe dashboard)
+const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 const CLIENT_URL = (process.env.CLIENT_URL || 'https://www.konarcard.com').replace(/\/+$/, '');
 
 const Order = require('../models/Order');
@@ -118,15 +117,15 @@ async function safeSendOrderEmail({ order, user, isSubscription }) {
 }
 
 /**
- * Upsert Order by stripeSessionId. Mirrors shipping + line item qty + totals.
- * - Preserves existing deliveryWindow; if missing for card orders, sets a fresh ETA.
- * - Idempotent by session.id
+ * Upsert Order
+ * - Deduplicates by `stripeSessionId` for card purchases
+ * - Deduplicates by `stripeSubscriptionId` for subscriptions
+ * - Saves subscription trial/billing dates
  */
 async function upsertOrderFromSession(session, { isSubscription, fallbackUserId } = {}) {
-  // Shipping
   const ship = shippingFromSession(session);
 
-  // Quantity (sum of all items)
+  // Quantity
   let quantity = 1;
   try {
     if (stripe && session.id) {
@@ -151,11 +150,8 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     currency: session.currency || 'gbp',
     status: isSubscription ? 'active' : (session.payment_status === 'paid' ? 'paid' : 'pending'),
 
-    // shipping / delivery fields
     deliveryName: ship.deliveryName || undefined,
     deliveryAddress: ship.deliveryAddress || undefined,
-
-    // for cards
     fulfillmentStatus: isSubscription ? undefined : 'order_placed',
 
     metadata: {
@@ -165,11 +161,30 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     },
   };
 
-  let order = await Order.findOne({ stripeSessionId: session.id });
+  // For subscriptions, fetch subscription object to get trial and billing info
+  if (isSubscription && session.subscription) {
+    try {
+      const sub = await stripe.subscriptions.retrieve(session.subscription);
+      if (sub) {
+        base.trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000) : null;
+        base.currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null;
+      }
+    } catch (e) {
+      console.warn('[stripe] retrieve subscription failed:', e?.message);
+    }
+  }
+
+  // Deduplication
+  let order = null;
+  if (isSubscription && base.stripeSubscriptionId) {
+    order = await Order.findOne({ stripeSubscriptionId: base.stripeSubscriptionId });
+  } else {
+    order = await Order.findOne({ stripeSessionId: session.id });
+  }
+
   if (order) {
     const prevETA = order.deliveryWindow;
     order.set(base);
-    // Preserve existing ETA, or set one now if this is a card and we don't have it yet
     if (!isSubscription) {
       order.deliveryWindow = prevETA || computeDeliveryWindow();
     } else if (prevETA) {
@@ -185,7 +200,6 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
 }
 
 // ---------------- webhook endpoint ----------------
-// IMPORTANT: raw parser here. index.js mounts this router BEFORE any JSON parser.
 router.post(
   '/',
   express.raw({ type: 'application/json' }),
@@ -197,7 +211,6 @@ router.post(
 
     let event;
 
-    // Verify signature if secret present
     if (webhookSecret) {
       const sig = req.headers['stripe-signature'];
       try {
@@ -221,7 +234,7 @@ router.post(
           const isSubscription = session.mode === 'subscription';
           const order = await upsertOrderFromSession(session, { isSubscription });
 
-          // Find user (by order.userId or email)
+          // Find user
           let user = null;
           if (order.userId) {
             user = await User.findById(order.userId).select('email name');
@@ -232,7 +245,6 @@ router.post(
             }).select('email name');
           }
 
-          // Idempotent email: send only if not marked sent
           const alreadySent = !!(order.metadata && order.metadata.confirmEmailSent);
           if (!alreadySent && session.payment_status === 'paid') {
             await safeSendOrderEmail({ order, user, isSubscription: !!isSubscription });
@@ -270,7 +282,6 @@ router.post(
         }
 
         default:
-          // ignore
           break;
       }
 
@@ -282,25 +293,18 @@ router.post(
   }
 );
 
-/**
- * GET /api/stripe/confirm?session_id=cs_...
- * Public (no auth needed). Mirrors the Checkout Session into your Order so the
- * Success page has fresh data immediately. Also sends the confirmation email
- * if the webhook hasn’t done it yet (idempotent).
- */
+// ---------------- confirm endpoint ----------------
 router.get('/confirm', async (req, res) => {
   try {
     if (!stripe) return res.status(500).json({ error: 'Stripe not configured' });
     const sessionId = req.query.session_id;
     if (!sessionId) return res.status(400).json({ error: 'Missing session_id' });
 
-    // Retrieve session
     const session = await stripe.checkout.sessions.retrieve(sessionId);
     if (!session) return res.status(404).json({ error: 'Session not found' });
 
     const isSubscription = session.mode === 'subscription';
 
-    // Try to attach to a user if order has no userId
     let fallbackUserId = null;
     if (session.customer_details?.email) {
       const u = await User.findOne({ email: (session.customer_details.email || '').toLowerCase() }).select('_id');
@@ -309,7 +313,6 @@ router.get('/confirm', async (req, res) => {
 
     let order = await upsertOrderFromSession(session, { isSubscription, fallbackUserId });
 
-    // Fallback email (only if paid and not yet sent)
     const isPaid = session.payment_status === 'paid';
     const alreadySent = !!(order.metadata && order.metadata.confirmEmailSent);
     if (isPaid && !alreadySent) {
