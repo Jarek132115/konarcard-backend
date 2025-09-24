@@ -1,3 +1,4 @@
+// backend/routes/authRoutes.js
 const express = require('express');
 const router = express.Router();
 
@@ -21,7 +22,12 @@ const {
     createCardCheckoutSession,
 } = require('../controllers/authController');
 
-const { listOrders } = require('../controllers/ordersController');
+const {
+    listOrders,
+    getOrderById,
+    syncSubscriptions,
+} = require('../controllers/ordersController');
+
 const authenticateToken = require('../middleware/authenticateToken');
 
 // ---------- Public ----------
@@ -55,7 +61,11 @@ router.post('/trial/start', authenticateToken, startTrial);
 // One-time card checkout
 router.post('/checkout/card', authenticateToken, createCardCheckoutSession);
 
-// Orders (list)
+// Orders
 router.get('/me/orders', authenticateToken, listOrders);
+router.get('/me/orders/:id', authenticateToken, getOrderById);
+
+// 🔄 Stripe sync — used by the frontend to reflect manual Stripe changes quickly
+router.post('/me/sync-subscriptions', authenticateToken, syncSubscriptions);
 
 module.exports = router;

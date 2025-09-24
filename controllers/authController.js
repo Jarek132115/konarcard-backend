@@ -450,9 +450,13 @@ const cancelSubscription = async (req, res) => {
             cancel_at_period_end: true,
         });
 
+        // 🔑 ensure both User + Order are updated
+        user.isSubscribed = false;
+        user.stripeSubscriptionId = null;
+        await user.save();
+
         if (orderToUpdate) {
             orderToUpdate.status = 'canceled';
-            // ⬇️ record *when* we cancelled
             orderToUpdate.metadata = { ...(orderToUpdate.metadata || {}), cancelledAt: new Date() };
             orderToUpdate.currentPeriodEnd = sub.current_period_end
                 ? new Date(sub.current_period_end * 1000)
@@ -470,8 +474,6 @@ const cancelSubscription = async (req, res) => {
     }
 };
 
-
-
 // STRIPE: Check Subscription Status (protected)
 const checkSubscriptionStatus = async (req, res) => {
     try {
@@ -484,7 +486,7 @@ const checkSubscriptionStatus = async (req, res) => {
 
         const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
 
-        const activeStatuses = ['active', 'trialing', 'past_due', 'unpaid'];
+        const activeStatuses = ['active', 'trialing'];
         const isActive = activeStatuses.includes(sub.status);
 
         if (user.isSubscribed !== isActive) {
@@ -566,9 +568,7 @@ const createCardCheckoutSession = async (req, res) => {
             allow_promotion_codes: true,
             line_items: [{ price: process.env.STRIPE_CARD_PRICE_ID, quantity: qty }],
 
-            // ✅ Collect shipping address so we can mirror name/address
             shipping_address_collection: {
-                // add/remove countries as you ship
                 allowed_countries: ['GB', 'IE', 'US', 'CA', 'AU', 'NZ', 'FR', 'DE', 'ES', 'IT', 'NL', 'BE'],
             },
 
@@ -586,14 +586,13 @@ const createCardCheckoutSession = async (req, res) => {
                 quantity: qty,
                 stripeSessionId: session.id,
                 stripeCustomerId: customerId,
-                deliveryWindow: computeDeliveryWindow(), // show an ETA immediately
+                deliveryWindow: computeDeliveryWindow(),
                 metadata: { from: 'checkout', product: 'konar_card' },
             });
         } catch (e) {
             console.error('Failed to create card order record:', e.message);
         }
 
-        // no-store
         res.set({
             'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
             Pragma: 'no-cache',
@@ -607,7 +606,6 @@ const createCardCheckoutSession = async (req, res) => {
         return res.status(status).json({ error: err?.message, type: err?.type, code: err?.code });
     }
 };
-
 
 // CONTACT FORM
 const submitContactForm = async (req, res) => {

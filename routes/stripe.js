@@ -1,3 +1,4 @@
+// backend/routes/stripe.js
 const express = require('express');
 const router = express.Router();
 const Stripe = require('stripe');
@@ -173,6 +174,8 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
       if (sub) {
         base.trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000) : null;
         base.currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : null;
+        // We store cancel at period end in metadata for now; ordersController can expose it
+        base.metadata = { ...(base.metadata || {}), cancel_at_period_end: !!sub.cancel_at_period_end };
       }
     } catch (e) {
       console.warn('[stripe] retrieve subscription failed:', e?.message);
@@ -207,6 +210,43 @@ async function upsertOrderFromSession(session, { isSubscription, fallbackUserId 
     order = await Order.create(doc);
   }
   return order;
+}
+
+/**
+ * Reflect subscription status changes to Order + User
+ */
+async function reflectSubscriptionChange(sub, { forceCanceled = false } = {}) {
+  if (!sub?.id) return;
+  const status = (sub.status || '').toLowerCase(); // active, trialing, past_due, unpaid, canceled, incomplete, etc.
+  const cancelAtPeriodEnd = !!sub.cancel_at_period_end;
+
+  // Update Order
+  const order = await Order.findOne({ stripeSubscriptionId: sub.id });
+  if (order) {
+    order.status = forceCanceled ? 'canceled' : (status === 'canceled' ? 'canceled' : status);
+    order.currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : order.currentPeriodEnd || null;
+    order.trialEnd = sub.trial_end ? new Date(sub.trial_end * 1000) : order.trialEnd || null;
+    order.metadata = { ...(order.metadata || {}), cancel_at_period_end: cancelAtPeriodEnd };
+    await order.save();
+  }
+
+  // Update User
+  if (order?.userId) {
+    const user = await User.findById(order.userId);
+    if (user) {
+      user.isSubscribed = ['active', 'trialing', 'past_due', 'unpaid'].includes(status);
+      // Keep Stripe IDs fresh
+      if (sub.customer && !user.stripeCustomerId) user.stripeCustomerId = sub.customer;
+      if (!user.isSubscribed && (status === 'canceled' || forceCanceled)) {
+        // Optional: clear subscription id if it's the one that ended
+        if (user.stripeSubscriptionId === sub.id) user.stripeSubscriptionId = undefined;
+      } else {
+        // Ensure we remember the current sub id
+        user.stripeSubscriptionId = sub.id;
+      }
+      await user.save();
+    }
+  }
 }
 
 // ---------------- webhook endpoint ----------------
@@ -246,20 +286,32 @@ router.post(
 
           if (!order) break; // ⛔ skip unpaid card orders
 
-          // Find user
+          // Find user (first by order.userId, else by email)
           let user = null;
           if (order.userId) {
-            user = await User.findById(order.userId).select('email name');
+            user = await User.findById(order.userId);
           }
           if (!user && session.customer_details?.email) {
             user = await User.findOne({
               email: (session.customer_details.email || '').toLowerCase(),
-            }).select('email name');
+            });
+          }
+
+          // ⬇️ Ensure user fields reflect subscription on creation
+          if (isSubscription && user) {
+            try {
+              if (session.customer && !user.stripeCustomerId) user.stripeCustomerId = session.customer;
+              if (session.subscription) user.stripeSubscriptionId = session.subscription;
+              user.isSubscribed = true;
+              await user.save();
+            } catch (e) {
+              console.error('[stripe] failed to update user on subscription start:', e?.message);
+            }
           }
 
           const alreadySent = !!(order.metadata && order.metadata.confirmEmailSent);
           if (!alreadySent && session.payment_status === 'paid') {
-            await safeSendOrderEmail({ order, user, isSubscription: !!isSubscription });
+            await safeSendOrderEmail({ order, user: user ? { email: user.email, name: user.name } : null, isSubscription: !!isSubscription });
             await Order.updateOne(
               { _id: order._id },
               { $set: { 'metadata.confirmEmailSent': true } }
@@ -269,25 +321,40 @@ router.post(
         }
 
         case 'invoice.payment_succeeded': {
+          // Important for subscription_create and renewals
           const invoice = event.data.object;
-          if (invoice.billing_reason === 'subscription_create') {
-            const subId = invoice.subscription;
-            if (subId) {
-              let order = await Order.findOne({ stripeSubscriptionId: subId });
-              if (order) {
-                const alreadySent = !!(order.metadata && order.metadata.confirmEmailSent);
-                order.status = 'active';
-                await order.save();
+          if (invoice.subscription) {
+            try {
+              const sub = await stripe.subscriptions.retrieve(invoice.subscription);
+              await reflectSubscriptionChange(sub);
+            } catch (e) {
+              console.warn('[stripe] invoice.payment_succeeded retrieve sub failed:', e?.message);
+            }
+          }
+          break;
+        }
 
-                if (!alreadySent) {
-                  const user = await User.findById(order.userId).select('email name');
-                  await safeSendOrderEmail({ order, user, isSubscription: true });
-                  await Order.updateOne(
-                    { _id: order._id },
-                    { $set: { 'metadata.confirmEmailSent': true } }
-                  );
-                }
-              }
+        case 'customer.subscription.updated': {
+          const sub = event.data.object;
+          await reflectSubscriptionChange(sub);
+          break;
+        }
+
+        case 'customer.subscription.deleted': {
+          const sub = event.data.object;
+          await reflectSubscriptionChange(sub, { forceCanceled: true });
+          break;
+        }
+
+        // (Optional) Keep in sync on failures too
+        case 'invoice.payment_failed': {
+          const invoice = event.data.object;
+          if (invoice.subscription) {
+            try {
+              const sub = await stripe.subscriptions.retrieve(invoice.subscription);
+              await reflectSubscriptionChange(sub);
+            } catch (e) {
+              console.warn('[stripe] invoice.payment_failed retrieve sub failed:', e?.message);
             }
           }
           break;
