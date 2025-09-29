@@ -37,6 +37,18 @@ const parseMaybeJsonArray = (value, fallback = []) => {
   return fallback;
 };
 
+// Helper: limit to 'white' or 'black'
+const sanitizeButtonTextColor = (v, fallback = 'white') => {
+  const val = String(v || '').toLowerCase();
+  return val === 'black' ? 'black' : val === 'white' ? 'white' : fallback;
+};
+
+// Helper: limit to text alignment options
+const sanitizeTextAlignment = (v, fallback = 'left') => {
+  const val = String(v || '').toLowerCase();
+  return ['left', 'center', 'right'].includes(val) ? val : fallback;
+};
+
 const createOrUpdateBusinessCard = async (req, res) => {
   try {
     const userId = req.user?.id;
@@ -81,6 +93,17 @@ const createOrUpdateBusinessCard = async (req, res) => {
       show_services_section,
       show_reviews_section,
       show_contact_section,
+
+      // NEW: styling + alignment + socials + section order
+      button_bg_color,
+      button_text_color,
+      text_alignment,
+      facebook_url,
+      instagram_url,
+      linkedin_url,
+      x_url,
+      tiktok_url,
+      section_order,
     } = req.body;
 
     // Load current card to preserve values not being updated
@@ -100,6 +123,9 @@ const createOrUpdateBusinessCard = async (req, res) => {
     // Services & reviews: accept array or JSON string
     const parsedServices = parseMaybeJsonArray(services, []);
     const parsedReviews = parseMaybeJsonArray(reviews, []);
+
+    // Section order: accept array or JSON string
+    const parsedSectionOrder = parseMaybeJsonArray(section_order, existingCard?.section_order || []);
 
     // Handle cover photo
     let coverPhotoUrl = existingCard?.cover_photo || null;
@@ -175,6 +201,24 @@ const createOrUpdateBusinessCard = async (req, res) => {
       avatar: avatarUrl,
       contact_email,
       phone_number,
+
+      // NEW: styling + alignment + socials + section order
+      button_bg_color,
+      // sanitise to 'white' | 'black' (fallback to existing or 'white')
+      button_text_color: typeof button_text_color !== 'undefined'
+        ? sanitizeButtonTextColor(button_text_color, existingCard?.button_text_color ?? 'white')
+        : undefined,
+      text_alignment: typeof text_alignment !== 'undefined'
+        ? sanitizeTextAlignment(text_alignment, existingCard?.text_alignment ?? 'left')
+        : undefined,
+
+      facebook_url,
+      instagram_url,
+      linkedin_url,
+      x_url,
+      tiktok_url,
+
+      section_order: parsedSectionOrder.length ? parsedSectionOrder : undefined,
     };
 
     // Section visibility flags
@@ -197,6 +241,7 @@ const createOrUpdateBusinessCard = async (req, res) => {
       updateBusinessCardData.show_contact_section = toBool(show_contact_section, existingCard?.show_contact_section ?? true);
     }
 
+    // Drop undefined keys to avoid overwriting with undefined
     Object.keys(updateBusinessCardData).forEach((k) => {
       if (typeof updateBusinessCardData[k] === 'undefined') delete updateBusinessCardData[k];
     });
