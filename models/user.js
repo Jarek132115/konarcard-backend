@@ -18,6 +18,8 @@ const userSchema = new Schema(
 
         // social auth
         googleId: { type: String, default: undefined },
+        facebookId: { type: String, default: undefined },
+
         authProvider: {
             type: String,
             default: 'local', // 'local' | 'google' | 'facebook' | 'apple'
@@ -45,48 +47,37 @@ const userSchema = new Schema(
 );
 
 /**
- * ✅ Partial unique indexes (the fix)
+ * ✅ Partial unique indexes
  * Only enforce uniqueness when the field is actually a string.
- * This prevents "dup key: { profileUrl: null }" forever.
  */
 userSchema.index(
     { profileUrl: 1 },
-    {
-        unique: true,
-        partialFilterExpression: { profileUrl: { $type: 'string' } },
-    }
+    { unique: true, partialFilterExpression: { profileUrl: { $type: 'string' } } }
 );
 
 userSchema.index(
     { slug: 1 },
-    {
-        unique: true,
-        partialFilterExpression: { slug: { $type: 'string' } },
-    }
+    { unique: true, partialFilterExpression: { slug: { $type: 'string' } } }
 );
 
 userSchema.index(
     { username: 1 },
-    {
-        unique: true,
-        partialFilterExpression: { username: { $type: 'string' } },
-    }
+    { unique: true, partialFilterExpression: { username: { $type: 'string' } } }
 );
 
 userSchema.index(
     { googleId: 1 },
-    {
-        unique: true,
-        partialFilterExpression: { googleId: { $type: 'string' } },
-    }
+    { unique: true, partialFilterExpression: { googleId: { $type: 'string' } } }
+);
+
+userSchema.index(
+    { facebookId: 1 },
+    { unique: true, partialFilterExpression: { facebookId: { $type: 'string' } } }
 );
 
 userSchema.index(
     { stripeCustomerId: 1 },
-    {
-        unique: true,
-        partialFilterExpression: { stripeCustomerId: { $type: 'string' } },
-    }
+    { unique: true, partialFilterExpression: { stripeCustomerId: { $type: 'string' } } }
 );
 
 module.exports = mongoose.model('User', userSchema);

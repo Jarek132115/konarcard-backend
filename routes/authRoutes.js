@@ -1,11 +1,12 @@
 // backend/routes/authRoutes.js
+const express = require('express');
+const passport = require('passport');
+const jwt = require('jsonwebtoken');
+
 const User = require('../models/user');
 const BusinessCard = require('../models/BusinessCard');
 const Service = require('../models/Service');
 const Work = require('../models/Work');
-const express = require('express');
-const passport = require('passport');
-const jwt = require('jsonwebtoken');
 
 const {
     test,
@@ -27,6 +28,21 @@ const {
 
 const router = express.Router();
 
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+const signToken = (user) => {
+    if (!process.env.JWT_SECRET) return null;
+
+    return jwt.sign(
+        { email: user.email, id: user._id, name: user.name },
+        process.env.JWT_SECRET,
+        { expiresIn: '30d' }
+    );
+};
+
+// ==============================
+// BASIC ROUTES
+// ==============================
 router.get('/', test);
 
 // ✅ Claim link (availability check when not logged in, finalize when logged in)
@@ -41,16 +57,16 @@ router.post('/resend-code', resendVerificationCode);
 router.post('/forgot-password', forgotPassword);
 router.put('/update-profile', updateProfile);
 router.delete('/delete-account', deleteAccount);
+
 router.post('/subscribe', subscribeUser);
 router.post('/cancel-subscription', cancelSubscription);
 router.get('/subscription-status', checkSubscriptionStatus);
+
 router.post('/contact', submitContactForm);
 
-/* ==============================
-   ✅ GOOGLE OAUTH (Passport)
-   ============================== */
-
-// Start Google OAuth
+// ==============================
+// ✅ GOOGLE OAUTH (Passport)
+// ==============================
 router.get(
     '/auth/google',
     passport.authenticate('google', {
@@ -63,33 +79,60 @@ router.get(
     '/auth/google/callback',
     passport.authenticate('google', {
         session: false,
-        failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?oauth=failed`,
+        failureRedirect: `${FRONTEND_URL}/login?oauth=google_failed`,
     }),
-    async (req, res) => {
+    (req, res) => {
         try {
-            const user = req.user;
+            const token = signToken(req.user);
 
-            if (!process.env.JWT_SECRET) {
-                return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?oauth=missing_jwt_secret`);
+            if (!token) {
+                return res.redirect(`${FRONTEND_URL}/login?oauth=missing_jwt_secret`);
             }
 
-            const token = jwt.sign(
-                { email: user.email, id: user._id, name: user.name },
-                process.env.JWT_SECRET,
-                { expiresIn: '30d' }
-            );
-
-            const frontend = process.env.FRONTEND_URL || 'http://localhost:5173';
-            return res.redirect(`${frontend}/oauth?token=${encodeURIComponent(token)}`);
+            return res.redirect(`${FRONTEND_URL}/oauth?token=${encodeURIComponent(token)}`);
         } catch (err) {
-            console.error('OAuth callback error:', err);
-            const frontend = process.env.FRONTEND_URL || 'http://localhost:5173';
-            return res.redirect(`${frontend}/login?oauth=failed`);
+            console.error('Google OAuth callback error:', err);
+            return res.redirect(`${FRONTEND_URL}/login?oauth=google_failed`);
         }
     }
 );
 
+// ==============================
+// ✅ FACEBOOK OAUTH (Passport)
+// ==============================
+router.get(
+    '/auth/facebook',
+    passport.authenticate('facebook', {
+        scope: ['email'],
+        session: false,
+    })
+);
 
+router.get(
+    '/auth/facebook/callback',
+    passport.authenticate('facebook', {
+        session: false,
+        failureRedirect: `${FRONTEND_URL}/login?oauth=facebook_failed`,
+    }),
+    (req, res) => {
+        try {
+            const token = signToken(req.user);
+
+            if (!token) {
+                return res.redirect(`${FRONTEND_URL}/login?oauth=missing_jwt_secret`);
+            }
+
+            return res.redirect(`${FRONTEND_URL}/oauth?token=${encodeURIComponent(token)}`);
+        } catch (err) {
+            console.error('Facebook OAuth callback error:', err);
+            return res.redirect(`${FRONTEND_URL}/login?oauth=facebook_failed`);
+        }
+    }
+);
+
+// ==============================
+// PUBLIC PROFILE (by slug)
+// ==============================
 router.get('/public_profile/:slug', async (req, res) => {
     try {
         const slug = req.params.slug;
