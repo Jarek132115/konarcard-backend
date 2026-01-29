@@ -4,6 +4,7 @@ const { Schema } = mongoose;
 const userSchema = new Schema(
     {
         name: String,
+
         email: {
             type: String,
             unique: true,
@@ -13,62 +14,79 @@ const userSchema = new Schema(
         },
 
         // local auth
-        password: String,
+        password: { type: String, default: undefined },
 
-        // ✅ social auth
-        googleId: {
-            type: String,
-            unique: true,
-            sparse: true,
-        },
+        // social auth
+        googleId: { type: String, default: undefined },
         authProvider: {
             type: String,
             default: 'local', // 'local' | 'google' | 'facebook' | 'apple'
         },
 
-        // canonical public profile fields
-        profileUrl: {
-            type: String,
-            unique: true,
-            sparse: true,
-        },
-        slug: {
-            type: String,
-            unique: true,
-            sparse: true,
-            trim: true,
-            lowercase: true,
-        },
+        // public profile fields (optional until link claimed)
+        profileUrl: { type: String, default: undefined },
+        slug: { type: String, default: undefined, trim: true, lowercase: true },
+        username: { type: String, default: undefined, trim: true, lowercase: true },
 
         qrCodeUrl: { type: String, default: '' },
 
-        stripeCustomerId: {
-            type: String,
-            unique: true,
-            sparse: true,
-        },
+        stripeCustomerId: { type: String, default: undefined },
 
         isVerified: { type: Boolean, default: false },
         isSubscribed: { type: Boolean, default: false },
 
-        // IMPORTANT: optional for social signup flow (claim later)
-        username: {
-            type: String,
-            unique: true,
-            sparse: true,
-            trim: true,
-            lowercase: true,
-        },
-
-        // email verification
         verificationCode: String,
         verificationCodeExpires: Date,
 
-        // password reset
         resetToken: String,
         resetTokenExpires: Date,
     },
     { timestamps: true }
+);
+
+/**
+ * ✅ Partial unique indexes (the fix)
+ * Only enforce uniqueness when the field is actually a string.
+ * This prevents "dup key: { profileUrl: null }" forever.
+ */
+userSchema.index(
+    { profileUrl: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { profileUrl: { $type: 'string' } },
+    }
+);
+
+userSchema.index(
+    { slug: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { slug: { $type: 'string' } },
+    }
+);
+
+userSchema.index(
+    { username: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { username: { $type: 'string' } },
+    }
+);
+
+userSchema.index(
+    { googleId: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { googleId: { $type: 'string' } },
+    }
+);
+
+userSchema.index(
+    { stripeCustomerId: 1 },
+    {
+        unique: true,
+        partialFilterExpression: { stripeCustomerId: { $type: 'string' } },
+    }
 );
 
 module.exports = mongoose.model('User', userSchema);
