@@ -1,11 +1,13 @@
+// backend/routes/authRoutes.js
 const User = require('../models/user');
-const BusinessCard = require('../models/BusinessCard'); 
+const BusinessCard = require('../models/BusinessCard');
 const Service = require('../models/Service');
 const Work = require('../models/Work');
 const express = require('express');
 
 const {
     test,
+    claimLink,
     registerUser,
     loginUser,
     getProfile,
@@ -24,6 +26,10 @@ const {
 const router = express.Router();
 
 router.get('/', test);
+
+// ✅ Claim link (availability check when not logged in, finalize when logged in)
+router.post('/claim-link', claimLink);
+
 router.post('/register', registerUser);
 router.post('/login', loginUser);
 router.get('/profile', getProfile);
@@ -37,6 +43,7 @@ router.post('/subscribe', subscribeUser);
 router.post('/cancel-subscription', cancelSubscription);
 router.get('/subscription-status', checkSubscriptionStatus);
 router.post('/contact', submitContactForm);
+
 router.get('/public_profile/:slug', async (req, res) => {
     try {
         const slug = req.params.slug;
