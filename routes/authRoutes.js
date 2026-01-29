@@ -4,6 +4,8 @@ const BusinessCard = require('../models/BusinessCard');
 const Service = require('../models/Service');
 const Work = require('../models/Work');
 const express = require('express');
+const passport = require('passport');
+const jwt = require('jsonwebtoken');
 
 const {
     test,
@@ -43,6 +45,52 @@ router.post('/subscribe', subscribeUser);
 router.post('/cancel-subscription', cancelSubscription);
 router.get('/subscription-status', checkSubscriptionStatus);
 router.post('/contact', submitContactForm);
+
+/* ==============================
+   ✅ GOOGLE OAUTH (Passport)
+   ============================== */
+
+// Start Google OAuth
+router.get(
+    '/auth/google',
+    passport.authenticate('google', {
+        scope: ['profile', 'email'],
+        session: false,
+    })
+);
+
+// Callback URL (must match Google Cloud console redirect URI)
+router.get(
+    '/auth/google/callback',
+    passport.authenticate('google', {
+        session: false,
+        failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/login`,
+    }),
+    async (req, res) => {
+        try {
+            const user = req.user;
+
+            if (!process.env.JWT_SECRET) {
+                return res.redirect(
+                    `${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?oauth=missing_jwt_secret`
+                );
+            }
+
+            const token = jwt.sign(
+                { id: user._id, email: user.email },
+                process.env.JWT_SECRET,
+                { expiresIn: '30d' }
+            );
+
+            const frontend = process.env.FRONTEND_URL || 'http://localhost:5173';
+            return res.redirect(`${frontend}/oauth?token=${encodeURIComponent(token)}`);
+        } catch (err) {
+            console.error('OAuth callback error:', err);
+            const frontend = process.env.FRONTEND_URL || 'http://localhost:5173';
+            return res.redirect(`${frontend}/login?oauth=failed`);
+        }
+    }
+);
 
 router.get('/public_profile/:slug', async (req, res) => {
     try {

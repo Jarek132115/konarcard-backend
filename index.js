@@ -1,5 +1,4 @@
-// index.js
-
+// backend/index.js
 const express = require('express');
 require('dotenv').config();
 
@@ -7,6 +6,9 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
+
+const passport = require('passport');
+const configurePassport = require('./config/passport');
 
 const checkoutRoutes = require('./routes/checkout');
 const contactRoutes = require('./routes/contactRoutes');
@@ -54,18 +56,27 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 /* -------------------- Sessions -------------------- */
+/**
+ * You currently have sessions enabled.
+ * Passport Google routes will still run with session:false,
+ * so this won't affect JWT auth — leaving this as-is.
+ */
 app.use(
   session({
-    secret: process.env.SESSION_SECRET,
+    secret: process.env.SESSION_SECRET || 'dev_session_secret_change_me',
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: false, // if you later move to cross-site cookies: secure:true + sameSite:'none'
+      secure: process.env.NODE_ENV === 'production', // ✅ secure cookies in prod
       sameSite: 'lax',
     },
   })
 );
+
+/* -------------------- Passport -------------------- */
+configurePassport();
+app.use(passport.initialize());
 
 /* -------------------- Routes -------------------- */
 app.use('/', require('./routes/authRoutes'));
