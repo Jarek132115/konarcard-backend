@@ -1,7 +1,8 @@
-// index.js (or whatever your main server file is called)
+// index.js
 
 const express = require('express');
-const dotenv = require('dotenv').config();
+require('dotenv').config();
+
 const cors = require('cors');
 const mongoose = require('mongoose');
 const cookieParser = require('cookie-parser');
@@ -28,7 +29,7 @@ const allowedOrigins = [
 ];
 
 const corsOptions = {
-  origin: function (origin, callback) {
+  origin: (origin, callback) => {
     // allow requests with no origin (e.g. curl, server-to-server)
     if (!origin) return callback(null, true);
 
@@ -44,8 +45,8 @@ const corsOptions = {
 // Apply CORS to all routes
 app.use(cors(corsOptions));
 
-// IMPORTANT: respond to preflight fast using SAME options
-app.options('*', cors(corsOptions));
+// ✅ FIX: DON'T use '*' here (it can crash path-to-regexp). Use regex instead.
+app.options(/.*/, cors(corsOptions));
 
 /* -------------------- Parsers -------------------- */
 app.use(express.json());
@@ -60,7 +61,7 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: false, // NOTE: for cross-site cookies you may need true + sameSite:'none'
+      secure: false, // if you later move to cross-site cookies: secure:true + sameSite:'none'
       sameSite: 'lax',
     },
   })
