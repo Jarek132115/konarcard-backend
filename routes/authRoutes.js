@@ -1,7 +1,7 @@
 const User = require('../models/user');
 const BusinessCard = require('../models/BusinessCard'); 
-const Service = require('../models/service');
-const Work = require('../models/work');
+const Service = require('../models/Service');
+const Work = require('../models/Work');
 const express = require('express');
 
 const {
