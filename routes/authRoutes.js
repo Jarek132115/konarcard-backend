@@ -59,25 +59,22 @@ router.get(
     })
 );
 
-// Callback URL (must match Google Cloud console redirect URI)
 router.get(
     '/auth/google/callback',
     passport.authenticate('google', {
         session: false,
-        failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/login`,
+        failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?oauth=failed`,
     }),
     async (req, res) => {
         try {
             const user = req.user;
 
             if (!process.env.JWT_SECRET) {
-                return res.redirect(
-                    `${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?oauth=missing_jwt_secret`
-                );
+                return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/login?oauth=missing_jwt_secret`);
             }
 
             const token = jwt.sign(
-                { id: user._id, email: user.email },
+                { email: user.email, id: user._id, name: user.name },
                 process.env.JWT_SECRET,
                 { expiresIn: '30d' }
             );
@@ -91,6 +88,7 @@ router.get(
         }
     }
 );
+
 
 router.get('/public_profile/:slug', async (req, res) => {
     try {

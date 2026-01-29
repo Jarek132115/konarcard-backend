@@ -11,7 +11,20 @@ const userSchema = new Schema(
             trim: true,
             lowercase: true,
         },
+
+        // local auth
         password: String,
+
+        // ✅ social auth
+        googleId: {
+            type: String,
+            unique: true,
+            sparse: true,
+        },
+        authProvider: {
+            type: String,
+            default: 'local', // 'local' | 'google' | 'facebook' | 'apple'
+        },
 
         // canonical public profile fields
         profileUrl: {
@@ -27,11 +40,7 @@ const userSchema = new Schema(
             lowercase: true,
         },
 
-        // ✅ store S3 URL here (your controller uses qrCodeUrl)
-        qrCodeUrl: {
-            type: String,
-            default: '',
-        },
+        qrCodeUrl: { type: String, default: '' },
 
         stripeCustomerId: {
             type: String,
@@ -39,16 +48,10 @@ const userSchema = new Schema(
             sparse: true,
         },
 
-        isVerified: {
-            type: Boolean,
-            default: false,
-        },
-        isSubscribed: {
-            type: Boolean,
-            default: false,
-        },
+        isVerified: { type: Boolean, default: false },
+        isSubscribed: { type: Boolean, default: false },
 
-        // ✅ IMPORTANT: must NOT be required for social signup flow (claim after)
+        // IMPORTANT: optional for social signup flow (claim later)
         username: {
             type: String,
             unique: true,
@@ -61,13 +64,9 @@ const userSchema = new Schema(
         verificationCode: String,
         verificationCodeExpires: Date,
 
-        // password reset (your controller uses resetToken + resetTokenExpires)
+        // password reset
         resetToken: String,
         resetTokenExpires: Date,
-
-        // (optional, for later social auth)
-        authProvider: { type: String, default: 'local' },
-        providerId: { type: String, default: '' },
     },
     { timestamps: true }
 );
