@@ -1,4 +1,3 @@
-// backend/index.js
 const express = require('express');
 require('dotenv').config();
 
@@ -19,8 +18,8 @@ const app = express();
 /* -------------------- DB -------------------- */
 mongoose
   .connect(process.env.MONGO_URL)
-  .then(() => console.log('Database Connected'))
-  .catch((err) => console.log('Database Connection Error:', err));
+  .then(() => console.log('✅ Database Connected'))
+  .catch((err) => console.error('❌ Database Connection Error:', err));
 
 /* -------------------- CORS -------------------- */
 const allowedOrigins = [
@@ -32,22 +31,32 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // allow requests with no origin (e.g. curl, server-to-server)
+    // allow server-to-server / curl / Cloud Run internal
     if (!origin) return callback(null, true);
 
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
 
-    return callback(new Error(`CORS blocked for origin: ${origin}`), false);
+    return callback(new Error(`CORS blocked: ${origin}`), false);
   },
+
   credentials: true,
+
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+
+  // ✅ THIS IS THE IMPORTANT FIX
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'x-no-auth',
+  ],
+
+  exposedHeaders: ['Authorization'],
 };
 
-// Apply CORS to all routes
 app.use(cors(corsOptions));
-
-// ✅ FIX: DON'T use '*' here (it can crash path-to-regexp). Use regex instead.
 app.options(/.*/, cors(corsOptions));
 
 /* -------------------- Parsers -------------------- */
@@ -56,11 +65,6 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 /* -------------------- Sessions -------------------- */
-/**
- * You currently have sessions enabled.
- * Passport Google routes will still run with session:false,
- * so this won't affect JWT auth — leaving this as-is.
- */
 app.use(
   session({
     secret: process.env.SESSION_SECRET || 'dev_session_secret_change_me',
@@ -68,7 +72,7 @@ app.use(
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production', // ✅ secure cookies in prod
+      secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
     },
   })
@@ -79,13 +83,22 @@ configurePassport();
 app.use(passport.initialize());
 
 /* -------------------- Routes -------------------- */
+// Auth + OAuth (Google / Facebook / Apple)
 app.use('/', require('./routes/authRoutes'));
+
+// API routes
 app.use('/api/checkout', checkoutRoutes);
-app.use('/webhook', require('./routes/webHook'));
 app.use('/api/contact', contactRoutes);
 app.use('/api/business-card', businessCardRoutes);
+app.use('/webhook', require('./routes/webHook'));
+
+/* -------------------- Health Check -------------------- */
+app.get('/health', (_, res) => {
+  res.status(200).json({ ok: true });
+});
 
 /* -------------------- Start -------------------- */
-// Cloud Run provides PORT. Locally you can use 8000.
 const port = process.env.PORT || 8000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
+app.listen(port, () => {
+  console.log(`🚀 Server running on port ${port}`);
+});
