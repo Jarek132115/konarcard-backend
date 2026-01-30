@@ -13,6 +13,8 @@ const checkoutRoutes = require('./routes/checkout');
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
 
+const authRoutes = require('./routes/authRoutes');
+
 const app = express();
 
 /* -------------------- DB -------------------- */
@@ -31,29 +33,18 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    // allow server-to-server / curl / Cloud Run internal
     if (!origin) return callback(null, true);
-
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-
+    if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked: ${origin}`), false);
   },
-
   credentials: true,
-
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-
-  // ✅ THIS IS THE IMPORTANT FIX
   allowedHeaders: [
     'Content-Type',
     'Authorization',
     'X-Requested-With',
     'x-no-auth',
   ],
-
-  exposedHeaders: ['Authorization'],
 };
 
 app.use(cors(corsOptions));
@@ -83,22 +74,24 @@ configurePassport();
 app.use(passport.initialize());
 
 /* -------------------- Routes -------------------- */
-// Auth + OAuth (Google / Facebook / Apple)
-app.use('/', require('./routes/authRoutes'));
+/**
+ * ✅ CRITICAL FIX:
+ * Some of your frontend/build/proxy paths call `/claim-link`
+ * and some call `/api/claim-link`.
+ * So we mount authRoutes in BOTH places.
+ */
+app.use('/', authRoutes);
+app.use('/api', authRoutes);
 
-// API routes
+// existing API routes
 app.use('/api/checkout', checkoutRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/business-card', businessCardRoutes);
 app.use('/webhook', require('./routes/webHook'));
 
-/* -------------------- Health Check -------------------- */
-app.get('/health', (_, res) => {
-  res.status(200).json({ ok: true });
-});
+/* -------------------- Health -------------------- */
+app.get('/health', (_, res) => res.status(200).json({ ok: true }));
 
 /* -------------------- Start -------------------- */
 const port = process.env.PORT || 8000;
-app.listen(port, () => {
-  console.log(`🚀 Server running on port ${port}`);
-});
+app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
