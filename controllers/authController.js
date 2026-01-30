@@ -54,9 +54,10 @@ const generateAndUploadQr = async (userId, profileUrl) => {
 const test = (req, res) => res.json('test is working');
 
 /**
- * ✅ NEW: CLAIM LINK
+ * ✅ CLAIM LINK
  * - If NOT logged in: only checks availability and returns ok/available
- * - If logged in: sets username/slug/profileUrl, generates QR, saves, returns updated user
+ * - If logged in (valid JWT + user exists): sets username/slug/profileUrl, generates QR, saves, returns updated user
+ * - If token is stale/invalid/user missing: falls back to availability check (prevents "User not found" spam)
  */
 const claimLink = async (req, res) => {
     try {
@@ -65,28 +66,37 @@ const claimLink = async (req, res) => {
 
         // Basic slug safety
         const safe = raw.replace(/[^a-z0-9._-]/g, '');
-        if (safe.length < 3) return res.status(400).json({ error: 'Link name must be at least 3 characters' });
+        if (safe.length < 3) {
+            return res.status(400).json({ error: 'Link name must be at least 3 characters' });
+        }
 
+        // Is it already taken?
         const existing = await User.findOne({ username: safe });
         if (existing) return res.status(409).json({ error: 'Username already taken' });
 
+        // If no token -> availability check only
         const token = getTokenFromReq(req);
         if (!token) {
-            // Not logged in → availability check only
             return res.json({ success: true, available: true, username: safe });
         }
 
-        // Logged in → actually set it on the account
-        let decoded;
+        // If token exists, try to decode it.
+        // ✅ If invalid/stale -> DO NOT fail, treat as availability check.
+        let decoded = null;
         try {
             decoded = jwt.verify(token, process.env.JWT_SECRET);
         } catch {
-            return res.status(401).json({ error: 'Invalid token' });
+            return res.json({ success: true, available: true, username: safe });
         }
 
+        // Token decoded but user might not exist (deleted account, different DB, etc.)
+        // ✅ If missing -> also treat as availability check
         const user = await User.findById(decoded.id);
-        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (!user) {
+            return res.json({ success: true, available: true, username: safe });
+        }
 
+        // Logged in -> set it on the account
         const slug = safe;
         const profileUrl = `${FRONTEND_PROFILE_DOMAIN}/u/${slug}`;
 
@@ -104,9 +114,10 @@ const claimLink = async (req, res) => {
         return res.json({ success: true, user: toSafeUser(user) });
     } catch (err) {
         console.error('claimLink error:', err);
-        res.status(500).json({ error: 'Failed to claim link' });
+        return res.status(500).json({ error: 'Failed to claim link' });
     }
 };
+
 
 // REGISTER
 const registerUser = async (req, res) => {
