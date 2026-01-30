@@ -1,3 +1,4 @@
+// backend/index.js
 const express = require('express');
 require('dotenv').config();
 
@@ -21,7 +22,7 @@ const app = express();
 mongoose
   .connect(process.env.MONGO_URL)
   .then(() => console.log('✅ Database Connected'))
-  .catch((err) => console.error('❌ Database Connection Error:', err));
+  .catch((err) => console.log('❌ Database Connection Error:', err));
 
 /* -------------------- CORS -------------------- */
 const allowedOrigins = [
@@ -33,21 +34,20 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
+    if (!origin) return callback(null, true); // server-to-server / curl
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error(`CORS blocked: ${origin}`), false);
+    return callback(new Error(`CORS blocked for origin: ${origin}`), false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'X-Requested-With',
-    'x-no-auth',
-  ],
+  // IMPORTANT: include x-no-auth because your frontend previously used it
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-no-auth'],
+  optionsSuccessStatus: 204,
 };
 
+// Apply CORS to everything
 app.use(cors(corsOptions));
+// Preflight for everything (regex, not '*')
 app.options(/.*/, cors(corsOptions));
 
 /* -------------------- Parsers -------------------- */
@@ -75,22 +75,21 @@ app.use(passport.initialize());
 
 /* -------------------- Routes -------------------- */
 /**
- * ✅ CRITICAL FIX:
- * Some of your frontend/build/proxy paths call `/claim-link`
- * and some call `/api/claim-link`.
- * So we mount authRoutes in BOTH places.
+ * CRITICAL FIX:
+ * Serve auth routes on BOTH:
+ *  - /claim-link, /login, /register, /profile, /auth/google, /auth/facebook ...
+ *  - /api/claim-link, /api/login, /api/register, /api/profile ...
+ *
+ * This prevents 404s no matter which baseURL your frontend is using.
  */
 app.use('/', authRoutes);
 app.use('/api', authRoutes);
 
-// existing API routes
+// Existing API routes
 app.use('/api/checkout', checkoutRoutes);
+app.use('/webhook', require('./routes/webHook'));
 app.use('/api/contact', contactRoutes);
 app.use('/api/business-card', businessCardRoutes);
-app.use('/webhook', require('./routes/webHook'));
-
-/* -------------------- Health -------------------- */
-app.get('/health', (_, res) => res.status(200).json({ ok: true }));
 
 /* -------------------- Start -------------------- */
 const port = process.env.PORT || 8000;
