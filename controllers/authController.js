@@ -412,41 +412,43 @@ const subscribeUser = async (req, res) => {
         if (!parsed) return res.status(400).json({ error: "Invalid planKey" });
 
         const priceId = SUBSCRIPTION_PRICE_MAP[planKey];
-        if (!priceId) return res.status(500).json({ error: "Price not configured on server" });
+        if (!priceId) {
+            return res.status(500).json({ error: "Price not configured on server" });
+        }
 
-        // Always redirect to your existing success page, but allow returnUrl override (optional)
+        // Always send back to your real subscription success page
         const successUrl =
-            returnUrl && typeof returnUrl === "string"
-                ? `${returnUrl}${returnUrl.includes("?") ? "&" : "?"}session_id={CHECKOUT_SESSION_ID}`
-                : `${FRONTEND_URL}/successsubscription?session_id={CHECKOUT_SESSION_ID}`;
+            `${FRONTEND_URL}/successsubscription` +
+            `?session_id={CHECKOUT_SESSION_ID}`;
 
+        // Where they go if they cancel payment
         const cancelUrl = `${FRONTEND_URL}/pricing`;
 
         const session = await stripe.checkout.sessions.create({
             mode: "subscription",
             payment_method_types: ["card"],
             line_items: [{ price: priceId, quantity: 1 }],
-            success_url: successUrl,
-            cancel_url: cancelUrl,
 
-            // If customer exists already, attach it (prevents duplicate customers)
+            // If user already has a Stripe customer id, reuse it
             ...(user.stripeCustomerId
                 ? { customer: user.stripeCustomerId }
                 : { customer_email: user.email }),
 
-            // Store plan choice on the session so webhook can read it (extra safety)
+            success_url: successUrl,
+            cancel_url: cancelUrl,
+
             metadata: {
                 userId: String(user._id),
                 plan: parsed.plan,
                 interval: parsed.interval,
-                planKey: String(planKey),
+                planKey: planKey,
             },
         });
 
-        res.json({ url: session.url });
+        return res.json({ url: session.url });
     } catch (err) {
         console.error("Subscription error:", err);
-        res.status(500).json({ error: "Failed to start subscription" });
+        return res.status(500).json({ error: "Failed to start subscription" });
     }
 };
 
