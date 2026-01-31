@@ -393,54 +393,63 @@ const logoutUser = (req, res) => {
 // STRIPE: Create Subscription Checkout Session
 // (bearer/cookie)
 // ----------------------------------------------------
+// ----------------------------------------------------
+// STRIPE: Create Subscription Checkout Session
+// (bearer/cookie)
+// ----------------------------------------------------
 const subscribeUser = async (req, res) => {
     const token = getTokenFromReq(req);
-    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.id);
-        if (!user) return res.status(404).json({ error: 'User not found' });
+        if (!user) return res.status(404).json({ error: "User not found" });
 
         const { planKey, returnUrl } = req.body;
 
         const parsed = parsePlanKey(planKey);
-        if (!parsed) return res.status(400).json({ error: 'Invalid planKey' });
+        if (!parsed) return res.status(400).json({ error: "Invalid planKey" });
 
         const priceId = SUBSCRIPTION_PRICE_MAP[planKey];
-        if (!priceId) return res.status(500).json({ error: 'Price not configured on server' });
+        if (!priceId) return res.status(500).json({ error: "Price not configured on server" });
 
-        const successUrl = (returnUrl && typeof returnUrl === 'string')
-            ? `${returnUrl}${returnUrl.includes('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}`
-            : `${FRONTEND_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
+        // Always redirect to your existing success page, but allow returnUrl override (optional)
+        const successUrl =
+            returnUrl && typeof returnUrl === "string"
+                ? `${returnUrl}${returnUrl.includes("?") ? "&" : "?"}session_id={CHECKOUT_SESSION_ID}`
+                : `${FRONTEND_URL}/successsubscription?session_id={CHECKOUT_SESSION_ID}`;
 
         const cancelUrl = `${FRONTEND_URL}/pricing`;
 
         const session = await stripe.checkout.sessions.create({
-            mode: 'subscription',
-            payment_method_types: ['card'],
+            mode: "subscription",
+            payment_method_types: ["card"],
             line_items: [{ price: priceId, quantity: 1 }],
-            customer_email: user.email,
-
-            // metadata is key: webhook uses this to update the correct user
-            metadata: {
-                userId: String(user._id),
-                planKey: String(planKey),
-            },
-
             success_url: successUrl,
             cancel_url: cancelUrl,
 
-            allow_promotion_codes: true,
-            billing_address_collection: 'auto',
+            // If customer exists already, attach it (prevents duplicate customers)
+            ...(user.stripeCustomerId
+                ? { customer: user.stripeCustomerId }
+                : { customer_email: user.email }),
+
+            // Store plan choice on the session so webhook can read it (extra safety)
+            metadata: {
+                userId: String(user._id),
+                plan: parsed.plan,
+                interval: parsed.interval,
+                planKey: String(planKey),
+            },
         });
 
         res.json({ url: session.url });
     } catch (err) {
-        console.error('Subscription error:', err);
-        res.status(500).json({ error: 'Failed to start subscription' });
+        console.error("Subscription error:", err);
+        res.status(500).json({ error: "Failed to start subscription" });
     }
 };
+
 
 // ----------------------------------------------------
 // STRIPE: Cancel Subscription (cancel at period end)
