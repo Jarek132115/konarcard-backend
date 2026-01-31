@@ -11,6 +11,27 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const uploadToS3 = require('../utils/uploadToS3');
 
 const FRONTEND_PROFILE_DOMAIN = process.env.PUBLIC_PROFILE_DOMAIN || 'https://www.konarcard.com';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+// -------------------------
+// Stripe price mapping
+// -------------------------
+const SUBSCRIPTION_PRICE_MAP = {
+    'plus-monthly': process.env.STRIPE_PRICE_PLUS_MONTHLY,
+    'plus-quarterly': process.env.STRIPE_PRICE_PLUS_QUARTERLY,
+    'plus-yearly': process.env.STRIPE_PRICE_PLUS_YEARLY,
+
+    'teams-monthly': process.env.STRIPE_PRICE_TEAMS_MONTHLY,
+    'teams-quarterly': process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
+    'teams-yearly': process.env.STRIPE_PRICE_TEAMS_YEARLY,
+};
+
+const parsePlanKey = (planKey) => {
+    const [plan, interval] = String(planKey || '').split('-');
+    if (!['plus', 'teams'].includes(plan)) return null;
+    if (!['monthly', 'quarterly', 'yearly'].includes(interval)) return null;
+    return { plan, interval };
+};
 
 const signToken = (user) => {
     return jwt.sign(
@@ -55,9 +76,6 @@ const test = (req, res) => res.json('test is working');
 
 /**
  * ✅ CLAIM LINK
- * - If NOT logged in: only checks availability and returns ok/available
- * - If logged in (valid JWT + user exists): sets username/slug/profileUrl, generates QR, saves, returns updated user
- * - If token is stale/invalid/user missing: falls back to availability check (prevents "User not found" spam)
  */
 const claimLink = async (req, res) => {
     try {
@@ -89,8 +107,7 @@ const claimLink = async (req, res) => {
             return res.json({ success: true, available: true, username: safe });
         }
 
-        // Token decoded but user might not exist (deleted account, different DB, etc.)
-        // ✅ If missing -> also treat as availability check
+        // Token decoded but user might not exist
         const user = await User.findById(decoded.id);
         if (!user) {
             return res.json({ success: true, available: true, username: safe });
@@ -118,13 +135,11 @@ const claimLink = async (req, res) => {
     }
 };
 
-
 // REGISTER
 const registerUser = async (req, res) => {
     try {
         const { name, email, username, password, confirmPassword } = req.body;
 
-        // ✅ confirmPassword optional (frontend currently doesn't send it everywhere)
         if (!name || !email || !username || !password) {
             return res.status(400).json({ error: 'All fields are required.' });
         }
@@ -257,8 +272,6 @@ const loginUser = async (req, res) => {
         }
 
         const token = signToken(user);
-
-        // keep cookie if you want (optional)
         res.cookie('token', token, { httpOnly: true, sameSite: 'lax' });
 
         return res.json({ token, user: toSafeUser(user) });
@@ -319,7 +332,7 @@ const resetPassword = async (req, res) => {
     }
 };
 
-// PROFILE (✅ supports bearer OR cookie, and returns {data:user} to match frontend)
+// PROFILE
 const getProfile = async (req, res) => {
     const token = getTokenFromReq(req);
     if (!token) return res.json({ data: null });
@@ -333,7 +346,7 @@ const getProfile = async (req, res) => {
     }
 };
 
-// UPDATE PROFILE (bearer/cookie)
+// UPDATE PROFILE
 const updateProfile = async (req, res) => {
     try {
         const token = getTokenFromReq(req);
@@ -355,7 +368,7 @@ const updateProfile = async (req, res) => {
     }
 };
 
-// DELETE ACCOUNT (bearer/cookie)
+// DELETE ACCOUNT
 const deleteAccount = async (req, res) => {
     try {
         const token = getTokenFromReq(req);
@@ -376,7 +389,10 @@ const logoutUser = (req, res) => {
     res.json({ message: 'Logged out successfully' });
 };
 
-// STRIPE: Subscribe (bearer/cookie)
+// ----------------------------------------------------
+// STRIPE: Create Subscription Checkout Session
+// (bearer/cookie)
+// ----------------------------------------------------
 const subscribeUser = async (req, res) => {
     const token = getTokenFromReq(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
@@ -384,14 +400,39 @@ const subscribeUser = async (req, res) => {
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        const { planKey, returnUrl } = req.body;
+
+        const parsed = parsePlanKey(planKey);
+        if (!parsed) return res.status(400).json({ error: 'Invalid planKey' });
+
+        const priceId = SUBSCRIPTION_PRICE_MAP[planKey];
+        if (!priceId) return res.status(500).json({ error: 'Price not configured on server' });
+
+        const successUrl = (returnUrl && typeof returnUrl === 'string')
+            ? `${returnUrl}${returnUrl.includes('?') ? '&' : '?'}session_id={CHECKOUT_SESSION_ID}`
+            : `${FRONTEND_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`;
+
+        const cancelUrl = `${FRONTEND_URL}/pricing`;
 
         const session = await stripe.checkout.sessions.create({
-            payment_method_types: ['card'],
             mode: 'subscription',
-            line_items: [{ price: process.env.STRIPE_SUBSCRIPTION_PRICE_ID, quantity: 1 }],
-            success_url: req.body.returnUrl || 'http://localhost:5173/success',
-            cancel_url: 'http://localhost:5173/subscription',
+            payment_method_types: ['card'],
+            line_items: [{ price: priceId, quantity: 1 }],
             customer_email: user.email,
+
+            // metadata is key: webhook uses this to update the correct user
+            metadata: {
+                userId: String(user._id),
+                planKey: String(planKey),
+            },
+
+            success_url: successUrl,
+            cancel_url: cancelUrl,
+
+            allow_promotion_codes: true,
+            billing_address_collection: 'auto',
         });
 
         res.json({ url: session.url });
@@ -401,7 +442,10 @@ const subscribeUser = async (req, res) => {
     }
 };
 
-// STRIPE: Cancel Subscription (bearer/cookie)
+// ----------------------------------------------------
+// STRIPE: Cancel Subscription (cancel at period end)
+// (bearer/cookie)
+// ----------------------------------------------------
 const cancelSubscription = async (req, res) => {
     const token = getTokenFromReq(req);
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
@@ -409,7 +453,23 @@ const cancelSubscription = async (req, res) => {
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
+        // Prefer stored subscription ID if we have it
+        if (user.stripeSubscriptionId) {
+            await stripe.subscriptions.update(user.stripeSubscriptionId, {
+                cancel_at_period_end: true,
+            });
+
+            // keep plan until period end; webhook will update status
+            await User.findByIdAndUpdate(user._id, {
+                $set: { subscriptionStatus: 'cancelling' },
+            });
+
+            return res.json({ success: true, message: 'Subscription will cancel at period end' });
+        }
+
+        // Fallback: lookup via customer id
         if (!user.stripeCustomerId) return res.status(400).json({ error: 'No subscription found' });
 
         const subscriptions = await stripe.subscriptions.list({
@@ -418,10 +478,16 @@ const cancelSubscription = async (req, res) => {
             limit: 1,
         });
 
-        if (subscriptions.data.length === 0) return res.json({ error: 'No active subscription found' });
+        if (subscriptions.data.length === 0) {
+            return res.json({ error: 'No active subscription found' });
+        }
 
         await stripe.subscriptions.update(subscriptions.data[0].id, {
             cancel_at_period_end: true,
+        });
+
+        await User.findByIdAndUpdate(user._id, {
+            $set: { stripeSubscriptionId: subscriptions.data[0].id, subscriptionStatus: 'cancelling' },
         });
 
         res.json({ success: true, message: 'Subscription will cancel at period end' });
@@ -431,18 +497,58 @@ const cancelSubscription = async (req, res) => {
     }
 };
 
-// STRIPE: Check Subscription Status (bearer/cookie)
+// ----------------------------------------------------
+// STRIPE: Subscription status (from DB)
+// (bearer/cookie)
+// ----------------------------------------------------
 const checkSubscriptionStatus = async (req, res) => {
     const token = getTokenFromReq(req);
-    if (!token) return res.json({ active: false });
+    if (!token) return res.json({ active: false, plan: 'free' });
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.id);
-        res.json({ active: user?.isSubscribed || false });
+
+        const active = !!user?.isSubscribed;
+        return res.json({
+            active,
+            plan: user?.plan || 'free',
+            interval: user?.planInterval || 'monthly',
+            status: user?.subscriptionStatus || 'free',
+            currentPeriodEnd: user?.currentPeriodEnd || null,
+        });
     } catch (err) {
         console.error('Error checking subscription status:', err);
-        res.json({ active: false });
+        res.json({ active: false, plan: 'free' });
+    }
+};
+
+// ----------------------------------------------------
+// STRIPE: Customer Portal (manage subscription)
+// (bearer/cookie)
+// ----------------------------------------------------
+const createBillingPortal = async (req, res) => {
+    const token = getTokenFromReq(req);
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.id);
+        if (!user) return res.status(404).json({ error: 'User not found' });
+
+        if (!user.stripeCustomerId) {
+            return res.status(400).json({ error: 'No Stripe customer found for this user' });
+        }
+
+        const portalSession = await stripe.billingPortal.sessions.create({
+            customer: user.stripeCustomerId,
+            return_url: `${FRONTEND_URL}/dashboard`,
+        });
+
+        res.json({ url: portalSession.url });
+    } catch (err) {
+        console.error('Billing portal error:', err);
+        res.status(500).json({ error: 'Failed to create billing portal session' });
     }
 };
 
@@ -484,8 +590,12 @@ module.exports = {
     logoutUser,
     updateProfile,
     deleteAccount,
+
+    // Stripe
     subscribeUser,
     cancelSubscription,
     checkSubscriptionStatus,
+    createBillingPortal,
+
     submitContactForm,
 };

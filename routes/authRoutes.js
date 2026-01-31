@@ -20,9 +20,13 @@ const {
     forgotPassword,
     updateProfile,
     deleteAccount,
+
+    // Stripe
     subscribeUser,
     cancelSubscription,
     checkSubscriptionStatus,
+    createBillingPortal,
+
     submitContactForm,
 } = require('../controllers/authController');
 
@@ -58,10 +62,17 @@ router.post('/forgot-password', forgotPassword);
 router.put('/update-profile', updateProfile);
 router.delete('/delete-account', deleteAccount);
 
+// ==============================
+// STRIPE ROUTES
+// ==============================
 router.post('/subscribe', subscribeUser);
 router.post('/cancel-subscription', cancelSubscription);
 router.get('/subscription-status', checkSubscriptionStatus);
+router.post('/billing-portal', createBillingPortal);
 
+// ==============================
+// CONTACT
+// ==============================
 router.post('/contact', submitContactForm);
 
 // ==============================

@@ -1,4 +1,4 @@
-// backend/index.js
+// Backend/index.js
 const express = require('express');
 require('dotenv').config();
 
@@ -13,7 +13,6 @@ const configurePassport = require('./config/passport');
 const checkoutRoutes = require('./routes/checkout');
 const contactRoutes = require('./routes/contactRoutes');
 const businessCardRoutes = require('./routes/businessCardRoutes');
-
 const authRoutes = require('./routes/authRoutes');
 
 const app = express();
@@ -49,6 +48,17 @@ const corsOptions = {
 app.use(cors(corsOptions));
 // Preflight for everything (regex, not '*')
 app.options(/.*/, cors(corsOptions));
+
+/* -------------------- Stripe Webhook MUST come before JSON parsers -------------------- */
+/**
+ * IMPORTANT:
+ * Stripe signature verification requires the RAW request body.
+ * If express.json() runs first, the raw body is consumed and the signature check fails.
+ *
+ * Your webhook route uses express.raw({ type: 'application/json' })
+ * so it must be mounted before the JSON parser middleware.
+ */
+app.use('/webhook', require('./routes/webHook'));
 
 /* -------------------- Parsers -------------------- */
 app.use(express.json());
@@ -87,7 +97,6 @@ app.use('/api', authRoutes);
 
 // Existing API routes
 app.use('/api/checkout', checkoutRoutes);
-app.use('/webhook', require('./routes/webHook'));
 app.use('/api/contact', contactRoutes);
 app.use('/api/business-card', businessCardRoutes);
 
