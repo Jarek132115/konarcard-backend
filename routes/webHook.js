@@ -32,6 +32,7 @@ function parsePlanKey(planKey) {
   const [p, i] = String(planKey || "").split("-");
   const plan = ["plus", "teams"].includes(p) ? p : null;
   const interval = ["monthly", "quarterly", "yearly"].includes(i) ? i : null;
+  if (!plan || !interval) return null;
   return { plan, interval };
 }
 
@@ -66,6 +67,11 @@ router.post(
   "/stripe",
   express.raw({ type: "application/json" }),
   async (req, res) => {
+    if (!endpointSecret) {
+      console.error("⚠️ Missing STRIPE_WEBHOOK_SECRET");
+      return res.status(500).send("Webhook not configured");
+    }
+
     const sig = req.headers["stripe-signature"];
 
     let event;
@@ -97,36 +103,45 @@ router.post(
           const status = sub.status;
           const currentPeriodEnd = sub.current_period_end
             ? new Date(sub.current_period_end * 1000)
-            : null;
+            : undefined;
 
           const priceId = sub.items?.data?.[0]?.price?.id;
-          const mapped = PRICE_TO_PLAN[priceId];
+          const mapped = priceId ? PRICE_TO_PLAN[priceId] : null;
 
+          // Plan/interval resolution priority:
+          // 1) priceId mapping
+          // 2) session.metadata.planKey
+          // 3) DO NOT overwrite plan if we can’t determine it
           let plan = mapped?.plan || null;
           let interval = mapped?.interval || null;
 
-          // fallback to planKey metadata if mapping missing
           if ((!plan || !interval) && session.metadata?.planKey) {
             const parsed = parsePlanKey(session.metadata.planKey);
-            plan = plan || parsed.plan;
-            interval = interval || parsed.interval;
+            if (parsed) {
+              plan = plan || parsed.plan;
+              interval = interval || parsed.interval;
+            }
           }
 
           const set = {
             stripeCustomerId: customerId,
             stripeSubscriptionId: subscriptionId,
-            plan: plan || "free",
-            planInterval: interval || "monthly",
             subscriptionStatus: status || "active",
-            currentPeriodEnd: currentPeriodEnd || undefined,
+            currentPeriodEnd,
             isSubscribed: isActiveStatus(status),
           };
 
+          // Only set plan fields if we actually know them (avoid nuking paid users to "free")
+          if (plan) set.plan = plan;
+          if (interval) set.planInterval = interval;
+
+          // If they are now subscribed, clear trial so UI doesn't get confused
+          const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
+
           if (userId) {
-            await updateUserById(userId, { set });
+            await updateUserById(userId, { set, unset });
           } else {
-            // fallback update by customer (works if user already has stripeCustomerId)
-            await updateUserByCustomer(customerId, { set });
+            await updateUserByCustomer(customerId, { set, unset });
           }
         }
 
@@ -163,23 +178,28 @@ router.post(
         const customerId = sub.customer;
         const subscriptionId = sub.id;
         const status = sub.status;
+
         const currentPeriodEnd = sub.current_period_end
           ? new Date(sub.current_period_end * 1000)
-          : null;
+          : undefined;
 
         const priceId = sub.items?.data?.[0]?.price?.id;
-        const mapped = PRICE_TO_PLAN[priceId];
+        const mapped = priceId ? PRICE_TO_PLAN[priceId] : null;
 
-        await updateUserByCustomer(customerId, {
-          set: {
-            stripeSubscriptionId: subscriptionId,
-            plan: mapped?.plan || "free",
-            planInterval: mapped?.interval || "monthly",
-            subscriptionStatus: status || "active",
-            currentPeriodEnd: currentPeriodEnd || undefined,
-            isSubscribed: isActiveStatus(status),
-          },
-        });
+        const set = {
+          stripeSubscriptionId: subscriptionId,
+          subscriptionStatus: status || "active",
+          currentPeriodEnd,
+          isSubscribed: isActiveStatus(status),
+        };
+
+        // Only set plan/interval if mapping exists
+        if (mapped?.plan) set.plan = mapped.plan;
+        if (mapped?.interval) set.planInterval = mapped.interval;
+
+        const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
+
+        await updateUserByCustomer(customerId, { set, unset });
       }
 
       // -------------------------
@@ -190,14 +210,13 @@ router.post(
         const customerId = invoice.customer;
         const subscriptionId = invoice.subscription;
 
-        // invoice doesn't always include price mapping cleanly,
-        // but we can still mark active if Stripe considers it paid
         await updateUserByCustomer(customerId, {
           set: {
             stripeSubscriptionId: subscriptionId || undefined,
             subscriptionStatus: "active",
             isSubscribed: true,
           },
+          unset: { trialExpires: "" },
         });
       }
 
@@ -228,6 +247,7 @@ router.post(
         await updateUserByCustomer(customerId, {
           set: {
             plan: "free",
+            planInterval: "monthly",
             subscriptionStatus: "canceled",
             isSubscribed: false,
           },

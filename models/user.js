@@ -74,6 +74,12 @@ const userSchema = new Schema(
             default: undefined,
         },
 
+        // ✅ NEW: Trial end timestamp (used for free trial gating & banners)
+        trialExpires: {
+            type: Date,
+            default: undefined,
+        },
+
         // Backwards compatibility with your existing checks
         isSubscribed: { type: Boolean, default: false },
 

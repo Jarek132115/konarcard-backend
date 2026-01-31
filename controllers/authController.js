@@ -1,3 +1,4 @@
+// backend/controllers/authController.js
 const { hashPassword, comparePassword, getTokenFromReq } = require('../helpers/auth');
 const User = require('../models/user');
 const BusinessCard = require('../models/BusinessCard');
@@ -272,6 +273,10 @@ const loginUser = async (req, res) => {
         }
 
         const token = signToken(user);
+
+        // NOTE: you currently set a cookie, but your frontend uses localStorage Bearer.
+        // This is fine (cookie is extra), but if you want cookie auth later,
+        // you must set CORS credentials and withCredentials on axios.
         res.cookie('token', token, { httpOnly: true, sameSite: 'lax' });
 
         return res.json({ token, user: toSafeUser(user) });
@@ -295,7 +300,8 @@ const forgotPassword = async (req, res) => {
         user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
         await user.save();
 
-        const resetLink = `${process.env.CLIENT_URL}/reset-password/${token}`;
+        // ✅ FIX: use FRONTEND_URL (your app), not CLIENT_URL (often missing)
+        const resetLink = `${FRONTEND_URL}/reset-password/${token}`;
         const html = passwordResetTemplate(user.name, resetLink);
         await sendEmail(user.email, 'Reset Your Password', html);
 
@@ -393,46 +399,47 @@ const logoutUser = (req, res) => {
 // STRIPE: Create Subscription Checkout Session
 // (bearer/cookie)
 // ----------------------------------------------------
-// ----------------------------------------------------
-// STRIPE: Create Subscription Checkout Session
-// (bearer/cookie)
-// ----------------------------------------------------
 const subscribeUser = async (req, res) => {
     const token = getTokenFromReq(req);
-    if (!token) return res.status(401).json({ error: "Unauthorized" });
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         const user = await User.findById(decoded.id);
-        if (!user) return res.status(404).json({ error: "User not found" });
+        if (!user) return res.status(404).json({ error: 'User not found' });
 
         const { planKey, returnUrl } = req.body;
 
         const parsed = parsePlanKey(planKey);
-        if (!parsed) return res.status(400).json({ error: "Invalid planKey" });
+        if (!parsed) return res.status(400).json({ error: 'Invalid planKey' });
 
         const priceId = SUBSCRIPTION_PRICE_MAP[planKey];
         if (!priceId) {
-            return res.status(500).json({ error: "Price not configured on server" });
+            return res.status(500).json({ error: 'Price not configured on server' });
         }
 
-        // Always send back to your real subscription success page
-        const successUrl =
-            `${FRONTEND_URL}/successsubscription` +
-            `?session_id={CHECKOUT_SESSION_ID}`;
+        // ✅ Use returnUrl from frontend (pricing/login/register flow).
+        // Fallback: dashboard.
+        const baseReturn =
+            typeof returnUrl === 'string' && returnUrl.trim()
+                ? returnUrl.trim()
+                : `${FRONTEND_URL}/myprofile?subscribed=1`;
+
+        // ✅ Ensure session_id is appended safely (even if returnUrl already has ?)
+        const successUrl = baseReturn.includes('?')
+            ? `${baseReturn}&session_id={CHECKOUT_SESSION_ID}`
+            : `${baseReturn}?session_id={CHECKOUT_SESSION_ID}`;
 
         // Where they go if they cancel payment
         const cancelUrl = `${FRONTEND_URL}/pricing`;
 
         const session = await stripe.checkout.sessions.create({
-            mode: "subscription",
-            payment_method_types: ["card"],
+            mode: 'subscription',
+            payment_method_types: ['card'],
             line_items: [{ price: priceId, quantity: 1 }],
 
             // If user already has a Stripe customer id, reuse it
-            ...(user.stripeCustomerId
-                ? { customer: user.stripeCustomerId }
-                : { customer_email: user.email }),
+            ...(user.stripeCustomerId ? { customer: user.stripeCustomerId } : { customer_email: user.email }),
 
             success_url: successUrl,
             cancel_url: cancelUrl,
@@ -447,11 +454,10 @@ const subscribeUser = async (req, res) => {
 
         return res.json({ url: session.url });
     } catch (err) {
-        console.error("Subscription error:", err);
-        return res.status(500).json({ error: "Failed to start subscription" });
+        console.error('Subscription error:', err);
+        return res.status(500).json({ error: 'Failed to start subscription' });
     }
 };
-
 
 // ----------------------------------------------------
 // STRIPE: Cancel Subscription (cancel at period end)
@@ -534,6 +540,116 @@ const checkSubscriptionStatus = async (req, res) => {
     }
 };
 
+// -------------------------
+// TRIAL: Start 14-day trial
+// -------------------------
+const startTrial = async (req, res) => {
+    const token = getTokenFromReq(req);
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.id);
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // If already subscribed, no trial needed
+        if (user.isSubscribed) {
+            return res.json({ success: true, message: "Already subscribed", trialExpires: user.trialExpires || null });
+        }
+
+        const now = Date.now();
+
+        // If trial already active
+        if (user.trialExpires && new Date(user.trialExpires).getTime() > now) {
+            return res.json({ success: true, message: "Trial already active", trialExpires: user.trialExpires });
+        }
+
+        // If trial already used and expired (block)
+        if (user.trialExpires && new Date(user.trialExpires).getTime() <= now) {
+            return res.status(400).json({ error: "Trial already started" });
+        }
+
+        // Start trial (14 days)
+        const trialMs = 14 * 24 * 60 * 60 * 1000;
+        user.trialExpires = new Date(now + trialMs);
+        user.subscriptionStatus = "trialing";
+        user.plan = user.plan || "free"; // keep as free unless you want "trial"
+        await user.save();
+
+        return res.json({ success: true, trialExpires: user.trialExpires });
+    } catch (err) {
+        console.error("startTrial error:", err);
+        return res.status(500).json({ error: "Failed to start trial" });
+    }
+};
+
+
+// ----------------------------------------------------
+// STRIPE: Sync subscription status (best effort)
+// (bearer/cookie) — used by MyProfile after Stripe return
+// ----------------------------------------------------
+const syncSubscriptions = async (req, res) => {
+    const token = getTokenFromReq(req);
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const user = await User.findById(decoded.id);
+        if (!user) return res.status(404).json({ error: "User not found" });
+
+        // If no Stripe customer yet, nothing to sync
+        if (!user.stripeCustomerId) {
+            return res.json({ success: true, synced: false, reason: "no_stripe_customer" });
+        }
+
+        // Pull latest subscriptions from Stripe
+        const subs = await stripe.subscriptions.list({
+            customer: user.stripeCustomerId,
+            status: "all",
+            limit: 10,
+        });
+
+        // Pick the most relevant subscription
+        const active = subs.data.find(s => ["active", "trialing"].includes(s.status));
+        const latest = active || subs.data[0];
+
+        if (!latest) {
+            // No subscriptions exist
+            user.isSubscribed = false;
+            user.subscriptionStatus = "free";
+            user.stripeSubscriptionId = undefined;
+            await user.save();
+
+            return res.json({ success: true, synced: true, isSubscribed: false });
+        }
+
+        user.stripeSubscriptionId = latest.id;
+        user.subscriptionStatus = latest.status;
+
+        // considered subscribed if active or trialing
+        user.isSubscribed = ["active", "trialing"].includes(latest.status);
+
+        // current period end
+        if (latest.current_period_end) {
+            user.currentPeriodEnd = new Date(latest.current_period_end * 1000);
+        }
+
+        await user.save();
+
+        return res.json({
+            success: true,
+            synced: true,
+            isSubscribed: user.isSubscribed,
+            subscriptionStatus: user.subscriptionStatus,
+            currentPeriodEnd: user.currentPeriodEnd || null,
+        });
+    } catch (err) {
+        console.error("syncSubscriptions error:", err);
+        return res.status(500).json({ error: "Failed to sync subscriptions" });
+    }
+};
+
+
 // ----------------------------------------------------
 // STRIPE: Customer Portal (manage subscription)
 // (bearer/cookie)
@@ -553,7 +669,8 @@ const createBillingPortal = async (req, res) => {
 
         const portalSession = await stripe.billingPortal.sessions.create({
             customer: user.stripeCustomerId,
-            return_url: `${FRONTEND_URL}/dashboard`,
+            // ✅ Correct return route for your app
+            return_url: `${FRONTEND_URL}/myprofile`,
         });
 
         res.json({ url: portalSession.url });
@@ -601,7 +718,8 @@ module.exports = {
     logoutUser,
     updateProfile,
     deleteAccount,
-
+    startTrial,
+    syncSubscriptions,
     // Stripe
     subscribeUser,
     cancelSubscription,
