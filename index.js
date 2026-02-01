@@ -83,6 +83,7 @@ app.use(
 configurePassport();
 app.use(passport.initialize());
 
+
 /* -------------------- Routes -------------------- */
 /**
  * CRITICAL FIX:
