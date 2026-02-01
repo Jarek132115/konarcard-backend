@@ -8,6 +8,8 @@ const BusinessCard = require("../models/BusinessCard");
 const Service = require("../models/Service");
 const Work = require("../models/Work");
 
+const { requireAuth } = require("../helpers/auth"); // ✅ ADD THIS
+
 const {
     test,
     claimLink,
@@ -58,27 +60,32 @@ router.post("/claim-link", claimLink);
 
 router.post("/register", registerUser);
 router.post("/login", loginUser);
-router.get("/profile", getProfile);
+
+// ✅ PROTECT: profile must reject deleted/stale tokens
+router.get("/profile", requireAuth, getProfile);
+
 router.post("/logout", logoutUser);
 router.post("/verify-email", verifyEmailCode);
 router.post("/resend-code", resendVerificationCode);
 router.post("/forgot-password", forgotPassword);
-router.put("/update-profile", updateProfile);
-router.delete("/delete-account", deleteAccount);
+
+// ✅ PROTECT: profile update/delete must be authenticated
+router.put("/update-profile", requireAuth, updateProfile);
+router.delete("/delete-account", requireAuth, deleteAccount);
 
 // ==============================
-// STRIPE ROUTES
+// STRIPE ROUTES (PROTECTED)
 // ==============================
-router.post("/subscribe", subscribeUser);
-router.post("/cancel-subscription", cancelSubscription);
-router.get("/subscription-status", checkSubscriptionStatus);
-router.post("/billing-portal", createBillingPortal);
+router.post("/subscribe", requireAuth, subscribeUser);
+router.post("/cancel-subscription", requireAuth, cancelSubscription);
+router.get("/subscription-status", requireAuth, checkSubscriptionStatus);
+router.post("/billing-portal", requireAuth, createBillingPortal);
 
 // ==============================
-// ✅ TRIAL + SYNC ROUTES (NEW)
+// ✅ TRIAL + SYNC ROUTES (PROTECTED)
 // ==============================
-router.post("/start-trial", startTrial);
-router.post("/me/sync-subscriptions", syncSubscriptions);
+router.post("/start-trial", requireAuth, startTrial);
+router.post("/me/sync-subscriptions", requireAuth, syncSubscriptions);
 
 // ==============================
 // CONTACT
@@ -110,7 +117,7 @@ router.get(
                 return res.redirect(`${FRONTEND_URL}/login?oauth=missing_jwt_secret`);
             }
 
-            // ✅ Frontend must store token then resume checkout intent (if any)
+            // ✅ Frontend stores token then continues flow
             return res.redirect(`${FRONTEND_URL}/oauth?token=${encodeURIComponent(token)}`);
         } catch (err) {
             console.error("Google OAuth callback error:", err);
@@ -144,7 +151,7 @@ router.get(
                 return res.redirect(`${FRONTEND_URL}/login?oauth=missing_jwt_secret`);
             }
 
-            // ✅ Frontend must store token then resume checkout intent (if any)
+            // ✅ Frontend stores token then continues flow
             return res.redirect(`${FRONTEND_URL}/oauth?token=${encodeURIComponent(token)}`);
         } catch (err) {
             console.error("Facebook OAuth callback error:", err);
