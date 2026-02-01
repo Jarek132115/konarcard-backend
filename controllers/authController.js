@@ -77,8 +77,11 @@ const test = (req, res) => res.json("test is working");
 
 /**
  * ✅ CLAIM LINK
- * - If not logged in: availability check only
- * - If logged in: sets username/slug/profileUrl + generates QR and ensures BusinessCard
+ * - If NOT logged in: availability check only
+ * - If logged in: MUST be valid token + existing user, then sets username/slug/profileUrl + QR + BusinessCard
+ *
+ * IMPORTANT:
+ * - If token is present but invalid OR user missing, we return 401 so frontend can clear stale token.
  */
 const claimLink = async (req, res) => {
     try {
@@ -94,22 +97,24 @@ const claimLink = async (req, res) => {
         if (existing) return res.status(409).json({ error: "Username already taken" });
 
         const token = getTokenFromReq(req);
+
+        // ✅ Availability check (no auth)
         if (!token) {
             return res.json({ success: true, available: true, username: safe });
         }
 
-        let decoded = null;
+        // ✅ Token present => must be valid
+        let decoded;
         try {
             decoded = jwt.verify(token, process.env.JWT_SECRET);
         } catch {
-            // token invalid -> treat as availability check
-            return res.json({ success: true, available: true, username: safe });
+            return res.status(401).json({ error: "Invalid token" });
         }
 
+        // ✅ Token valid => user must exist
         const user = await User.findById(decoded.id);
         if (!user) {
-            // stale token -> treat as availability check
-            return res.json({ success: true, available: true, username: safe });
+            return res.status(401).json({ error: "User not found" });
         }
 
         const slug = safe;
@@ -119,6 +124,7 @@ const claimLink = async (req, res) => {
         user.slug = slug;
         user.profileUrl = profileUrl;
 
+        // Generate QR to S3
         const qrCodeUrl = await generateAndUploadQr(user._id, profileUrl);
         user.qrCodeUrl = qrCodeUrl;
 
@@ -151,7 +157,9 @@ const registerUser = async (req, res) => {
         if (existingEmail) return res.json({ error: "This email is already registered. Please log in." });
 
         const existingUsername = await User.findOne({ username: cleanUsername });
-        if (existingUsername) return res.status(400).json({ error: "Username already taken. Please choose another." });
+        if (existingUsername) {
+            return res.status(400).json({ error: "Username already taken. Please choose another." });
+        }
 
         const hashedPassword = await hashPassword(password);
 
@@ -334,16 +342,13 @@ const resetPassword = async (req, res) => {
 // PROFILE (PROTECTED BY requireAuth)
 const getProfile = async (req, res) => {
     try {
-        // requireAuth attaches req.user
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-
         return res.json({ data: toSafeUser(req.user) });
     } catch (err) {
         console.error("getProfile error:", err);
         return res.status(500).json({ error: "Failed to load profile" });
     }
 };
-
 
 // UPDATE PROFILE (PROTECTED BY requireAuth)
 const updateProfile = async (req, res) => {
@@ -367,7 +372,6 @@ const updateProfile = async (req, res) => {
     }
 };
 
-
 // DELETE ACCOUNT (PROTECTED BY requireAuth)
 const deleteAccount = async (req, res) => {
     try {
@@ -382,20 +386,21 @@ const deleteAccount = async (req, res) => {
     }
 };
 
-
 // LOGOUT
 const logoutUser = (req, res) => {
     res.clearCookie("token");
     res.json({ message: "Logged out successfully" });
 };
 
-// STRIPE: Create Subscription Checkout Session (PROTECTED BY requireAuth)
+// ----------------------------------------------------
+// STRIPE: Create Subscription Checkout Session
+// (PROTECTED BY requireAuth)
+// ----------------------------------------------------
 const subscribeUser = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = await User.findById(req.user._id);
-        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const user = req.user; // ✅ hydrated by requireAuth
 
         // ✅ must have claimed link before checkout
         const hasClaim = !!(user.username && user.slug);
@@ -429,19 +434,14 @@ const subscribeUser = async (req, res) => {
             mode: "subscription",
             payment_method_types: ["card"],
             line_items: [{ price: priceId, quantity: 1 }],
-
-            ...(user.stripeCustomerId
-                ? { customer: user.stripeCustomerId }
-                : { customer_email: user.email }),
-
+            ...(user.stripeCustomerId ? { customer: user.stripeCustomerId } : { customer_email: user.email }),
             success_url: successUrl,
             cancel_url: cancelUrl,
-
             metadata: {
                 userId: String(user._id),
                 plan: parsed.plan,
                 interval: parsed.interval,
-                planKey: planKey,
+                planKey,
             },
         });
 
@@ -452,14 +452,15 @@ const subscribeUser = async (req, res) => {
     }
 };
 
-
-// STRIPE: Cancel Subscription (PROTECTED BY requireAuth)
+// ----------------------------------------------------
+// STRIPE: Cancel Subscription (cancel at period end)
+// (PROTECTED BY requireAuth)
+// ----------------------------------------------------
 const cancelSubscription = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = await User.findById(req.user._id);
-        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const user = req.user; // ✅ hydrated by requireAuth
 
         if (user.stripeSubscriptionId) {
             await stripe.subscriptions.update(user.stripeSubscriptionId, {
@@ -498,14 +499,15 @@ const cancelSubscription = async (req, res) => {
     }
 };
 
-
-// STRIPE: Subscription status (PROTECTED BY requireAuth)
+// ----------------------------------------------------
+// STRIPE: Subscription status (from DB)
+// (PROTECTED BY requireAuth)
+// ----------------------------------------------------
 const checkSubscriptionStatus = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = await User.findById(req.user._id);
-        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const user = req.user; // ✅ hydrated by requireAuth
 
         return res.json({
             active: !!user.isSubscribed,
@@ -520,17 +522,22 @@ const checkSubscriptionStatus = async (req, res) => {
     }
 };
 
-
-// TRIAL: Start 14-day trial (PROTECTED BY requireAuth)
+// -------------------------
+// TRIAL: Start 14-day trial
+// (PROTECTED BY requireAuth)
+// -------------------------
 const startTrial = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = await User.findById(req.user._id);
-        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const user = req.user; // ✅ hydrated by requireAuth
 
         if (user.isSubscribed) {
-            return res.json({ success: true, message: "Already subscribed", trialExpires: user.trialExpires || null });
+            return res.json({
+                success: true,
+                message: "Already subscribed",
+                trialExpires: user.trialExpires || null,
+            });
         }
 
         const now = Date.now();
@@ -555,13 +562,15 @@ const startTrial = async (req, res) => {
     }
 };
 
-
-// STRIPE: Sync subscription status (PROTECTED BY requireAuth)
+// ----------------------------------------------------
+// STRIPE: Sync subscription status (best effort)
+// (PROTECTED BY requireAuth)
+// ----------------------------------------------------
 const syncSubscriptions = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = await User.findById(req.user._id);
+        const user = await User.findById(req.user._id); // need fresh doc for writes
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
         if (!user.stripeCustomerId) {
@@ -589,7 +598,9 @@ const syncSubscriptions = async (req, res) => {
         user.subscriptionStatus = latest.status;
         user.isSubscribed = ["active", "trialing"].includes(latest.status);
 
-        if (latest.current_period_end) user.currentPeriodEnd = new Date(latest.current_period_end * 1000);
+        if (latest.current_period_end) {
+            user.currentPeriodEnd = new Date(latest.current_period_end * 1000);
+        }
 
         await user.save();
 
@@ -606,14 +617,15 @@ const syncSubscriptions = async (req, res) => {
     }
 };
 
-
-// STRIPE: Customer Portal (PROTECTED BY requireAuth)
+// ----------------------------------------------------
+// STRIPE: Customer Portal (manage subscription)
+// (PROTECTED BY requireAuth)
+// ----------------------------------------------------
 const createBillingPortal = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = await User.findById(req.user._id);
-        if (!user) return res.status(401).json({ error: "Unauthorized" });
+        const user = req.user; // ✅ hydrated by requireAuth
 
         if (!user.stripeCustomerId) {
             return res.status(400).json({ error: "No Stripe customer found for this user" });
@@ -630,7 +642,6 @@ const createBillingPortal = async (req, res) => {
         return res.status(500).json({ error: "Failed to create billing portal session" });
     }
 };
-
 
 // CONTACT FORM
 const submitContactForm = async (req, res) => {
