@@ -23,7 +23,7 @@ const userSchema = new Schema(
 
         authProvider: {
             type: String,
-            default: "local", // 'local' | 'google' | 'facebook' | 'apple'
+            default: "local",
         },
 
         // public profile fields (optional until link claimed)
@@ -38,78 +38,76 @@ const userSchema = new Schema(
         stripeSubscriptionId: { type: String, default: undefined },
 
         /**
-         * Subscription / Plan state (source of truth in your app)
-         *
-         * plan:
-         *  - free: default
-         *  - plus: paid plan
-         *  - teams: paid plan with team features
-         *
-         * planInterval:
-         *  - monthly | quarterly | yearly
+         * Subscription / Plan state (source of truth)
+         * free | plus | teams
          */
         plan: {
             type: String,
             enum: ["free", "plus", "teams"],
             default: "free",
         },
+
         planInterval: {
             type: String,
             enum: ["monthly", "quarterly", "yearly"],
-            default: "monthly", // harmless default; free users won't use it
+            default: "monthly",
         },
 
-        /**
-         * Stripe subscription status examples:
-         * active, trialing, past_due, canceled, unpaid, incomplete, incomplete_expired
-         */
         subscriptionStatus: {
             type: String,
             default: "free",
         },
 
-        // When the current paid period ends (useful for gating access / cancel at period end)
         currentPeriodEnd: {
             type: Date,
             default: undefined,
         },
 
-        // ✅ Trial end timestamp (used for free trial gating & banners)
         trialExpires: {
             type: Date,
             default: undefined,
         },
 
-        // Backwards compatibility with your existing checks
+        // Backwards compatibility
         isSubscribed: { type: Boolean, default: false },
 
         /**
-         * ✅ Profile add-on entitlement (IMPORTANT)
-         * This is the count of EXTRA profiles the user is paying for.
-         *
-         * Rules we’ll enforce server-side:
-         * - free: base 1 profile included
-         * - plus: base 1 profile included (+ extraProfilesQty)
-         * - teams: unlimited (ignore extraProfilesQty)
-         *
-         * Example:
-         *  - plus + extraProfilesQty=2 => allowedProfiles = 1 + 2 = 3
+         * ✅ PLUS ADD-ON ENTITLEMENT
+         * extraProfilesQty = number of EXTRA profiles paid for on Plus.
+         * (Allowed = 1 + extraProfilesQty)
          */
         extraProfilesQty: {
             type: Number,
             default: 0,
             min: 0,
         },
-
-        /**
-         * Optional Stripe metadata for the add-on (helps reconciliation/debugging)
-         * Not required for logic, but useful when syncing from Stripe.
-         */
         extraProfilesStripePriceId: {
             type: String,
             default: undefined,
         },
         extraProfilesStripeItemId: {
+            type: String,
+            default: undefined,
+        },
+
+        /**
+         * ✅ TEAMS ENTITLEMENT (THIS IS WHAT YOU NEED NOW)
+         * We store the Stripe subscription item quantity here.
+         * This is the number of profiles/seats they paid for.
+         *
+         * Example:
+         *  - teamsProfilesQty = 3  => allow 3 profiles
+         */
+        teamsProfilesQty: {
+            type: Number,
+            default: 1,
+            min: 1,
+        },
+        teamsStripePriceId: {
+            type: String,
+            default: undefined,
+        },
+        teamsStripeItemId: {
             type: String,
             default: undefined,
         },
@@ -127,7 +125,6 @@ const userSchema = new Schema(
 
 /**
  * ✅ Partial unique indexes
- * Only enforce uniqueness when the field is actually a string.
  */
 userSchema.index(
     { profileUrl: 1 },
@@ -159,7 +156,6 @@ userSchema.index(
     { unique: true, partialFilterExpression: { stripeCustomerId: { $type: "string" } } }
 );
 
-// Helpful if you ever want to quickly find by subscription id
 userSchema.index(
     { stripeSubscriptionId: 1 },
     {

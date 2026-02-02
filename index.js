@@ -1,34 +1,38 @@
 // Backend/index.js
-const express = require('express');
-require('dotenv').config();
+const express = require("express");
+require("dotenv").config();
 
-const cors = require('cors');
-const mongoose = require('mongoose');
-const cookieParser = require('cookie-parser');
-const session = require('express-session');
+const cors = require("cors");
+const mongoose = require("mongoose");
+const cookieParser = require("cookie-parser");
+const session = require("express-session");
 
-const passport = require('passport');
-const configurePassport = require('./config/passport');
+const passport = require("passport");
+const configurePassport = require("./config/passport");
 
-const checkoutRoutes = require('./routes/checkout');
-const contactRoutes = require('./routes/contactRoutes');
-const businessCardRoutes = require('./routes/businessCardRoutes');
-const authRoutes = require('./routes/authRoutes');
+const checkoutRoutes = require("./routes/checkout");
+const contactRoutes = require("./routes/contactRoutes");
+const businessCardRoutes = require("./routes/businessCardRoutes");
+const authRoutes = require("./routes/authRoutes");
+
+// ✅ your existing webhook handler file
+// IMPORTANT: it must export a function(req,res) OR an express router that handles POST "/"
+const stripeWebhookHandler = require("./routes/webHook");
 
 const app = express();
 
 /* -------------------- DB -------------------- */
 mongoose
   .connect(process.env.MONGO_URL)
-  .then(() => console.log('✅ Database Connected'))
-  .catch((err) => console.log('❌ Database Connection Error:', err));
+  .then(() => console.log("✅ Database Connected"))
+  .catch((err) => console.log("❌ Database Connection Error:", err));
 
 /* -------------------- CORS -------------------- */
 const allowedOrigins = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'https://www.konarcard.com',
-  'https://konarcard.com',
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "https://www.konarcard.com",
+  "https://konarcard.com",
 ];
 
 const corsOptions = {
@@ -38,27 +42,29 @@ const corsOptions = {
     return callback(new Error(`CORS blocked for origin: ${origin}`), false);
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  // IMPORTANT: include x-no-auth because your frontend previously used it
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-no-auth'],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-no-auth"],
   optionsSuccessStatus: 204,
 };
 
-// Apply CORS to everything
 app.use(cors(corsOptions));
-// Preflight for everything (regex, not '*')
 app.options(/.*/, cors(corsOptions));
 
-/* -------------------- Stripe Webhook MUST come before JSON parsers -------------------- */
+/* -------------------- Stripe Webhook (RAW) MUST come before JSON -------------------- */
 /**
- * IMPORTANT:
- * Stripe signature verification requires the RAW request body.
- * If express.json() runs first, the raw body is consumed and the signature check fails.
+ * Stripe signature verification requires RAW body.
+ * This endpoint should be configured in Stripe as:
+ *   https://YOUR_BACKEND/api/checkout/webhook
  *
- * Your webhook route uses express.raw({ type: 'application/json' })
- * so it must be mounted before the JSON parser middleware.
+ * NOTE:
+ * - Stripe is server-to-server so CORS is irrelevant here.
+ * - express.raw must be used here before express.json().
  */
-app.use('/webhook', require('./routes/webHook'));
+app.post(
+  "/api/checkout/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhookHandler
+);
 
 /* -------------------- Parsers -------------------- */
 app.use(express.json());
@@ -68,13 +74,13 @@ app.use(cookieParser());
 /* -------------------- Sessions -------------------- */
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || 'dev_session_secret_change_me',
+    secret: process.env.SESSION_SECRET || "dev_session_secret_change_me",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
     },
   })
 );
@@ -83,23 +89,13 @@ app.use(
 configurePassport();
 app.use(passport.initialize());
 
-
 /* -------------------- Routes -------------------- */
-/**
- * CRITICAL FIX:
- * Serve auth routes on BOTH:
- *  - /claim-link, /login, /register, /profile, /auth/google, /auth/facebook ...
- *  - /api/claim-link, /api/login, /api/register, /api/profile ...
- *
- * This prevents 404s no matter which baseURL your frontend is using.
- */
-app.use('/', authRoutes);
-app.use('/api', authRoutes);
+app.use("/", authRoutes);
+app.use("/api", authRoutes);
 
-// Existing API routes
-app.use('/api/checkout', checkoutRoutes);
-app.use('/api/contact', contactRoutes);
-app.use('/api/business-card', businessCardRoutes);
+app.use("/api/checkout", checkoutRoutes);
+app.use("/api/contact", contactRoutes);
+app.use("/api/business-card", businessCardRoutes);
 
 /* -------------------- Start -------------------- */
 const port = process.env.PORT || 8000;

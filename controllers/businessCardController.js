@@ -3,9 +3,6 @@ const BusinessCard = require("../models/BusinessCard");
 const User = require("../models/user");
 const uploadToS3 = require("../utils/uploadToS3");
 
-const Stripe = require("stripe");
-const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-
 /**
  * ---------------------------------------------------------
  * Helpers
@@ -38,8 +35,8 @@ const asBool = (v, defaultVal = true) => {
   return defaultVal;
 };
 
-const getPlanFromReq = (req) => {
-  const plan = String(req.user?.plan || "free").toLowerCase();
+const getPlan = (userDoc) => {
+  const plan = String(userDoc?.plan || "free").toLowerCase();
   if (plan === "plus" || plan === "teams") return plan;
   return "free";
 };
@@ -47,12 +44,6 @@ const getPlanFromReq = (req) => {
 // ✅ Free limits exist, but saving must NEVER 403 because of them.
 // We clamp content to the free limits instead.
 const FREE_LIMIT = 6;
-
-const maxProfilesForPlan = (plan) => {
-  if (plan === "teams") return Infinity;
-  // ✅ your requirement: free and plus = 1 profile only
-  return 1;
-};
 
 const upgradeRequired = (res, payload = {}) => {
   return res.status(403).json({
@@ -88,43 +79,23 @@ const normalizeTemplateForPlan = (plan, requestedTemplate) => {
 };
 
 /**
- * ---------------------------------------------------------
- * Teams billing helpers
- * ---------------------------------------------------------
+ * ✅ IMPORTANT:
+ * Allowed profiles logic:
+ * - free: 1
+ * - plus: 1 (for now, you said plus should not add profiles yet)
+ * - teams: user.teamsProfilesQty (from Stripe quantity)
+ *
+ * We read userDoc from DB so it’s never stale.
  */
+const getMaxProfilesForUser = (userDoc) => {
+  const plan = getPlan(userDoc);
 
-const TEAMS_PRICE_IDS = [
-  process.env.STRIPE_PRICE_TEAMS_MONTHLY,
-  process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
-  process.env.STRIPE_PRICE_TEAMS_YEARLY,
-].filter(Boolean);
+  if (plan === "teams") {
+    const qty = Number(userDoc?.teamsProfilesQty || 1);
+    return Math.max(1, Number.isFinite(qty) ? qty : 1);
+  }
 
-const syncTeamsQuantityToStripe = async ({ user, desiredQuantity }) => {
-  if (!user) throw new Error("Missing user");
-  if (String(user.plan || "").toLowerCase() !== "teams") return { skipped: true, reason: "not_teams" };
-  if (!user.stripeSubscriptionId) throw new Error("Missing stripeSubscriptionId for Teams user");
-  if (!TEAMS_PRICE_IDS.length) throw new Error("Teams price IDs not configured in env");
-
-  const qty = Math.max(1, Number(desiredQuantity || 1));
-
-  const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId, {
-    expand: ["items.data.price"],
-  });
-
-  const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
-  const teamsItem = items.find((it) => {
-    const priceId = it?.price?.id;
-    return priceId && TEAMS_PRICE_IDS.includes(priceId);
-  });
-
-  if (!teamsItem?.id) throw new Error("Could not find Teams subscription item on Stripe subscription");
-
-  await stripe.subscriptionItems.update(teamsItem.id, {
-    quantity: qty,
-    proration_behavior: "create_prorations",
-  });
-
-  return { skipped: false, quantity: qty };
+  return 1; // free + plus (your requirement)
 };
 
 /**
@@ -172,13 +143,18 @@ const getMyProfileBySlug = async (req, res) => {
 
 // POST /api/business-card/profiles (create profile)
 const createMyProfile = async (req, res) => {
-  let created = null;
-
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-    const plan = getPlanFromReq(req);
     const userId = req.user._id;
+
+    // ✅ Always read fresh user from DB (webhook may have just updated plan)
+    const freshUser = await User.findById(userId).select(
+      "plan planInterval subscriptionStatus isSubscribed trialExpires extraProfilesQty teamsProfilesQty"
+    );
+
+    const plan = getPlan(freshUser);
+    const maxAllowed = getMaxProfilesForUser(freshUser);
 
     const slug = safeSlug(req.body.profile_slug);
     if (!slug || slug.length < 3) {
@@ -187,13 +163,13 @@ const createMyProfile = async (req, res) => {
 
     // ✅ Profile cap enforced ONLY here
     const count = await BusinessCard.countDocuments({ user: userId });
-    const maxAllowed = maxProfilesForPlan(plan);
     if (count >= maxAllowed) {
       return upgradeRequired(res, {
         reason: "PROFILE_LIMIT",
         plan,
         maxProfiles: maxAllowed,
         currentProfiles: count,
+        teamsProfilesQty: freshUser?.teamsProfilesQty || 1,
       });
     }
 
@@ -204,37 +180,21 @@ const createMyProfile = async (req, res) => {
     // ✅ Never 403 for template. Normalize instead.
     const effectiveTemplate = normalizeTemplateForPlan(plan, req.body.template_id || "template-1");
 
-    created = await BusinessCard.create({
+    const created = await BusinessCard.create({
       user: userId,
       profile_slug: slug,
       template_id: effectiveTemplate,
       business_card_name: req.body.business_card_name || "",
     });
 
-    // ✅ Teams billing: update quantity
-    if (plan === "teams") {
-      const newCount = await BusinessCard.countDocuments({ user: userId });
-      try {
-        await syncTeamsQuantityToStripe({ user: req.user, desiredQuantity: newCount });
-      } catch (e) {
-        try {
-          await BusinessCard.deleteOne({ _id: created._id });
-        } catch { }
-        return res.status(500).json({
-          error: "Profile created but billing sync failed. No changes were saved.",
-          code: "TEAMS_BILLING_SYNC_FAILED",
-        });
-      }
-    }
+    // ✅ IMPORTANT CHANGE:
+    // We DO NOT sync Stripe quantity from profile count anymore.
+    // Stripe quantity is the source of truth for Teams.
+    // If user wants more profiles, they upgrade quantity in Stripe / your subscription page.
 
     return res.status(201).json({ data: created });
   } catch (err) {
     console.error("createMyProfile:", err);
-    if (created?._id) {
-      try {
-        await BusinessCard.deleteOne({ _id: created._id });
-      } catch { }
-    }
     return res.status(500).json({ error: "Failed to create profile" });
   }
 };
@@ -249,12 +209,9 @@ const setDefaultProfile = async (req, res) => {
 
 // DELETE /api/business-card/profiles/:slug
 const deleteMyProfile = async (req, res) => {
-  let removedDoc = null;
-
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-    const plan = getPlanFromReq(req);
     const userId = req.user._id;
 
     const slug = safeSlug(req.params.slug);
@@ -263,33 +220,14 @@ const deleteMyProfile = async (req, res) => {
     const card = await BusinessCard.findOne({ user: userId, profile_slug: slug });
     if (!card) return res.status(404).json({ error: "Profile not found" });
 
-    removedDoc = card.toObject();
     await BusinessCard.deleteOne({ _id: card._id });
 
-    if (plan === "teams") {
-      const newCount = await BusinessCard.countDocuments({ user: userId });
-      try {
-        await syncTeamsQuantityToStripe({ user: req.user, desiredQuantity: newCount });
-      } catch (e) {
-        try {
-          await BusinessCard.create(removedDoc);
-        } catch { }
-        return res.status(500).json({
-          error: "Profile deletion failed because billing sync failed. No changes were saved.",
-          code: "TEAMS_BILLING_SYNC_FAILED",
-        });
-      }
-    }
+    // ✅ IMPORTANT CHANGE:
+    // We DO NOT sync Stripe quantity from profile count anymore.
 
     return res.json({ success: true });
   } catch (err) {
     console.error("deleteMyProfile:", err);
-    if (removedDoc && removedDoc._id) {
-      try {
-        const exists = await BusinessCard.findById(removedDoc._id).select("_id");
-        if (!exists) await BusinessCard.create(removedDoc);
-      } catch { }
-    }
     return res.status(500).json({ error: "Failed to delete profile" });
   }
 };
@@ -305,8 +243,11 @@ const saveBusinessCard = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-    const plan = getPlanFromReq(req);
     const userId = req.user._id;
+
+    // ✅ Fresh user
+    const freshUser = await User.findById(userId).select("plan teamsProfilesQty extraProfilesQty");
+    const plan = getPlan(freshUser);
 
     const requestedSlug = safeSlug(req.body.profile_slug || "main");
     if (!requestedSlug || requestedSlug.length < 3) {
@@ -328,7 +269,6 @@ const saveBusinessCard = async (req, res) => {
     );
 
     // If not found and plan only allows 1 profile, fall back to the user's only profile
-    // (This prevents the editor from 403-ing when the DB slug isn't "main".)
     let targetQuery = { user: userId, profile_slug: requestedSlug };
     let willRenameSlug = false;
 
@@ -342,8 +282,8 @@ const saveBusinessCard = async (req, res) => {
 
         if (onlyCard?._id) {
           existingCard = onlyCard;
-          targetQuery = { _id: onlyCard._id }; // update by id (safe)
-          willRenameSlug = true; // we'll set profile_slug to requestedSlug in update
+          targetQuery = { _id: onlyCard._id };
+          willRenameSlug = true;
         }
       }
     }
@@ -395,15 +335,12 @@ const saveBusinessCard = async (req, res) => {
     // Clamp free plan content instead of blocking
     ({ works, services, reviews } = clampFreeContent({ plan, works, services, reviews }));
 
-    // Template: normalize instead of 403 (free => template-1)
+    // Template normalize (free => template-1)
     const requestedTemplate = req.body.template_id || existingCard?.template_id || "template-1";
     const effectiveTemplate = normalizeTemplateForPlan(plan, requestedTemplate);
 
     const update = {
       user: userId,
-
-      // If we are falling back to the single existing profile for free/plus,
-      // we rename its slug to what the editor is saving as (usually "main").
       profile_slug: willRenameSlug ? requestedSlug : requestedSlug,
 
       template_id: effectiveTemplate,
@@ -461,7 +398,11 @@ const saveBusinessCard = async (req, res) => {
     if (cover_photo_url) update.cover_photo = cover_photo_url;
     if (avatar_url) update.avatar = avatar_url;
 
-    const saved = await BusinessCard.findOneAndUpdate(targetQuery, { $set: update }, { new: true, upsert: !existingCard });
+    const saved = await BusinessCard.findOneAndUpdate(
+      targetQuery,
+      { $set: update },
+      { new: true, upsert: !existingCard }
+    );
 
     return res.json({
       data: saved,
@@ -484,7 +425,7 @@ const saveBusinessCard = async (req, res) => {
  * ---------------------------------------------------------
  */
 
-// ✅ Public profile by GLOBAL slug (works with your "create profile" global-unique slugs)
+// ✅ Public profile by GLOBAL slug
 const getPublicBySlug = async (req, res) => {
   try {
     const slug = safeSlug(req.params.slug);
@@ -500,28 +441,18 @@ const getPublicBySlug = async (req, res) => {
   }
 };
 
-/**
- * ✅ RESTORED username public endpoints (needed by frontend UserPage.jsx)
- * - /u/:username => calls /api/business-card/by_username/:username
- * - /u/:username/:slug => calls /api/business-card/by_username/:username/:slug
- *
- * Note: This does NOT conflict with global slug pages. It simply supports both.
- */
-
 // GET /api/business-card/by_username/:username
 const getPublicByUsername = async (req, res) => {
   try {
     const username = String(req.params.username || "").trim();
     if (!username) return res.status(400).json({ error: "username required" });
 
-    // Find user by username (case-insensitive)
     const user = await User.findOne({
       username: { $regex: new RegExp(`^${username}$`, "i") },
     }).select("_id username");
 
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // Prefer "main" profile if it exists, else newest updated profile
     const main = await BusinessCard.findOne({ user: user._id, profile_slug: "main" });
     if (main) return res.json(main);
 
@@ -544,7 +475,6 @@ const getPublicByUsernameAndSlug = async (req, res) => {
     const slug = safeSlug(req.params.slug);
     if (!slug) return res.status(400).json({ error: "slug required" });
 
-    // Find user by username (case-insensitive)
     const user = await User.findOne({
       username: { $regex: new RegExp(`^${username}$`, "i") },
     }).select("_id username");

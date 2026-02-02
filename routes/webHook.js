@@ -1,11 +1,8 @@
 // backend/routes/webHook.js
-const express = require("express");
-const router = express.Router();
 const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
 const User = require("../models/user");
-
 const sendEmail = require("../utils/SendEmail");
 const { orderConfirmationTemplate } = require("../utils/emailTemplates");
 
@@ -28,7 +25,7 @@ const PRICE_TO_PLAN = {
 };
 
 /**
- * Optional add-on: extra profiles (if you ever use Plus + add-on quantity billing)
+ * Add-on (optional): extra profiles for PLUS
  */
 const EXTRA_PROFILE_PRICE_IDS = [
   process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
@@ -36,16 +33,17 @@ const EXTRA_PROFILE_PRICE_IDS = [
   process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY,
 ].filter(Boolean);
 
+/**
+ * TEAMS price IDs list (used to find Teams item + quantity)
+ */
+const TEAMS_PRICE_IDS = [
+  process.env.STRIPE_PRICE_TEAMS_MONTHLY,
+  process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
+  process.env.STRIPE_PRICE_TEAMS_YEARLY,
+].filter(Boolean);
+
 function isActiveStatus(status) {
   return status === "active" || status === "trialing";
-}
-
-function parsePlanKey(planKey) {
-  const [p, i] = String(planKey || "").split("-");
-  const plan = ["plus", "teams"].includes(p) ? p : null;
-  const interval = ["monthly", "quarterly", "yearly"].includes(i) ? i : null;
-  if (!plan || !interval) return null;
-  return { plan, interval };
 }
 
 // Update by customerId (fallback), with safe $set / $unset handling
@@ -73,13 +71,18 @@ async function updateUserById(userId, { set = {}, unset = {} }) {
 }
 
 /**
- * Extract base plan + interval + extraProfilesQty from a Stripe subscription object
- * NOTE: expects sub expanded with items.data.price
+ * Extract:
+ * - plan + interval (plus/teams)
+ * - extraProfilesQty (plus add-on)
+ * - teamsProfilesQty (teams subscription item quantity)
+ * - store teams item ids for reconciliation/debug
+ *
+ * NOTE: expects subscription expanded with items.data.price
  */
-function extractPlanAndExtrasFromSubscription(sub, sessionMetadataPlanKey) {
+function extractEntitlementsFromSubscription(sub) {
   const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
 
-  // Base plan: find the first line item whose price id is in PRICE_TO_PLAN
+  // Base plan: find first item matching PRICE_TO_PLAN
   let plan = null;
   let interval = null;
 
@@ -93,16 +96,7 @@ function extractPlanAndExtrasFromSubscription(sub, sessionMetadataPlanKey) {
     }
   }
 
-  // Fallback to metadata planKey (do not overwrite if unknown)
-  if ((!plan || !interval) && sessionMetadataPlanKey) {
-    const parsed = parsePlanKey(sessionMetadataPlanKey);
-    if (parsed) {
-      plan = plan || parsed.plan;
-      interval = interval || parsed.interval;
-    }
-  }
-
-  // Extras: sum quantity of add-on line items
+  // PLUS add-on quantity
   let extraProfilesQty = 0;
   if (EXTRA_PROFILE_PRICE_IDS.length) {
     for (const it of items) {
@@ -113,11 +107,36 @@ function extractPlanAndExtrasFromSubscription(sub, sessionMetadataPlanKey) {
     }
   }
 
-  return { plan, interval, extraProfilesQty };
+  // TEAMS quantity (the teams base line item quantity)
+  let teamsProfilesQty = 1;
+  let teamsStripeItemId = undefined;
+  let teamsStripePriceId = undefined;
+
+  if (TEAMS_PRICE_IDS.length) {
+    const teamsItem = items.find((it) => {
+      const pid = it?.price?.id;
+      return pid && TEAMS_PRICE_IDS.includes(pid);
+    });
+
+    if (teamsItem) {
+      teamsProfilesQty = Math.max(1, Number(teamsItem.quantity || 1));
+      teamsStripeItemId = teamsItem.id;
+      teamsStripePriceId = teamsItem?.price?.id;
+    }
+  }
+
+  return { plan, interval, extraProfilesQty, teamsProfilesQty, teamsStripeItemId, teamsStripePriceId };
 }
 
-// IMPORTANT: express.raw must be used for Stripe signature verification
-router.post("/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+/**
+ * ✅ IMPORTANT:
+ * This file is now a SINGLE handler function.
+ * index.js mounts it like:
+ *   app.post("/api/checkout/webhook", express.raw({type:"application/json"}), stripeWebhookHandler)
+ *
+ * So we MUST export (req, res) directly and NOT use router.post() here.
+ */
+module.exports = async function stripeWebhookHandler(req, res) {
   if (!endpointSecret) {
     console.error("⚠️ Missing STRIPE_WEBHOOK_SECRET");
     return res.status(500).send("Webhook not configured");
@@ -127,6 +146,7 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
 
   let event;
   try {
+    // req.body is RAW Buffer because index.js uses express.raw()
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
     console.error("⚠️ Stripe webhook signature error:", err.message);
@@ -146,18 +166,14 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
         const subscriptionId = session.subscription;
         const userId = session.metadata?.userId;
 
-        // Retrieve subscription so we can read price + status + period end + add-ons
         const sub = await stripe.subscriptions.retrieve(subscriptionId, {
           expand: ["items.data.price"],
         });
 
         const status = sub.status;
-        const currentPeriodEnd = sub.current_period_end
-          ? new Date(sub.current_period_end * 1000)
-          : undefined;
+        const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
 
-        const { plan, interval, extraProfilesQty } =
-          extractPlanAndExtrasFromSubscription(sub, session.metadata?.planKey);
+        const extracted = extractEntitlementsFromSubscription(sub);
 
         const set = {
           stripeCustomerId: customerId,
@@ -165,15 +181,35 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
           subscriptionStatus: status || "active",
           currentPeriodEnd,
           isSubscribed: isActiveStatus(status),
-          extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
+
+          // PLUS add-on entitlement
+          extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
         };
 
         // Only set plan fields if known
-        if (plan) set.plan = plan;
-        if (interval) set.planInterval = interval;
+        if (extracted.plan) set.plan = extracted.plan;
+        if (extracted.interval) set.planInterval = extracted.interval;
+
+        // TEAMS entitlement fields
+        if (extracted.plan === "teams") {
+          set.teamsProfilesQty = Math.max(1, Number(extracted.teamsProfilesQty || 1));
+          if (extracted.teamsStripeItemId) set.teamsStripeItemId = extracted.teamsStripeItemId;
+          if (extracted.teamsStripePriceId) set.teamsStripePriceId = extracted.teamsStripePriceId;
+        } else {
+          // not teams => normalize teams fields
+          set.teamsProfilesQty = 1;
+        }
 
         // If now subscribed, clear trial
-        const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
+        const unset = isActiveStatus(status)
+          ? { trialExpires: "" }
+          : {};
+
+        if (extracted.plan !== "teams") {
+          // clear teams stripe metadata if not teams
+          unset.teamsStripeItemId = "";
+          unset.teamsStripePriceId = "";
+        }
 
         if (userId) await updateUserById(userId, { set, unset });
         else await updateUserByCustomer(customerId, { set, unset });
@@ -182,15 +218,12 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
       // B) One-time payment checkout (NFC cards)
       if (session.mode === "payment") {
         const customerEmail = session.customer_details?.email;
-        const amountPaid = session.amount_total
-          ? (session.amount_total / 100).toFixed(2)
-          : null;
+        const amountPaid = session.amount_total ? (session.amount_total / 100).toFixed(2) : null;
 
         await sendEmail(
           process.env.EMAIL_USER,
           amountPaid ? `New Konar Card Order - £${amountPaid}` : `New Konar Card Order`,
-          `<p>New order from: ${customerEmail || "Unknown email"}</p>${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
-          }`
+          `<p>New order from: ${customerEmail || "Unknown email"}</p>${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""}`
         );
 
         if (customerEmail && amountPaid) {
@@ -204,76 +237,48 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
     }
 
     // -------------------------
-    // customer.subscription.created
+    // customer.subscription.created / updated
     // -------------------------
-    if (event.type === "customer.subscription.created") {
+    if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
       const sub = event.data.object;
 
       const customerId = sub.customer;
       const subscriptionId = sub.id;
       const status = sub.status;
+      const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
 
-      const currentPeriodEnd = sub.current_period_end
-        ? new Date(sub.current_period_end * 1000)
-        : undefined;
-
+      // Retrieve expanded so we can read price ids + quantities
       const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
         expand: ["items.data.price"],
       });
 
-      const { plan, interval, extraProfilesQty } =
-        extractPlanAndExtrasFromSubscription(fullSub, null);
+      const extracted = extractEntitlementsFromSubscription(fullSub);
 
       const set = {
         stripeSubscriptionId: subscriptionId,
         subscriptionStatus: status || "active",
         currentPeriodEnd,
         isSubscribed: isActiveStatus(status),
-        extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
+
+        extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
       };
 
-      if (plan) set.plan = plan;
-      if (interval) set.planInterval = interval;
+      if (extracted.plan) set.plan = extracted.plan;
+      if (extracted.interval) set.planInterval = extracted.interval;
+
+      if (extracted.plan === "teams") {
+        set.teamsProfilesQty = Math.max(1, Number(extracted.teamsProfilesQty || 1));
+        if (extracted.teamsStripeItemId) set.teamsStripeItemId = extracted.teamsStripeItemId;
+        if (extracted.teamsStripePriceId) set.teamsStripePriceId = extracted.teamsStripePriceId;
+      } else {
+        set.teamsProfilesQty = 1;
+      }
 
       const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
-
-      await updateUserByCustomer(customerId, { set, unset });
-    }
-
-    // -------------------------
-    // customer.subscription.updated
-    // -------------------------
-    if (event.type === "customer.subscription.updated") {
-      const sub = event.data.object;
-
-      const customerId = sub.customer;
-      const subscriptionId = sub.id;
-      const status = sub.status;
-
-      const currentPeriodEnd = sub.current_period_end
-        ? new Date(sub.current_period_end * 1000)
-        : undefined;
-
-      // Retrieve expanded to reliably read price ids + add-on qty
-      const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
-        expand: ["items.data.price"],
-      });
-
-      const { plan, interval, extraProfilesQty } =
-        extractPlanAndExtrasFromSubscription(fullSub, null);
-
-      const set = {
-        stripeSubscriptionId: subscriptionId,
-        subscriptionStatus: status || "active",
-        currentPeriodEnd,
-        isSubscribed: isActiveStatus(status),
-        extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
-      };
-
-      if (plan) set.plan = plan;
-      if (interval) set.planInterval = interval;
-
-      const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
+      if (extracted.plan !== "teams") {
+        unset.teamsStripeItemId = "";
+        unset.teamsStripePriceId = "";
+      }
 
       await updateUserByCustomer(customerId, { set, unset });
     }
@@ -286,19 +291,14 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
       const customerId = invoice.customer;
       const subscriptionId = invoice.subscription;
 
-      let extraProfilesQty = 0;
-      let plan = null;
-      let interval = null;
+      let extracted = { plan: null, interval: null, extraProfilesQty: 0, teamsProfilesQty: 1 };
 
       if (subscriptionId) {
         try {
           const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
             expand: ["items.data.price"],
           });
-          const extracted = extractPlanAndExtrasFromSubscription(fullSub, null);
-          extraProfilesQty = extracted.extraProfilesQty || 0;
-          plan = extracted.plan;
-          interval = extracted.interval;
+          extracted = extractEntitlementsFromSubscription(fullSub);
         } catch {
           // ignore; still mark active
         }
@@ -308,11 +308,17 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
         stripeSubscriptionId: subscriptionId || undefined,
         subscriptionStatus: "active",
         isSubscribed: true,
-        extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
+        extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
       };
 
-      if (plan) set.plan = plan;
-      if (interval) set.planInterval = interval;
+      if (extracted.plan) set.plan = extracted.plan;
+      if (extracted.interval) set.planInterval = extracted.interval;
+
+      if (extracted.plan === "teams") {
+        set.teamsProfilesQty = Math.max(1, Number(extracted.teamsProfilesQty || 1));
+      } else {
+        set.teamsProfilesQty = 1;
+      }
 
       await updateUserByCustomer(customerId, {
         set,
@@ -350,11 +356,17 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
           planInterval: "monthly",
           subscriptionStatus: "canceled",
           isSubscribed: false,
+
           extraProfilesQty: 0,
+
+          // reset teams entitlement
+          teamsProfilesQty: 1,
         },
         unset: {
           currentPeriodEnd: "",
           stripeSubscriptionId: "",
+          teamsStripeItemId: "",
+          teamsStripePriceId: "",
         },
       });
     }
@@ -364,6 +376,4 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
     console.error("Webhook handler error:", err);
     return res.status(500).send("Webhook handler failed");
   }
-});
-
-module.exports = router;
+};
