@@ -15,7 +15,9 @@ const safeSlug = (v) =>
   String(v || "")
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9-]/g, ""); // keep only a-z 0-9 hyphen
+    // allow: letters, numbers, dot, underscore, hyphen
+    .replace(/[^a-z0-9._-]/g, "") || "main";
+
 
 const parseJsonArray = (v, fallback = []) => {
   try {
