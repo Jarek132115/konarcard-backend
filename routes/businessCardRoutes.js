@@ -100,13 +100,21 @@ const getAuthedUserId = (req) => {
     return { userId: decoded.id };
 };
 
+/**
+ * IMPORTANT: profile_slug schema allows ONLY a-z0-9-
+ * so we normalize to that here.
+ */
 const safeSlug = (raw, fallback = "main") => {
     const s = (raw ?? "").toString().trim().toLowerCase();
     if (!s) return fallback;
+
+    // replace underscores with hyphens, strip invalid, collapse
     const cleaned = s
-        .replace(/[^a-z0-9-_]/g, "-")
+        .replace(/_/g, "-")
+        .replace(/[^a-z0-9-]/g, "-")
         .replace(/-+/g, "-")
-        .replace(/^[-_]+|[-_]+$/g, "");
+        .replace(/^-+|-+$/g, "");
+
     return cleaned || fallback;
 };
 
@@ -127,7 +135,12 @@ const uploadToS3 = async ({ folder, file, contentTypeOverride }) => {
 };
 
 // ✅ Upload raw buffer (QR png) to S3
-const uploadBufferToS3 = async ({ folder, buffer, contentType = "image/png", ext = ".png" }) => {
+const uploadBufferToS3 = async ({
+    folder,
+    buffer,
+    contentType = "image/png",
+    ext = ".png",
+}) => {
     const key = `${folder}/${uuidv4()}${ext}`;
 
     await s3.send(
@@ -142,14 +155,16 @@ const uploadBufferToS3 = async ({ folder, buffer, contentType = "image/png", ext
     return s3UrlForKey(key);
 };
 
-// ✅ Decide the public URL for a profile (default + slug routes)
+// ✅ Decide the public URL for a profile
 const getPublicProfileUrl = ({ username, slug }) => {
-    // If you ever want slug-specific public URLs:
-    // - default profile uses /u/:username
-    // - non-default uses /u/:username/:slug
+    const base =
+        process.env.PUBLIC_PROFILE_DOMAIN ||
+        process.env.FRONTEND_PROFILE_DOMAIN ||
+        "https://www.konarcard.com";
+
     if (!username) return "";
-    if (!slug || slug === "main") return `${process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com"}/u/${username}`;
-    return `${process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com"}/u/${username}/${slug}`;
+    if (!slug || slug === "main") return `${base}/u/${username}`;
+    return `${base}/u/${username}/${slug}`;
 };
 
 // ✅ Ensure QR exists for a given profile (creates if missing)
@@ -159,6 +174,7 @@ const ensureProfileQrCode = async ({ userId, profile_slug }) => {
     if (!username) return null;
 
     const urlToEncode = getPublicProfileUrl({ username, slug: profile_slug });
+    if (!urlToEncode) return null;
 
     const pngBuffer = await QRCode.toBuffer(urlToEncode, {
         type: "png",
@@ -187,7 +203,10 @@ router.get("/profiles", async (req, res) => {
         const { userId, error } = getAuthedUserId(req);
         if (error) return res.status(error.status).json(error.body);
 
-        const cards = await BusinessCard.find({ user: userId }).sort({ is_default: -1, updatedAt: -1 });
+        const cards = await BusinessCard.find({ user: userId }).sort({
+            is_default: -1,
+            updatedAt: -1,
+        });
         return res.status(200).json({ data: cards || [] });
     } catch (err) {
         console.error("Error listing my profiles (/profiles):", err);
@@ -235,7 +254,13 @@ router.post("/profiles", async (req, res) => {
 
         const isFirst = (await BusinessCard.countDocuments({ user: userId })) === 0;
 
-        const allowedTemplates = ["template-1", "template-2", "template-3", "template-4", "template-5"];
+        const allowedTemplates = [
+            "template-1",
+            "template-2",
+            "template-3",
+            "template-4",
+            "template-5",
+        ];
 
         const card = await BusinessCard.create({
             user: userId,
@@ -466,8 +491,11 @@ router.post("/", upload, async (req, res) => {
         const coverRemoved = parseBool(cover_photo_removed);
         const avatarRemoved = parseBool(avatar_removed);
 
-        const nextCover = coverPhotoUrl !== null ? coverPhotoUrl : coverRemoved === true ? "" : existingCard?.cover_photo || "";
-        const nextAvatar = avatarUrl !== null ? avatarUrl : avatarRemoved === true ? "" : existingCard?.avatar || "";
+        const nextCover =
+            coverPhotoUrl !== null ? coverPhotoUrl : coverRemoved === true ? "" : existingCard?.cover_photo || "";
+
+        const nextAvatar =
+            avatarUrl !== null ? avatarUrl : avatarRemoved === true ? "" : existingCard?.avatar || "";
 
         const showMain = parseBool(show_main_section);
         const showAbout = parseBool(show_about_me_section);
@@ -652,8 +680,11 @@ router.post("/create_business_card", upload, async (req, res) => {
         const coverRemoved = parseBool(cover_photo_removed);
         const avatarRemoved = parseBool(avatar_removed);
 
-        const nextCover = coverPhotoUrl !== null ? coverPhotoUrl : coverRemoved === true ? "" : existingCard?.cover_photo || "";
-        const nextAvatar = avatarUrl !== null ? avatarUrl : avatarRemoved === true ? "" : existingCard?.avatar || "";
+        const nextCover =
+            coverPhotoUrl !== null ? coverPhotoUrl : coverRemoved === true ? "" : existingCard?.cover_photo || "";
+
+        const nextAvatar =
+            avatarUrl !== null ? avatarUrl : avatarRemoved === true ? "" : existingCard?.avatar || "";
 
         const updateData = {
             profile_slug: "main",

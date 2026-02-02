@@ -53,21 +53,69 @@ const toSafeUser = (userDoc) => {
     return u;
 };
 
-const ensureBusinessCard = async (userId, name = "") => {
-    await BusinessCard.findOneAndUpdate(
-        { user: userId },
-        { $setOnInsert: { user: userId, full_name: name || "" } },
-        { upsert: true, new: true }
+/**
+ * ✅ IMPORTANT (multi-profile):
+ * Ensure at least the MAIN profile exists for the user.
+ * - Upserts profile_slug="main"
+ * - If it's the first profile, set is_default=true
+ */
+const ensureMainBusinessCard = async (userId, name = "") => {
+    const count = await BusinessCard.countDocuments({ user: userId });
+    const isFirst = count === 0;
+
+    const card = await BusinessCard.findOneAndUpdate(
+        { user: userId, profile_slug: "main" },
+        {
+            $setOnInsert: {
+                user: userId,
+                profile_slug: "main",
+                is_default: isFirst,
+                full_name: name || "",
+                template_id: "template-1",
+            },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    // If there is no default yet, make main default (safety)
+    const hasDefault = await BusinessCard.exists({ user: userId, is_default: true });
+    if (!hasDefault && card) {
+        await BusinessCard.updateMany({ user: userId }, { $set: { is_default: false } });
+        card.is_default = true;
+        await card.save();
+    }
+
+    return card;
 };
 
-const generateAndUploadQr = async (userId, profileUrl) => {
+/**
+ * Public URL logic MUST match your backend businessCardRoutes.js
+ * - main/default: /u/:username
+ * - non-main: /u/:username/:slug
+ */
+const buildPublicProfileUrl = (username, profileSlug) => {
+    const u = (username || "").toString().trim().toLowerCase();
+    const s = (profileSlug || "").toString().trim().toLowerCase();
+
+    if (!u) return "";
+    if (!s || s === "main") return `${FRONTEND_PROFILE_DOMAIN}/u/${u}`;
+    return `${FRONTEND_PROFILE_DOMAIN}/u/${u}/${s}`;
+};
+
+/**
+ * Generate QR -> upload to S3 -> return URL
+ * NOTE: we include profileSlug in key so each profile has its own QR.
+ */
+const generateAndUploadProfileQr = async (userId, profileUrl, profileSlug = "main") => {
     const qrBuffer = await QRCode.toBuffer(profileUrl, {
-        width: 500,
+        width: 900,
+        margin: 2,
+        errorCorrectionLevel: "M",
         color: { dark: "#000000", light: "#ffffff" },
     });
 
-    const fileKey = `qr-codes/${userId}.png`;
+    const safeSlug = (profileSlug || "main").toString().trim().toLowerCase() || "main";
+    const fileKey = `qr-codes/${userId}/${safeSlug}-${Date.now()}.png`; // unique key to avoid caching
     const qrCodeUrl = await uploadToS3(qrBuffer, fileKey);
     return qrCodeUrl;
 };
@@ -78,7 +126,9 @@ const test = (req, res) => res.json("test is working");
 /**
  * ✅ CLAIM LINK
  * - If NOT logged in: availability check only
- * - If logged in: MUST be valid token + existing user, then sets username/slug/profileUrl + QR + BusinessCard
+ * - If logged in: MUST be valid token + existing user
+ *   then sets username/slug/profileUrl + QR + ensures MAIN BusinessCard
+ *   and updates BusinessCard.qr_code_url for all profiles to match new username
  *
  * IMPORTANT:
  * - If token is present but invalid OR user missing, we return 401 so frontend can clear stale token.
@@ -117,19 +167,56 @@ const claimLink = async (req, res) => {
             return res.status(401).json({ error: "User not found" });
         }
 
-        const slug = safe;
+        // Save user fields
+        const slug = safe; // legacy "slug" on user = username
         const profileUrl = `${FRONTEND_PROFILE_DOMAIN}/u/${slug}`;
 
         user.username = safe;
         user.slug = slug;
         user.profileUrl = profileUrl;
 
-        // Generate QR to S3
-        const qrCodeUrl = await generateAndUploadQr(user._id, profileUrl);
-        user.qrCodeUrl = qrCodeUrl;
+        // ✅ Ensure at least MAIN business card exists
+        await ensureMainBusinessCard(user._id, user.name);
+
+        // ✅ Update/Generate QR codes for ALL existing profiles (multi-profile)
+        const cards = await BusinessCard.find({ user: user._id }).select("_id profile_slug qr_code_url is_default");
+
+        // If somehow none exist, create main then reload
+        let cardsToUpdate = cards;
+        if (!cardsToUpdate || cardsToUpdate.length === 0) {
+            await ensureMainBusinessCard(user._id, user.name);
+            cardsToUpdate = await BusinessCard.find({ user: user._id }).select("_id profile_slug qr_code_url is_default");
+        }
+
+        // Generate per-profile QR and store on BusinessCard
+        // Also set user.qrCodeUrl (legacy) to the MAIN profile QR
+        let mainQrUrl = "";
+
+        for (const c of cardsToUpdate) {
+            const pSlug = (c.profile_slug || "main").toString().trim().toLowerCase() || "main";
+            const url = buildPublicProfileUrl(safe, pSlug);
+
+            // Always regenerate on claim so it matches the new username
+            const qrUrl = await generateAndUploadProfileQr(user._id, url, pSlug);
+
+            c.qr_code_url = qrUrl;
+            await c.save();
+
+            if (pSlug === "main") {
+                mainQrUrl = qrUrl;
+            }
+        }
+
+        // Legacy user QR (keep existing field for older parts of app)
+        if (mainQrUrl) {
+            user.qrCodeUrl = mainQrUrl;
+        } else {
+            // fallback: generate main QR anyway
+            const fallbackMainUrl = buildPublicProfileUrl(safe, "main");
+            user.qrCodeUrl = await generateAndUploadProfileQr(user._id, fallbackMainUrl, "main");
+        }
 
         await user.save();
-        await ensureBusinessCard(user._id, user.name);
 
         return res.json({ success: true, user: toSafeUser(user) });
     } catch (err) {
@@ -182,11 +269,23 @@ const registerUser = async (req, res) => {
             authProvider: "local",
         });
 
-        const qrCodeUrl = await generateAndUploadQr(user._id, profileUrl);
-        user.qrCodeUrl = qrCodeUrl;
-        await user.save();
+        // ✅ Ensure main profile exists and has QR (multi-profile)
+        await ensureMainBusinessCard(user._id, name);
 
-        await ensureBusinessCard(user._id, name);
+        // Generate QR for main profile and store on BOTH:
+        // - BusinessCard.qr_code_url (new)
+        // - user.qrCodeUrl (legacy)
+        const mainPublicUrl = buildPublicProfileUrl(cleanUsername, "main");
+        const mainQrUrl = await generateAndUploadProfileQr(user._id, mainPublicUrl, "main");
+
+        await BusinessCard.findOneAndUpdate(
+            { user: user._id, profile_slug: "main" },
+            { $set: { qr_code_url: mainQrUrl } },
+            { new: true }
+        );
+
+        user.qrCodeUrl = mainQrUrl;
+        await user.save();
 
         const html = verificationEmailTemplate(name, code);
         await sendEmail(cleanEmail, "Verify Your Email", html);
