@@ -19,13 +19,21 @@ const comparePassword = (password, hashed) => bcrypt.compare(password, hashed);
 
 /**
  * ✅ Support BOTH:
- * - Authorization: Bearer <token>
+ * - Authorization: Bearer <token>   (any casing)
  * - req.cookies.token
  */
 const getTokenFromReq = (req) => {
-    const header = req.headers?.authorization || "";
-    if (header.startsWith("Bearer ")) return header.slice(7).trim();
+    const header =
+        req.headers?.authorization ||
+        req.headers?.Authorization ||
+        "";
+
+    if (typeof header === "string" && header.toLowerCase().startsWith("bearer ")) {
+        return header.slice(7).trim();
+    }
+
     if (req.cookies?.token) return req.cookies.token;
+
     return null;
 };
 
@@ -36,7 +44,7 @@ const getTokenFromReq = (req) => {
  * - attaches req.auth + req.user
  *
  * IMPORTANT:
- * - If JWT valid BUT user deleted => return 404 (lets frontend clear local token cleanly)
+ * - this middleware must ONLY authenticate (no plan/trial/verification gating here)
  */
 const requireAuth = async (req, res, next) => {
     const token = getTokenFromReq(req);
@@ -45,10 +53,12 @@ const requireAuth = async (req, res, next) => {
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+        const userId = decoded?.id || decoded?._id || decoded?.userId;
+        if (!userId) return res.status(401).json({ error: "Invalid token" });
+
         // ✅ must still exist in DB (fixes deleted users / stale tokens)
-        const user = await User.findById(decoded.id).select("-password");
+        const user = await User.findById(userId).select("-password");
         if (!user) {
-            // also clear cookie token if present (frontend uses localStorage but this helps)
             try {
                 res.clearCookie("token");
             } catch { }
@@ -58,7 +68,7 @@ const requireAuth = async (req, res, next) => {
         req.auth = { id: user._id.toString(), email: user.email };
         req.user = user;
         return next();
-    } catch {
+    } catch (err) {
         try {
             res.clearCookie("token");
         } catch { }

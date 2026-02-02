@@ -293,7 +293,12 @@ const deleteMyProfile = async (req, res) => {
 };
 
 // POST /api/business-card (upsert save, supports profile_slug)
-// ✅ MUST ALWAYS SAVE FOR ALL PLANS
+// RULES:
+// - Saving edits must ALWAYS work for ALL plans (free/plus/teams)
+// - Free plan limits still apply (clamp + normalize), but never 403
+// - Teams supports multiple profiles
+// - Free/Plus should not be able to create 2nd profile, BUT saving should not 403:
+//   if they already have 1 profile and try to save another slug, we update their only profile instead.
 const saveBusinessCard = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
@@ -301,36 +306,43 @@ const saveBusinessCard = async (req, res) => {
     const plan = getPlanFromReq(req);
     const userId = req.user._id;
 
-    // ✅ Always fall back to main
-    const profile_slug = safeSlug(req.body.profile_slug || "main") || "main";
-
-    // ✅ Only enforce min length if it's NOT main fallback
-    // (main is 4 chars so it passes anyway; this prevents weird empty slugs from breaking saves)
-    if (profile_slug.length < 3) {
-      return res.status(400).json({ error: "profile_slug must be at least 3 chars" });
+    const requestedSlug = safeSlug(req.body.profile_slug || "main");
+    if (!requestedSlug || requestedSlug.length < 3) {
+      return res.status(400).json({ error: "profile_slug is required and must be at least 3 chars" });
     }
 
-    // ✅ GLOBAL slug uniqueness (different owners cannot share)
+    // GLOBAL slug protection (never allow two different owners)
     const otherOwner = await BusinessCard.findOne({
-      profile_slug,
+      profile_slug: requestedSlug,
       user: { $ne: userId },
     }).select("_id");
-    if (otherOwner) return res.status(409).json({ error: "Profile slug already exists" });
+    if (otherOwner) {
+      return res.status(409).json({ error: "Profile slug already exists" });
+    }
 
-    // Existing card?
-    const existingCard = await BusinessCard.findOne({ user: userId, profile_slug }).select("_id template_id");
+    // Try to find the exact profile by slug
+    let existingCard = await BusinessCard.findOne({ user: userId, profile_slug: requestedSlug }).select(
+      "_id profile_slug template_id works services reviews"
+    );
 
-    // ✅ If NEW via upsert, enforce plan profile cap
-    if (!existingCard) {
+    // If not found and plan only allows 1 profile, fall back to the user's only profile
+    // (This prevents the editor from 403-ing when the DB slug isn't "main".)
+    let targetQuery = { user: userId, profile_slug: requestedSlug };
+    let willRenameSlug = false;
+
+    if (!existingCard && plan !== "teams") {
       const count = await BusinessCard.countDocuments({ user: userId });
-      const maxAllowed = maxProfilesForPlan(plan);
-      if (count >= maxAllowed) {
-        return upgradeRequired(res, {
-          reason: "PROFILE_LIMIT",
-          plan,
-          maxProfiles: maxAllowed,
-          currentProfiles: count,
-        });
+
+      if (count >= 1) {
+        const onlyCard = await BusinessCard.findOne({ user: userId }).sort({ createdAt: 1 }).select(
+          "_id profile_slug template_id works services reviews"
+        );
+
+        if (onlyCard?._id) {
+          existingCard = onlyCard;
+          targetQuery = { _id: onlyCard._id }; // update by id (safe)
+          willRenameSlug = true; // we'll set profile_slug to requestedSlug in update
+        }
       }
     }
 
@@ -338,6 +350,7 @@ const saveBusinessCard = async (req, res) => {
     let services = parseJsonArray(req.body.services, []);
     let reviews = parseJsonArray(req.body.reviews, []);
 
+    // existing_works can come as repeated fields
     const existing_works = []
       .concat(req.body.existing_works || [])
       .flat()
@@ -359,15 +372,16 @@ const saveBusinessCard = async (req, res) => {
       avatar_url = await uploadToS3(f.buffer, key);
     }
 
-    // Works: clamp BEFORE uploading to avoid wasting S3 uploads on free
+    // Upload new work images (respect free limit BEFORE uploading)
+    const uploadedWorkUrls = [];
     const workFiles = req.files?.works || [];
+
     const maxWorks = plan === "free" ? FREE_LIMIT : Infinity;
 
     let works = [...existing_works].filter(Boolean);
     const remainingSlots = Math.max(0, maxWorks === Infinity ? workFiles.length : maxWorks - works.length);
     const filesToUpload = plan === "free" ? workFiles.slice(0, remainingSlots) : workFiles;
 
-    const uploadedWorkUrls = [];
     for (const f of filesToUpload) {
       const key = `works/${userId}/${Date.now()}-${Math.random().toString(16).slice(2)}-${f.originalname}`;
       const url = await uploadToS3(f.buffer, key);
@@ -376,16 +390,19 @@ const saveBusinessCard = async (req, res) => {
 
     works = [...works, ...uploadedWorkUrls];
 
-    // ✅ clamp free content
+    // Clamp free plan content instead of blocking
     ({ works, services, reviews } = clampFreeContent({ plan, works, services, reviews }));
 
-    // ✅ normalize template (never 403)
+    // Template: normalize instead of 403 (free => template-1)
     const requestedTemplate = req.body.template_id || existingCard?.template_id || "template-1";
     const effectiveTemplate = normalizeTemplateForPlan(plan, requestedTemplate);
 
     const update = {
       user: userId,
-      profile_slug,
+
+      // If we are falling back to the single existing profile for free/plus,
+      // we rename its slug to what the editor is saving as (usually "main").
+      profile_slug: willRenameSlug ? requestedSlug : requestedSlug,
 
       template_id: effectiveTemplate,
 
@@ -443,9 +460,9 @@ const saveBusinessCard = async (req, res) => {
     if (avatar_url) update.avatar = avatar_url;
 
     const saved = await BusinessCard.findOneAndUpdate(
-      { user: userId, profile_slug },
+      targetQuery,
       { $set: update },
-      { new: true, upsert: true }
+      { new: true, upsert: !existingCard } // only upsert if user truly has no profile at all
     );
 
     return res.json({
@@ -454,6 +471,7 @@ const saveBusinessCard = async (req, res) => {
         plan,
         template_id: effectiveTemplate,
         limitsApplied: plan === "free",
+        renamedSingleProfile: !!willRenameSlug,
       },
     });
   } catch (err) {
@@ -461,6 +479,7 @@ const saveBusinessCard = async (req, res) => {
     return res.status(500).json({ error: "Failed to save business card" });
   }
 };
+
 
 /**
  * ---------------------------------------------------------
