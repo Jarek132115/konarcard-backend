@@ -1,4 +1,4 @@
-// Backend/index.js
+// backend/index.js
 const express = require("express");
 require("dotenv").config();
 
@@ -15,8 +15,8 @@ const contactRoutes = require("./routes/contactRoutes");
 const businessCardRoutes = require("./routes/businessCardRoutes");
 const authRoutes = require("./routes/authRoutes");
 
-// ✅ Stripe webhook router
-const stripeWebhookRouter = require("./routes/webHook");
+// ✅ Stripe webhook handler (exports a FUNCTION, not a router)
+const stripeWebhookHandler = require("./routes/webHook");
 
 const app = express();
 
@@ -42,23 +42,23 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-no-auth"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-no-auth", "stripe-signature"],
   optionsSuccessStatus: 204,
 };
 
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
-/* -------------------- Stripe Webhook MUST come before JSON -------------------- */
-/**
- * Stripe is currently POSTing to /webhook/stripe (your logs show 404 there).
- * We mount the webhook router exactly on that path.
- *
- * IMPORTANT:
- * - Your routes/webHook.js already uses express.raw(...) on its POST handler.
- * - So we DO NOT add express.raw() here (avoid double-parsing).
- */
-app.use("/webhook/stripe", stripeWebhookRouter);
+/* ---------------------------------------------------------
+   ✅ STRIPE WEBHOOK MUST COME BEFORE express.json()
+   Stripe calls: POST /api/checkout/webhook
+   We must use express.raw() for signature verification.
+--------------------------------------------------------- */
+app.post(
+  "/api/checkout/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhookHandler
+);
 
 /* -------------------- Parsers -------------------- */
 app.use(express.json());
