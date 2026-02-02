@@ -38,7 +38,7 @@ const corsOptions = {
     return callback(new Error(`CORS blocked for origin: ${origin}`), false);
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   // IMPORTANT: include x-no-auth because your frontend previously used it
   allowedHeaders: ['Content-Type', 'Authorization', 'x-no-auth'],
   optionsSuccessStatus: 204,
