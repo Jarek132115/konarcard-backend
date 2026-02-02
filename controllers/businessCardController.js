@@ -15,7 +15,7 @@ const safeSlug = (v) =>
   String(v || "")
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9-]/g, ""); // keep only a-z 0-9 hyphen (match schema intent)
+    .replace(/[^a-z0-9-]/g, ""); // keep only a-z 0-9 hyphen
 
 const parseJsonArray = (v, fallback = []) => {
   try {
@@ -42,19 +42,13 @@ const getPlanFromReq = (req) => {
   return "free";
 };
 
+// ✅ Free limits exist, but saving must NEVER 403 because of them.
+// We clamp content to the free limits instead.
 const FREE_LIMIT = 6;
-
-const isTemplateAllowed = (plan, templateId) => {
-  const t = String(templateId || "template-1");
-  const allowed = new Set(["template-1", "template-2", "template-3", "template-4", "template-5"]);
-  if (!allowed.has(t)) return false;
-  if (plan === "free") return t === "template-1";
-  return true; // plus / teams
-};
 
 const maxProfilesForPlan = (plan) => {
   if (plan === "teams") return Infinity;
-  // per your requirement: free and plus can have 1 profile only
+  // ✅ your requirement: free and plus = 1 profile only
   return 1;
 };
 
@@ -66,21 +60,29 @@ const upgradeRequired = (res, payload = {}) => {
 };
 
 /**
- * Enforce Free limits (works/services/reviews)
+ * Clamp free plan content to limits (never block saving).
  */
-const enforceFreeContentLimits = ({ plan, works, services, reviews }) => {
-  if (plan !== "free") return null;
+const clampFreeContent = ({ plan, works, services, reviews }) => {
+  if (plan !== "free") return { works, services, reviews };
 
-  if ((works?.length || 0) > FREE_LIMIT) {
-    return { field: "works", limit: FREE_LIMIT, current: works.length };
-  }
-  if ((services?.length || 0) > FREE_LIMIT) {
-    return { field: "services", limit: FREE_LIMIT, current: services.length };
-  }
-  if ((reviews?.length || 0) > FREE_LIMIT) {
-    return { field: "reviews", limit: FREE_LIMIT, current: reviews.length };
-  }
-  return null;
+  const safeArr = (a) => (Array.isArray(a) ? a : []).filter(Boolean);
+
+  return {
+    works: safeArr(works).slice(0, FREE_LIMIT),
+    services: safeArr(services).slice(0, FREE_LIMIT),
+    reviews: safeArr(reviews).slice(0, FREE_LIMIT),
+  };
+};
+
+/**
+ * Force free plan template to template-1 (never block saving).
+ */
+const normalizeTemplateForPlan = (plan, requestedTemplate) => {
+  const allowed = new Set(["template-1", "template-2", "template-3", "template-4", "template-5"]);
+  const t = String(requestedTemplate || "template-1");
+  if (!allowed.has(t)) return "template-1";
+  if (plan === "free") return "template-1";
+  return t; // plus/teams
 };
 
 /**
@@ -95,13 +97,6 @@ const TEAMS_PRICE_IDS = [
   process.env.STRIPE_PRICE_TEAMS_YEARLY,
 ].filter(Boolean);
 
-/**
- * Update Stripe Teams subscription quantity to match profile count (prorated).
- * We only do this if:
- * - plan === "teams"
- * - user has stripeSubscriptionId
- * - we can find the Teams subscription item in Stripe
- */
 const syncTeamsQuantityToStripe = async ({ user, desiredQuantity }) => {
   if (!user) throw new Error("Missing user");
   if (String(user.plan || "").toLowerCase() !== "teams") return { skipped: true, reason: "not_teams" };
@@ -110,7 +105,6 @@ const syncTeamsQuantityToStripe = async ({ user, desiredQuantity }) => {
 
   const qty = Math.max(1, Number(desiredQuantity || 1));
 
-  // Retrieve subscription with expanded items to locate teams base price item
   const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId, {
     expand: ["items.data.price"],
   });
@@ -121,11 +115,8 @@ const syncTeamsQuantityToStripe = async ({ user, desiredQuantity }) => {
     return priceId && TEAMS_PRICE_IDS.includes(priceId);
   });
 
-  if (!teamsItem?.id) {
-    throw new Error("Could not find Teams subscription item on Stripe subscription");
-  }
+  if (!teamsItem?.id) throw new Error("Could not find Teams subscription item on Stripe subscription");
 
-  // Update the subscription item quantity with proration
   await stripe.subscriptionItems.update(teamsItem.id, {
     quantity: qty,
     proration_behavior: "create_prorations",
@@ -140,8 +131,7 @@ const syncTeamsQuantityToStripe = async ({ user, desiredQuantity }) => {
  * ---------------------------------------------------------
  */
 
-// (COMPAT STUB) GET /api/business-card/me
-// Your new system has NO default profile; frontend should use /profiles and select one.
+// Legacy stub
 const getMyBusinessCard = async (req, res) => {
   return res.status(400).json({
     error: "No default profile. Use GET /api/business-card/profiles and pick a profile_slug.",
@@ -178,7 +168,7 @@ const getMyProfileBySlug = async (req, res) => {
   }
 };
 
-// POST /api/business-card/profiles  (create profile)
+// POST /api/business-card/profiles (create profile)
 const createMyProfile = async (req, res) => {
   let created = null;
 
@@ -193,10 +183,9 @@ const createMyProfile = async (req, res) => {
       return res.status(400).json({ error: "profile_slug must be at least 3 characters" });
     }
 
-    // Plan gate: max profiles
+    // ✅ Profile cap enforced ONLY here
     const count = await BusinessCard.countDocuments({ user: userId });
     const maxAllowed = maxProfilesForPlan(plan);
-
     if (count >= maxAllowed) {
       return upgradeRequired(res, {
         reason: "PROFILE_LIMIT",
@@ -206,38 +195,26 @@ const createMyProfile = async (req, res) => {
       });
     }
 
-    // GLOBAL slug uniqueness (critical for /u/:slug)
+    // ✅ GLOBAL slug uniqueness
     const slugTaken = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
-    if (slugTaken) {
-      return res.status(409).json({ error: "Profile slug already exists" });
-    }
+    if (slugTaken) return res.status(409).json({ error: "Profile slug already exists" });
 
-    const templateId = req.body.template_id || "template-1";
-    if (!isTemplateAllowed(plan, templateId)) {
-      return upgradeRequired(res, {
-        reason: "TEMPLATE_LOCKED",
-        plan,
-        allowedTemplates:
-          plan === "free"
-            ? ["template-1"]
-            : ["template-1", "template-2", "template-3", "template-4", "template-5"],
-      });
-    }
+    // ✅ Never 403 for template. Normalize instead.
+    const effectiveTemplate = normalizeTemplateForPlan(plan, req.body.template_id || "template-1");
 
     created = await BusinessCard.create({
       user: userId,
       profile_slug: slug,
-      template_id: templateId,
+      template_id: effectiveTemplate,
       business_card_name: req.body.business_card_name || "",
     });
 
-    // ✅ Teams billing: update quantity to new count (prorated)
+    // ✅ Teams billing: update quantity
     if (plan === "teams") {
       const newCount = await BusinessCard.countDocuments({ user: userId });
       try {
         await syncTeamsQuantityToStripe({ user: req.user, desiredQuantity: newCount });
       } catch (e) {
-        // Rollback DB change so billing never drifts
         try {
           await BusinessCard.deleteOne({ _id: created._id });
         } catch { }
@@ -251,7 +228,6 @@ const createMyProfile = async (req, res) => {
     return res.status(201).json({ data: created });
   } catch (err) {
     console.error("createMyProfile:", err);
-    // safety rollback if partially created
     if (created?._id) {
       try {
         await BusinessCard.deleteOne({ _id: created._id });
@@ -261,8 +237,7 @@ const createMyProfile = async (req, res) => {
   }
 };
 
-// (COMPAT STUB) PATCH /api/business-card/profiles/:slug/default
-// Not supported anymore. No default profile concept.
+// Legacy stub
 const setDefaultProfile = async (req, res) => {
   return res.status(400).json({
     error: "Default profile is not supported. Profiles are independent. Pick by profile_slug.",
@@ -287,16 +262,13 @@ const deleteMyProfile = async (req, res) => {
     if (!card) return res.status(404).json({ error: "Profile not found" });
 
     removedDoc = card.toObject();
-
     await BusinessCard.deleteOne({ _id: card._id });
 
-    // ✅ Teams billing: update quantity to new count (prorated)
     if (plan === "teams") {
       const newCount = await BusinessCard.countDocuments({ user: userId });
       try {
         await syncTeamsQuantityToStripe({ user: req.user, desiredQuantity: newCount });
       } catch (e) {
-        // rollback delete so billing doesn’t drift
         try {
           await BusinessCard.create(removedDoc);
         } catch { }
@@ -310,7 +282,6 @@ const deleteMyProfile = async (req, res) => {
     return res.json({ success: true });
   } catch (err) {
     console.error("deleteMyProfile:", err);
-    // attempt rollback if needed
     if (removedDoc && removedDoc._id) {
       try {
         const exists = await BusinessCard.findById(removedDoc._id).select("_id");
@@ -321,7 +292,8 @@ const deleteMyProfile = async (req, res) => {
   }
 };
 
-// POST /api/business-card  (upsert save, supports profile_slug)
+// POST /api/business-card (upsert save, supports profile_slug)
+// ✅ MUST ALWAYS SAVE FOR ALL PLANS
 const saveBusinessCard = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
@@ -329,25 +301,43 @@ const saveBusinessCard = async (req, res) => {
     const plan = getPlanFromReq(req);
     const userId = req.user._id;
 
-    const profile_slug = safeSlug(req.body.profile_slug);
-    if (!profile_slug || profile_slug.length < 3) {
-      return res.status(400).json({ error: "profile_slug is required and must be at least 3 chars" });
+    // ✅ Always fall back to main
+    const profile_slug = safeSlug(req.body.profile_slug || "main") || "main";
+
+    // ✅ Only enforce min length if it's NOT main fallback
+    // (main is 4 chars so it passes anyway; this prevents weird empty slugs from breaking saves)
+    if (profile_slug.length < 3) {
+      return res.status(400).json({ error: "profile_slug must be at least 3 chars" });
     }
 
-    // GLOBAL slug protection: if someone else owns this slug, block save
+    // ✅ GLOBAL slug uniqueness (different owners cannot share)
     const otherOwner = await BusinessCard.findOne({
       profile_slug,
       user: { $ne: userId },
     }).select("_id");
-    if (otherOwner) {
-      return res.status(409).json({ error: "Profile slug already exists" });
+    if (otherOwner) return res.status(409).json({ error: "Profile slug already exists" });
+
+    // Existing card?
+    const existingCard = await BusinessCard.findOne({ user: userId, profile_slug }).select("_id template_id");
+
+    // ✅ If NEW via upsert, enforce plan profile cap
+    if (!existingCard) {
+      const count = await BusinessCard.countDocuments({ user: userId });
+      const maxAllowed = maxProfilesForPlan(plan);
+      if (count >= maxAllowed) {
+        return upgradeRequired(res, {
+          reason: "PROFILE_LIMIT",
+          plan,
+          maxProfiles: maxAllowed,
+          currentProfiles: count,
+        });
+      }
     }
 
     // Arrays from FormData
-    const services = parseJsonArray(req.body.services, []);
-    const reviews = parseJsonArray(req.body.reviews, []);
+    let services = parseJsonArray(req.body.services, []);
+    let reviews = parseJsonArray(req.body.reviews, []);
 
-    // existing_works can come as repeated fields
     const existing_works = []
       .concat(req.body.existing_works || [])
       .flat()
@@ -369,60 +359,35 @@ const saveBusinessCard = async (req, res) => {
       avatar_url = await uploadToS3(f.buffer, key);
     }
 
-    // Upload new work images
-    const uploadedWorkUrls = [];
+    // Works: clamp BEFORE uploading to avoid wasting S3 uploads on free
     const workFiles = req.files?.works || [];
-    for (const f of workFiles) {
+    const maxWorks = plan === "free" ? FREE_LIMIT : Infinity;
+
+    let works = [...existing_works].filter(Boolean);
+    const remainingSlots = Math.max(0, maxWorks === Infinity ? workFiles.length : maxWorks - works.length);
+    const filesToUpload = plan === "free" ? workFiles.slice(0, remainingSlots) : workFiles;
+
+    const uploadedWorkUrls = [];
+    for (const f of filesToUpload) {
       const key = `works/${userId}/${Date.now()}-${Math.random().toString(16).slice(2)}-${f.originalname}`;
       const url = await uploadToS3(f.buffer, key);
       if (url) uploadedWorkUrls.push(url);
     }
 
-    const works = [...existing_works, ...uploadedWorkUrls];
+    works = [...works, ...uploadedWorkUrls];
 
-    // Plan enforcement: free limits for works/services/reviews
-    const limitHit = enforceFreeContentLimits({ plan, works, services, reviews });
-    if (limitHit) {
-      return upgradeRequired(res, {
-        reason: "SECTION_LIMIT",
-        plan,
-        ...limitHit,
-      });
-    }
+    // ✅ clamp free content
+    ({ works, services, reviews } = clampFreeContent({ plan, works, services, reviews }));
 
-    // Template gating
-    const requestedTemplate = req.body.template_id || "template-1";
-    if (!isTemplateAllowed(plan, requestedTemplate)) {
-      return upgradeRequired(res, {
-        reason: "TEMPLATE_LOCKED",
-        plan,
-        allowedTemplates:
-          plan === "free"
-            ? ["template-1"]
-            : ["template-1", "template-2", "template-3", "template-4", "template-5"],
-      });
-    }
-
-    // If there is no existing card with this slug, we are creating it on upsert.
-    const existingCard = await BusinessCard.findOne({ user: userId, profile_slug }).select("_id");
-    if (!existingCard) {
-      const count = await BusinessCard.countDocuments({ user: userId });
-      const maxAllowed = maxProfilesForPlan(plan);
-      if (count >= maxAllowed) {
-        return upgradeRequired(res, {
-          reason: "PROFILE_LIMIT",
-          plan,
-          maxProfiles: maxAllowed,
-          currentProfiles: count,
-        });
-      }
-    }
+    // ✅ normalize template (never 403)
+    const requestedTemplate = req.body.template_id || existingCard?.template_id || "template-1";
+    const effectiveTemplate = normalizeTemplateForPlan(plan, requestedTemplate);
 
     const update = {
       user: userId,
       profile_slug,
 
-      template_id: requestedTemplate,
+      template_id: effectiveTemplate,
 
       business_card_name: req.body.business_card_name || "",
       page_theme: req.body.page_theme || "light",
@@ -483,7 +448,14 @@ const saveBusinessCard = async (req, res) => {
       { new: true, upsert: true }
     );
 
-    return res.json({ data: saved });
+    return res.json({
+      data: saved,
+      normalized: {
+        plan,
+        template_id: effectiveTemplate,
+        limitsApplied: plan === "free",
+      },
+    });
   } catch (err) {
     console.error("saveBusinessCard:", err);
     return res.status(500).json({ error: "Failed to save business card" });
@@ -496,8 +468,6 @@ const saveBusinessCard = async (req, res) => {
  * ---------------------------------------------------------
  */
 
-// NEW: GET /api/business-card/public/:slug
-// This matches www.konarcard.com/u/:slug requirement (GLOBAL slug)
 const getPublicBySlug = async (req, res) => {
   try {
     const slug = safeSlug(req.params.slug);
@@ -513,7 +483,7 @@ const getPublicBySlug = async (req, res) => {
   }
 };
 
-// (COMPAT STUBS) Old username-based endpoints (not used in new /u/:slug system)
+// Deprecated username endpoints
 const getPublicByUsername = async (req, res) => {
   return res.status(400).json({
     error: "Username-based public profiles are deprecated. Use GET /api/business-card/public/:slug",
