@@ -2,15 +2,23 @@
 const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
+const QRCode = require("qrcode");
+
 const User = require("../models/user");
+const BusinessCard = require("../models/BusinessCard");
+const uploadToS3 = require("../utils/uploadToS3");
+
 const sendEmail = require("../utils/SendEmail");
 const { orderConfirmationTemplate } = require("../utils/emailTemplates");
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+// IMPORTANT: your public profile domain (what the QR should point to)
+const PUBLIC_PROFILE_DOMAIN =
+  process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
+
 /**
- * Map Stripe price IDs -> your internal plan + interval
- * (base subscription line item)
+ * Price mapping (base subscription)
  */
 const PRICE_TO_PLAN = {
   // PLUS
@@ -24,18 +32,12 @@ const PRICE_TO_PLAN = {
   [process.env.STRIPE_PRICE_TEAMS_YEARLY]: { plan: "teams", interval: "yearly" },
 };
 
-/**
- * Add-on (optional): extra profiles for PLUS
- */
 const EXTRA_PROFILE_PRICE_IDS = [
   process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
   process.env.STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY,
   process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY,
 ].filter(Boolean);
 
-/**
- * TEAMS price IDs list (used to find Teams item + quantity)
- */
 const TEAMS_PRICE_IDS = [
   process.env.STRIPE_PRICE_TEAMS_MONTHLY,
   process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
@@ -46,7 +48,17 @@ function isActiveStatus(status) {
   return status === "active" || status === "trialing";
 }
 
-// Update by customerId (fallback), with safe $set / $unset handling
+/**
+ * IMPORTANT: BusinessCard schema requires /^[a-z0-9-]+$/
+ * (hyphens only, NO underscore/dot)
+ */
+function safeProfileSlug(v) {
+  return String(v || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "");
+}
+
 async function updateUserByCustomer(customerId, { set = {}, unset = {} }) {
   if (!customerId) return;
 
@@ -58,7 +70,6 @@ async function updateUserByCustomer(customerId, { set = {}, unset = {} }) {
   await User.findOneAndUpdate({ stripeCustomerId: customerId }, update, { new: true });
 }
 
-// Update by userId (best), with safe $set / $unset handling
 async function updateUserById(userId, { set = {}, unset = {} }) {
   if (!userId) return;
 
@@ -71,18 +82,12 @@ async function updateUserById(userId, { set = {}, unset = {} }) {
 }
 
 /**
- * Extract:
- * - plan + interval (plus/teams)
- * - extraProfilesQty (plus add-on)
- * - teamsProfilesQty (teams subscription item quantity)
- * - store teams item ids for reconciliation/debug
- *
- * NOTE: expects subscription expanded with items.data.price
+ * Extract entitlements from subscription (expanded with items.data.price)
  */
 function extractEntitlementsFromSubscription(sub) {
   const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
 
-  // Base plan: find first item matching PRICE_TO_PLAN
+  // Base plan
   let plan = null;
   let interval = null;
 
@@ -96,7 +101,7 @@ function extractEntitlementsFromSubscription(sub) {
     }
   }
 
-  // PLUS add-on quantity
+  // PLUS add-on
   let extraProfilesQty = 0;
   if (EXTRA_PROFILE_PRICE_IDS.length) {
     for (const it of items) {
@@ -107,10 +112,10 @@ function extractEntitlementsFromSubscription(sub) {
     }
   }
 
-  // TEAMS quantity (the teams base line item quantity)
+  // TEAMS quantity (seats/profiles)
   let teamsProfilesQty = 1;
-  let teamsStripeItemId = undefined;
-  let teamsStripePriceId = undefined;
+  let teamsStripeItemId;
+  let teamsStripePriceId;
 
   if (TEAMS_PRICE_IDS.length) {
     const teamsItem = items.find((it) => {
@@ -129,12 +134,48 @@ function extractEntitlementsFromSubscription(sub) {
 }
 
 /**
- * ✅ IMPORTANT:
- * This file is now a SINGLE handler function.
- * index.js mounts it like:
- *   app.post("/api/checkout/webhook", express.raw({type:"application/json"}), stripeWebhookHandler)
- *
- * So we MUST export (req, res) directly and NOT use router.post() here.
+ * Create BusinessCard for claimed slug (idempotent)
+ */
+async function ensureClaimedProfile({ userId, claimedSlug }) {
+  const slug = safeProfileSlug(claimedSlug);
+  if (!slug || slug.length < 3) return { created: false, reason: "invalid_slug" };
+
+  // Already exists? (webhooks can retry)
+  const existing = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
+  if (existing) return { created: false, reason: "already_exists" };
+
+  // Create QR -> upload to S3
+  let qrUrl = "";
+  const publicUrl = `${PUBLIC_PROFILE_DOMAIN}/u/${slug}`;
+
+  try {
+    const pngBuffer = await QRCode.toBuffer(publicUrl, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      width: 512,
+    });
+
+    const key = `qr-codes/${slug}-${Date.now()}.png`;
+    qrUrl = await uploadToS3(pngBuffer, key, "image/png");
+  } catch (e) {
+    // QR is nice-to-have; profile can still exist without it
+    qrUrl = "";
+  }
+
+  const created = await BusinessCard.create({
+    user: userId,
+    profile_slug: slug,
+    template_id: "template-1",
+    business_card_name: "",
+    qr_code_url: qrUrl,
+  });
+
+  return { created: true, id: created?._id, slug, qrUrl };
+}
+
+/**
+ * Export as a SINGLE handler function
+ * Mounted in index.js at POST /api/checkout/webhook with express.raw()
  */
 module.exports = async function stripeWebhookHandler(req, res) {
   if (!endpointSecret) {
@@ -146,7 +187,6 @@ module.exports = async function stripeWebhookHandler(req, res) {
 
   let event;
   try {
-    // req.body is RAW Buffer because index.js uses express.raw()
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
     console.error("⚠️ Stripe webhook signature error:", err.message);
@@ -154,13 +194,13 @@ module.exports = async function stripeWebhookHandler(req, res) {
   }
 
   try {
-    // -------------------------
+    // ---------------------------------------
     // checkout.session.completed
-    // -------------------------
+    // ---------------------------------------
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      // A) Subscription checkout
+      // Subscription
       if (session.mode === "subscription") {
         const customerId = session.customer;
         const subscriptionId = session.subscription;
@@ -171,7 +211,9 @@ module.exports = async function stripeWebhookHandler(req, res) {
         });
 
         const status = sub.status;
-        const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
+        const currentPeriodEnd = sub.current_period_end
+          ? new Date(sub.current_period_end * 1000)
+          : undefined;
 
         const extracted = extractEntitlementsFromSubscription(sub);
 
@@ -182,43 +224,47 @@ module.exports = async function stripeWebhookHandler(req, res) {
           currentPeriodEnd,
           isSubscribed: isActiveStatus(status),
 
-          // PLUS add-on entitlement
           extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
+
+          // Teams fields (even if not teams we normalize below)
+          teamsProfilesQty: extracted.plan === "teams"
+            ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+            : 1,
         };
 
-        // Only set plan fields if known
         if (extracted.plan) set.plan = extracted.plan;
         if (extracted.interval) set.planInterval = extracted.interval;
 
-        // TEAMS entitlement fields
         if (extracted.plan === "teams") {
-          set.teamsProfilesQty = Math.max(1, Number(extracted.teamsProfilesQty || 1));
           if (extracted.teamsStripeItemId) set.teamsStripeItemId = extracted.teamsStripeItemId;
           if (extracted.teamsStripePriceId) set.teamsStripePriceId = extracted.teamsStripePriceId;
-        } else {
-          // not teams => normalize teams fields
-          set.teamsProfilesQty = 1;
         }
 
-        // If now subscribed, clear trial
-        const unset = isActiveStatus(status)
-          ? { trialExpires: "" }
-          : {};
+        const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
 
         if (extracted.plan !== "teams") {
-          // clear teams stripe metadata if not teams
           unset.teamsStripeItemId = "";
           unset.teamsStripePriceId = "";
         }
 
         if (userId) await updateUserById(userId, { set, unset });
         else await updateUserByCustomer(customerId, { set, unset });
+
+        // ✅ Create the claimed profile AFTER user is set to teams
+        const claimedSlug = session.metadata?.claimedSlug;
+        const checkoutType = session.metadata?.checkoutType;
+
+        if (checkoutType === "teams_add_profile" && userId && claimedSlug) {
+          await ensureClaimedProfile({ userId, claimedSlug });
+        }
       }
 
-      // B) One-time payment checkout (NFC cards)
+      // One-time NFC cards payment
       if (session.mode === "payment") {
         const customerEmail = session.customer_details?.email;
-        const amountPaid = session.amount_total ? (session.amount_total / 100).toFixed(2) : null;
+        const amountPaid = session.amount_total
+          ? (session.amount_total / 100).toFixed(2)
+          : null;
 
         await sendEmail(
           process.env.EMAIL_USER,
@@ -236,18 +282,19 @@ module.exports = async function stripeWebhookHandler(req, res) {
       }
     }
 
-    // -------------------------
-    // customer.subscription.created / updated
-    // -------------------------
+    // ---------------------------------------
+    // subscription created / updated
+    // ---------------------------------------
     if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
-      const sub = event.data.object;
+      const subObj = event.data.object;
 
-      const customerId = sub.customer;
-      const subscriptionId = sub.id;
-      const status = sub.status;
-      const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
+      const customerId = subObj.customer;
+      const subscriptionId = subObj.id;
+      const status = subObj.status;
+      const currentPeriodEnd = subObj.current_period_end
+        ? new Date(subObj.current_period_end * 1000)
+        : undefined;
 
-      // Retrieve expanded so we can read price ids + quantities
       const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
         expand: ["items.data.price"],
       });
@@ -261,17 +308,17 @@ module.exports = async function stripeWebhookHandler(req, res) {
         isSubscribed: isActiveStatus(status),
 
         extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
+        teamsProfilesQty: extracted.plan === "teams"
+          ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+          : 1,
       };
 
       if (extracted.plan) set.plan = extracted.plan;
       if (extracted.interval) set.planInterval = extracted.interval;
 
       if (extracted.plan === "teams") {
-        set.teamsProfilesQty = Math.max(1, Number(extracted.teamsProfilesQty || 1));
         if (extracted.teamsStripeItemId) set.teamsStripeItemId = extracted.teamsStripeItemId;
         if (extracted.teamsStripePriceId) set.teamsStripePriceId = extracted.teamsStripePriceId;
-      } else {
-        set.teamsProfilesQty = 1;
       }
 
       const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
@@ -283,9 +330,9 @@ module.exports = async function stripeWebhookHandler(req, res) {
       await updateUserByCustomer(customerId, { set, unset });
     }
 
-    // -------------------------
+    // ---------------------------------------
     // invoice.paid
-    // -------------------------
+    // ---------------------------------------
     if (event.type === "invoice.paid") {
       const invoice = event.data.object;
       const customerId = invoice.customer;
@@ -299,9 +346,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
             expand: ["items.data.price"],
           });
           extracted = extractEntitlementsFromSubscription(fullSub);
-        } catch {
-          // ignore; still mark active
-        }
+        } catch { }
       }
 
       const set = {
@@ -309,26 +354,20 @@ module.exports = async function stripeWebhookHandler(req, res) {
         subscriptionStatus: "active",
         isSubscribed: true,
         extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
+        teamsProfilesQty: extracted.plan === "teams"
+          ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+          : 1,
       };
 
       if (extracted.plan) set.plan = extracted.plan;
       if (extracted.interval) set.planInterval = extracted.interval;
 
-      if (extracted.plan === "teams") {
-        set.teamsProfilesQty = Math.max(1, Number(extracted.teamsProfilesQty || 1));
-      } else {
-        set.teamsProfilesQty = 1;
-      }
-
-      await updateUserByCustomer(customerId, {
-        set,
-        unset: { trialExpires: "" },
-      });
+      await updateUserByCustomer(customerId, { set, unset: { trialExpires: "" } });
     }
 
-    // -------------------------
+    // ---------------------------------------
     // invoice.payment_failed
-    // -------------------------
+    // ---------------------------------------
     if (event.type === "invoice.payment_failed") {
       const invoice = event.data.object;
       const customerId = invoice.customer;
@@ -343,12 +382,12 @@ module.exports = async function stripeWebhookHandler(req, res) {
       });
     }
 
-    // -------------------------
+    // ---------------------------------------
     // customer.subscription.deleted
-    // -------------------------
+    // ---------------------------------------
     if (event.type === "customer.subscription.deleted") {
-      const sub = event.data.object;
-      const customerId = sub.customer;
+      const subObj = event.data.object;
+      const customerId = subObj.customer;
 
       await updateUserByCustomer(customerId, {
         set: {
@@ -356,10 +395,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
           planInterval: "monthly",
           subscriptionStatus: "canceled",
           isSubscribed: false,
-
           extraProfilesQty: 0,
-
-          // reset teams entitlement
           teamsProfilesQty: 1,
         },
         unset: {

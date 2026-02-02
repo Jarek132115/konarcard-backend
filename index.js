@@ -15,9 +15,8 @@ const contactRoutes = require("./routes/contactRoutes");
 const businessCardRoutes = require("./routes/businessCardRoutes");
 const authRoutes = require("./routes/authRoutes");
 
-// ✅ your existing webhook handler file
-// IMPORTANT: it must export a function(req,res) OR an express router that handles POST "/"
-const stripeWebhookHandler = require("./routes/webHook");
+// ✅ Stripe webhook router
+const stripeWebhookRouter = require("./routes/webHook");
 
 const app = express();
 
@@ -37,7 +36,7 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true); // server-to-server / curl
+    if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS blocked for origin: ${origin}`), false);
   },
@@ -50,21 +49,16 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
-/* -------------------- Stripe Webhook (RAW) MUST come before JSON -------------------- */
+/* -------------------- Stripe Webhook MUST come before JSON -------------------- */
 /**
- * Stripe signature verification requires RAW body.
- * This endpoint should be configured in Stripe as:
- *   https://YOUR_BACKEND/api/checkout/webhook
+ * Stripe is currently POSTing to /webhook/stripe (your logs show 404 there).
+ * We mount the webhook router exactly on that path.
  *
- * NOTE:
- * - Stripe is server-to-server so CORS is irrelevant here.
- * - express.raw must be used here before express.json().
+ * IMPORTANT:
+ * - Your routes/webHook.js already uses express.raw(...) on its POST handler.
+ * - So we DO NOT add express.raw() here (avoid double-parsing).
  */
-app.post(
-  "/api/checkout/webhook",
-  express.raw({ type: "application/json" }),
-  stripeWebhookHandler
-);
+app.use("/webhook/stripe", stripeWebhookRouter);
 
 /* -------------------- Parsers -------------------- */
 app.use(express.json());

@@ -3,33 +3,30 @@ const express = require("express");
 const router = express.Router();
 const multer = require("multer");
 
-// ✅ Use your real auth middleware (single source of truth)
 const { requireAuth } = require("../helpers/auth");
 
-// ✅ Controller (matches the version you pasted)
 const {
   // protected
-  getMyBusinessCard, // compatibility stub (no default profile)
+  getMyBusinessCard,
   saveBusinessCard,
   getMyProfiles,
   getMyProfileBySlug,
   createMyProfile,
-  setDefaultProfile, // compatibility stub
+  setDefaultProfile,
   deleteMyProfile,
 
   // public
   getPublicBySlug,
-  getPublicByUsername, // deprecated stub
-  getPublicByUsernameAndSlug, // deprecated stub
+  getPublicByUsername,
+  getPublicByUsernameAndSlug,
 } = require("../controllers/businessCardController");
 
-/* =========================================================
-   MULTER (memory) — production safe
-   - images only
-   - reasonable limits
-   - fields match controller expectations
-   ========================================================= */
+// ✅ Model needed for slug availability check
+const BusinessCard = require("../models/BusinessCard");
 
+/* =========================================================
+   MULTER (memory)
+   ========================================================= */
 const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
@@ -43,8 +40,8 @@ const upload = multer({
   storage,
   fileFilter,
   limits: {
-    files: 1 + 1 + 20, // cover + avatar + works
-    fileSize: 10 * 1024 * 1024, // 10MB per file
+    files: 1 + 1 + 20,
+    fileSize: 10 * 1024 * 1024,
   },
 }).fields([
   { name: "cover_photo", maxCount: 1 },
@@ -57,33 +54,50 @@ const upload = multer({
    Base path: /api/business-card
    ========================================================= */
 
-// Legacy compatibility (old frontend may still call /me)
+// Legacy compatibility
 router.get("/me", requireAuth, getMyBusinessCard);
 
-// Multi-profile system (protected)
+// Multi-profile (protected)
 router.get("/profiles", requireAuth, getMyProfiles);
 router.get("/profiles/:slug", requireAuth, getMyProfileBySlug);
 
-// Create profile (JSON body)
+// Create profile
 router.post("/profiles", requireAuth, createMyProfile);
 
 // Delete profile
 router.delete("/profiles/:slug", requireAuth, deleteMyProfile);
 
-// Legacy default endpoint (explicitly not supported; returns 400)
+// Legacy default endpoint (still returns 400 by design)
 router.patch("/profiles/:slug/default", requireAuth, setDefaultProfile);
 
-// Save profile (multipart/form-data)
+// Save profile (multipart)
 router.post("/", requireAuth, upload, saveBusinessCard);
+
+/* =========================================================
+   ✅ SLUG AVAILABILITY CHECK (PUBLIC)
+   GET /api/business-card/slug-available/:slug
+   ========================================================= */
+router.get("/slug-available/:slug", async (req, res) => {
+  try {
+    const slug = String(req.params.slug || "").trim().toLowerCase();
+    if (!slug) return res.status(400).json({ error: "slug required" });
+
+    const exists = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
+    return res.json({ available: !exists });
+  } catch (err) {
+    console.error("slug-available:", err);
+    return res.status(500).json({ error: "Failed to check slug" });
+  }
+});
 
 /* =========================================================
    PUBLIC
    ========================================================= */
 
-// ✅ Public profile by GLOBAL slug for www.konarcard.com/u/:slug
+// Public by GLOBAL slug
 router.get("/public/:slug", getPublicBySlug);
 
-// Deprecated username endpoints (kept for compatibility; return 400)
+// Username-based public endpoints (RESTORED and ACTIVE)
 router.get("/by_username/:username", getPublicByUsername);
 router.get("/by_username/:username/:slug", getPublicByUsernameAndSlug);
 
