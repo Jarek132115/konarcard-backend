@@ -1,5 +1,6 @@
 // backend/controllers/businessCardController.js
 const BusinessCard = require("../models/BusinessCard");
+const User = require("../models/user");
 const uploadToS3 = require("../utils/uploadToS3");
 
 const Stripe = require("stripe");
@@ -17,7 +18,6 @@ const safeSlug = (v) =>
     .toLowerCase()
     // allow: letters, numbers, dot, underscore, hyphen
     .replace(/[^a-z0-9._-]/g, "") || "main";
-
 
 const parseJsonArray = (v, fallback = []) => {
   try {
@@ -461,11 +461,7 @@ const saveBusinessCard = async (req, res) => {
     if (cover_photo_url) update.cover_photo = cover_photo_url;
     if (avatar_url) update.avatar = avatar_url;
 
-    const saved = await BusinessCard.findOneAndUpdate(
-      targetQuery,
-      { $set: update },
-      { new: true, upsert: !existingCard } // only upsert if user truly has no profile at all
-    );
+    const saved = await BusinessCard.findOneAndUpdate(targetQuery, { $set: update }, { new: true, upsert: !existingCard });
 
     return res.json({
       data: saved,
@@ -482,13 +478,13 @@ const saveBusinessCard = async (req, res) => {
   }
 };
 
-
 /**
  * ---------------------------------------------------------
  * PUBLIC
  * ---------------------------------------------------------
  */
 
+// ✅ Public profile by GLOBAL slug (works with your "create profile" global-unique slugs)
 const getPublicBySlug = async (req, res) => {
   try {
     const slug = safeSlug(req.params.slug);
@@ -504,19 +500,65 @@ const getPublicBySlug = async (req, res) => {
   }
 };
 
-// Deprecated username endpoints
+/**
+ * ✅ RESTORED username public endpoints (needed by frontend UserPage.jsx)
+ * - /u/:username => calls /api/business-card/by_username/:username
+ * - /u/:username/:slug => calls /api/business-card/by_username/:username/:slug
+ *
+ * Note: This does NOT conflict with global slug pages. It simply supports both.
+ */
+
+// GET /api/business-card/by_username/:username
 const getPublicByUsername = async (req, res) => {
-  return res.status(400).json({
-    error: "Username-based public profiles are deprecated. Use GET /api/business-card/public/:slug",
-    code: "DEPRECATED",
-  });
+  try {
+    const username = String(req.params.username || "").trim();
+    if (!username) return res.status(400).json({ error: "username required" });
+
+    // Find user by username (case-insensitive)
+    const user = await User.findOne({
+      username: { $regex: new RegExp(`^${username}$`, "i") },
+    }).select("_id username");
+
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Prefer "main" profile if it exists, else newest updated profile
+    const main = await BusinessCard.findOne({ user: user._id, profile_slug: "main" });
+    if (main) return res.json(main);
+
+    const newest = await BusinessCard.findOne({ user: user._id }).sort({ updatedAt: -1 });
+    if (!newest) return res.status(404).json({ error: "Business card not found" });
+
+    return res.json(newest);
+  } catch (err) {
+    console.error("getPublicByUsername:", err);
+    return res.status(500).json({ error: "Failed to fetch business card" });
+  }
 };
 
+// GET /api/business-card/by_username/:username/:slug
 const getPublicByUsernameAndSlug = async (req, res) => {
-  return res.status(400).json({
-    error: "Username-based public profiles are deprecated. Use GET /api/business-card/public/:slug",
-    code: "DEPRECATED",
-  });
+  try {
+    const username = String(req.params.username || "").trim();
+    if (!username) return res.status(400).json({ error: "username required" });
+
+    const slug = safeSlug(req.params.slug);
+    if (!slug) return res.status(400).json({ error: "slug required" });
+
+    // Find user by username (case-insensitive)
+    const user = await User.findOne({
+      username: { $regex: new RegExp(`^${username}$`, "i") },
+    }).select("_id username");
+
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const card = await BusinessCard.findOne({ user: user._id, profile_slug: slug });
+    if (!card) return res.status(404).json({ error: "Business card not found" });
+
+    return res.json(card);
+  } catch (err) {
+    console.error("getPublicByUsernameAndSlug:", err);
+    return res.status(500).json({ error: "Failed to fetch business card" });
+  }
 };
 
 module.exports = {
