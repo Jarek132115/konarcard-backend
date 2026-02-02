@@ -3,12 +3,7 @@ const express = require("express");
 const passport = require("passport");
 const jwt = require("jsonwebtoken");
 
-const User = require("../models/user");
-const BusinessCard = require("../models/BusinessCard");
-const Service = require("../models/Service");
-const Work = require("../models/Work");
-
-const { requireAuth } = require("../helpers/auth"); // ✅ ADD THIS
+const { requireAuth } = require("../helpers/auth");
 
 const {
     test,
@@ -20,10 +15,11 @@ const {
     verifyEmailCode,
     resendVerificationCode,
     forgotPassword,
+    resetPassword,
     updateProfile,
     deleteAccount,
 
-    // ✅ Trial + Sync
+    // Trial + Sync
     startTrial,
     syncSubscriptions,
 
@@ -55,7 +51,9 @@ const signToken = (user) => {
 // ==============================
 router.get("/", test);
 
-// ✅ Claim link (availability check when not logged in, finalize when logged in)
+// ✅ Claim link
+// - no token => availability check
+// - token => finalise claim (creates first profile if none)
 router.post("/claim-link", claimLink);
 
 router.post("/register", registerUser);
@@ -68,6 +66,7 @@ router.post("/logout", logoutUser);
 router.post("/verify-email", verifyEmailCode);
 router.post("/resend-code", resendVerificationCode);
 router.post("/forgot-password", forgotPassword);
+router.post("/reset-password/:token", resetPassword);
 
 // ✅ PROTECT: profile update/delete must be authenticated
 router.put("/update-profile", requireAuth, updateProfile);
@@ -82,7 +81,7 @@ router.get("/subscription-status", requireAuth, checkSubscriptionStatus);
 router.post("/billing-portal", requireAuth, createBillingPortal);
 
 // ==============================
-// ✅ TRIAL + SYNC ROUTES (PROTECTED)
+// TRIAL + SYNC ROUTES (PROTECTED)
 // ==============================
 router.post("/start-trial", requireAuth, startTrial);
 router.post("/me/sync-subscriptions", requireAuth, syncSubscriptions);
@@ -93,7 +92,7 @@ router.post("/me/sync-subscriptions", requireAuth, syncSubscriptions);
 router.post("/contact", submitContactForm);
 
 // ==============================
-// ✅ GOOGLE OAUTH (Passport)
+// GOOGLE OAUTH (Passport)
 // ==============================
 router.get(
     "/auth/google",
@@ -127,7 +126,7 @@ router.get(
 );
 
 // ==============================
-// ✅ FACEBOOK OAUTH (Passport)
+// FACEBOOK OAUTH (Passport)
 // ==============================
 router.get(
     "/auth/facebook",
@@ -160,37 +159,15 @@ router.get(
     }
 );
 
-// ==============================
-// PUBLIC PROFILE (by slug)
-// ==============================
-router.get("/public_profile/:slug", async (req, res) => {
-    try {
-        const slug = req.params.slug;
-
-        const user = await User.findOne({ slug });
-        if (!user) return res.status(404).json({ error: "User not found" });
-
-        const [businessCard, services, works] = await Promise.all([
-            BusinessCard.findOne({ user: user._id }),
-            Service.find({ user: user._id }),
-            Work.find({ user: user._id }),
-        ]);
-
-        res.json({
-            user: {
-                name: user.name,
-                avatar: user.avatar || null,
-                bio: user.bio || "",
-                job_title: user.job_title || "",
-            },
-            businessCard,
-            services,
-            works,
-        });
-    } catch (err) {
-        console.error("Public profile fetch error:", err);
-        res.status(500).json({ error: "Server error fetching profile" });
-    }
-});
+/**
+ * ✅ IMPORTANT:
+ * We REMOVED the old /public_profile/:slug endpoint from authRoutes
+ * because:
+ * - Your public profiles are now GLOBAL slugs at /u/:slug
+ * - Public profile data must come from BusinessCard.profile_slug
+ *
+ * Public profile API is now:
+ * - GET /api/business-card/public/:slug   (in businessCardRoutes.js)
+ */
 
 module.exports = router;

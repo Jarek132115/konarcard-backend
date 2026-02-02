@@ -2,50 +2,36 @@
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
-const jwt = require("jsonwebtoken");
 
-const User = require("../models/user");
-const { getTokenFromReq } = require("../helpers/auth");
+// ✅ Use your real auth middleware (single source of truth)
+const { requireAuth } = require("../helpers/auth");
 
-// ✅ Controller (the new file you replaced)
-const bc = require("../controllers/businessCardController");
+// ✅ Controller (matches the version you pasted)
+const {
+  // protected
+  getMyBusinessCard, // compatibility stub (no default profile)
+  saveBusinessCard,
+  getMyProfiles,
+  getMyProfileBySlug,
+  createMyProfile,
+  setDefaultProfile, // compatibility stub
+  deleteMyProfile,
 
-/**
- * -----------------------------
- * Auth middleware (hydrates req.user)
- * -----------------------------
- */
-const requireAuth = async (req, res, next) => {
-  try {
-    const token = getTokenFromReq(req);
-    if (!token) return res.status(401).json({ error: "Unauthorized" });
+  // public
+  getPublicBySlug,
+  getPublicByUsername, // deprecated stub
+  getPublicByUsernameAndSlug, // deprecated stub
+} = require("../controllers/businessCardController");
 
-    let decoded;
-    try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET);
-    } catch {
-      return res.status(401).json({ error: "Invalid token" });
-    }
+/* =========================================================
+   MULTER (memory) — production safe
+   - images only
+   - reasonable limits
+   - fields match controller expectations
+   ========================================================= */
 
-    const user = await User.findById(decoded.id);
-    if (!user) return res.status(401).json({ error: "User not found" });
-
-    req.user = user;
-    return next();
-  } catch (err) {
-    console.error("requireAuth error:", err);
-    return res.status(500).json({ error: "Auth failed" });
-  }
-};
-
-/**
- * -----------------------------
- * Multer (memory) for images
- * - Accept cover_photo, avatar
- * - Accept works (new) and work_images (legacy)
- * -----------------------------
- */
 const storage = multer.memoryStorage();
+
 const fileFilter = (req, file, cb) => {
   if (!file?.mimetype?.startsWith("image/")) {
     return cb(new Error("Only image uploads are allowed."), false);
@@ -58,75 +44,47 @@ const upload = multer({
   fileFilter,
   limits: {
     files: 1 + 1 + 20, // cover + avatar + works
-    fileSize: 10 * 1024 * 1024, // 10MB each
+    fileSize: 10 * 1024 * 1024, // 10MB per file
   },
 }).fields([
   { name: "cover_photo", maxCount: 1 },
   { name: "avatar", maxCount: 1 },
-  { name: "works", maxCount: 10 }, // new
-  { name: "work_images", maxCount: 10 }, // legacy
+  { name: "works", maxCount: 20 },
 ]);
 
-/**
- * =========================================================
- * PROTECTED
- * =========================================================
- */
+/* =========================================================
+   ROUTES
+   Base path: /api/business-card
+   ========================================================= */
 
-// Default card for logged-in user
-router.get("/me", requireAuth, bc.getMyBusinessCard);
+// Legacy compatibility (old frontend may still call /me)
+router.get("/me", requireAuth, getMyBusinessCard);
 
-// Save/upsert (supports profile_slug)
-router.post("/", requireAuth, upload, bc.saveBusinessCard);
+// Multi-profile system (protected)
+router.get("/profiles", requireAuth, getMyProfiles);
+router.get("/profiles/:slug", requireAuth, getMyProfileBySlug);
 
-// Multi-profile management
-router.get("/profiles", requireAuth, bc.getMyProfiles);
-router.get("/profiles/:slug", requireAuth, bc.getMyProfileBySlug);
-router.post("/profiles", requireAuth, bc.createMyProfile);
-router.patch("/profiles/:slug/default", requireAuth, bc.setDefaultProfile);
-router.delete("/profiles/:slug", requireAuth, bc.deleteMyProfile);
+// Create profile (JSON body)
+router.post("/profiles", requireAuth, createMyProfile);
 
-/**
- * =========================================================
- * PUBLIC
- * =========================================================
- */
-router.get("/by_username/:username", bc.getPublicByUsername);
-router.get("/by_username/:username/:slug", bc.getPublicByUsernameAndSlug);
+// Delete profile
+router.delete("/profiles/:slug", requireAuth, deleteMyProfile);
 
-/**
- * =========================================================
- * LEGACY COMPAT (safe)
- * =========================================================
- */
+// Legacy default endpoint (explicitly not supported; returns 400)
+router.patch("/profiles/:slug/default", requireAuth, setDefaultProfile);
 
-// Legacy endpoint used by older frontend code (returns card object directly)
-router.get("/my_card", requireAuth, async (req, res) => {
-  try {
-    const card = await (async () => {
-      // reuse controller behavior
-      // controller returns { data: card }
-      let jsonResult;
-      const fakeRes = {
-        json: (obj) => (jsonResult = obj),
-        status: () => fakeRes,
-      };
-      await bc.getMyBusinessCard(req, fakeRes);
-      return jsonResult?.data ?? null;
-    })();
+// Save profile (multipart/form-data)
+router.post("/", requireAuth, upload, saveBusinessCard);
 
-    if (!card) return res.status(404).json({ error: "Business card not found" });
-    return res.json(card);
-  } catch (err) {
-    console.error("legacy /my_card error:", err);
-    return res.status(500).json({ error: "Failed to fetch business card" });
-  }
-});
+/* =========================================================
+   PUBLIC
+   ========================================================= */
 
-// Legacy create endpoint (forces main profile, still requires auth)
-router.post("/create_business_card", requireAuth, upload, async (req, res) => {
-  req.body.profile_slug = "main";
-  return bc.saveBusinessCard(req, res);
-});
+// ✅ Public profile by GLOBAL slug for www.konarcard.com/u/:slug
+router.get("/public/:slug", getPublicBySlug);
+
+// Deprecated username endpoints (kept for compatibility; return 400)
+router.get("/by_username/:username", getPublicByUsername);
+router.get("/by_username/:username/:slug", getPublicByUsernameAndSlug);
 
 module.exports = router;

@@ -1,16 +1,21 @@
 // backend/controllers/businessCardController.js
 const BusinessCard = require("../models/BusinessCard");
-const User = require("../models/user");
 const uploadToS3 = require("../utils/uploadToS3");
 
+const Stripe = require("stripe");
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+
 /**
+ * ---------------------------------------------------------
  * Helpers
+ * ---------------------------------------------------------
  */
+
 const safeSlug = (v) =>
   String(v || "")
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9._-]/g, "") || "main";
+    .replace(/[^a-z0-9-]/g, ""); // keep only a-z 0-9 hyphen (match schema intent)
 
 const parseJsonArray = (v, fallback = []) => {
   try {
@@ -31,37 +36,117 @@ const asBool = (v, defaultVal = true) => {
   return defaultVal;
 };
 
-const pickDefaultCard = async (userId) => {
-  // 1) is_default
-  let card = await BusinessCard.findOne({ user: userId, is_default: true });
-  if (card) return card;
+const getPlanFromReq = (req) => {
+  const plan = String(req.user?.plan || "free").toLowerCase();
+  if (plan === "plus" || plan === "teams") return plan;
+  return "free";
+};
 
-  // 2) slug=main
-  card = await BusinessCard.findOne({ user: userId, profile_slug: "main" });
-  if (card) return card;
+const FREE_LIMIT = 6;
 
-  // 3) newest
-  card = await BusinessCard.findOne({ user: userId }).sort({ updatedAt: -1 });
-  return card || null;
+const isTemplateAllowed = (plan, templateId) => {
+  const t = String(templateId || "template-1");
+  const allowed = new Set(["template-1", "template-2", "template-3", "template-4", "template-5"]);
+  if (!allowed.has(t)) return false;
+  if (plan === "free") return t === "template-1";
+  return true; // plus / teams
+};
+
+const maxProfilesForPlan = (plan) => {
+  if (plan === "teams") return Infinity;
+  // per your requirement: free and plus can have 1 profile only
+  return 1;
+};
+
+const upgradeRequired = (res, payload = {}) => {
+  return res.status(403).json({
+    code: "UPGRADE_REQUIRED",
+    ...payload,
+  });
 };
 
 /**
- * =========================================================
- * PROTECTED (requireAuth)
- * =========================================================
+ * Enforce Free limits (works/services/reviews)
+ */
+const enforceFreeContentLimits = ({ plan, works, services, reviews }) => {
+  if (plan !== "free") return null;
+
+  if ((works?.length || 0) > FREE_LIMIT) {
+    return { field: "works", limit: FREE_LIMIT, current: works.length };
+  }
+  if ((services?.length || 0) > FREE_LIMIT) {
+    return { field: "services", limit: FREE_LIMIT, current: services.length };
+  }
+  if ((reviews?.length || 0) > FREE_LIMIT) {
+    return { field: "reviews", limit: FREE_LIMIT, current: reviews.length };
+  }
+  return null;
+};
+
+/**
+ * ---------------------------------------------------------
+ * Teams billing helpers
+ * ---------------------------------------------------------
  */
 
-// GET /api/business-card/me
-const getMyBusinessCard = async (req, res) => {
-  try {
-    if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
+const TEAMS_PRICE_IDS = [
+  process.env.STRIPE_PRICE_TEAMS_MONTHLY,
+  process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
+  process.env.STRIPE_PRICE_TEAMS_YEARLY,
+].filter(Boolean);
 
-    const card = await pickDefaultCard(req.user._id);
-    return res.json({ data: card });
-  } catch (err) {
-    console.error("getMyBusinessCard:", err);
-    return res.status(500).json({ error: "Failed to fetch business card" });
+/**
+ * Update Stripe Teams subscription quantity to match profile count (prorated).
+ * We only do this if:
+ * - plan === "teams"
+ * - user has stripeSubscriptionId
+ * - we can find the Teams subscription item in Stripe
+ */
+const syncTeamsQuantityToStripe = async ({ user, desiredQuantity }) => {
+  if (!user) throw new Error("Missing user");
+  if (String(user.plan || "").toLowerCase() !== "teams") return { skipped: true, reason: "not_teams" };
+  if (!user.stripeSubscriptionId) throw new Error("Missing stripeSubscriptionId for Teams user");
+  if (!TEAMS_PRICE_IDS.length) throw new Error("Teams price IDs not configured in env");
+
+  const qty = Math.max(1, Number(desiredQuantity || 1));
+
+  // Retrieve subscription with expanded items to locate teams base price item
+  const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId, {
+    expand: ["items.data.price"],
+  });
+
+  const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
+  const teamsItem = items.find((it) => {
+    const priceId = it?.price?.id;
+    return priceId && TEAMS_PRICE_IDS.includes(priceId);
+  });
+
+  if (!teamsItem?.id) {
+    throw new Error("Could not find Teams subscription item on Stripe subscription");
   }
+
+  // Update the subscription item quantity with proration
+  await stripe.subscriptionItems.update(teamsItem.id, {
+    quantity: qty,
+    proration_behavior: "create_prorations",
+  });
+
+  return { skipped: false, quantity: qty };
+};
+
+/**
+ * ---------------------------------------------------------
+ * PROTECTED (requireAuth)
+ * ---------------------------------------------------------
+ */
+
+// (COMPAT STUB) GET /api/business-card/me
+// Your new system has NO default profile; frontend should use /profiles and select one.
+const getMyBusinessCard = async (req, res) => {
+  return res.status(400).json({
+    error: "No default profile. Use GET /api/business-card/profiles and pick a profile_slug.",
+    code: "NO_DEFAULT_PROFILE",
+  });
 };
 
 // GET /api/business-card/profiles
@@ -69,11 +154,7 @@ const getMyProfiles = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-    const cards = await BusinessCard.find({ user: req.user._id }).sort({
-      is_default: -1,
-      updatedAt: -1,
-    });
-
+    const cards = await BusinessCard.find({ user: req.user._id }).sort({ updatedAt: -1 });
     return res.json({ data: cards || [] });
   } catch (err) {
     console.error("getMyProfiles:", err);
@@ -86,7 +167,9 @@ const getMyProfileBySlug = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-    const slug = safeSlug(req.params.slug || "main");
+    const slug = safeSlug(req.params.slug);
+    if (!slug) return res.status(400).json({ error: "profile_slug required" });
+
     const card = await BusinessCard.findOne({ user: req.user._id, profile_slug: slug });
     return res.json({ data: card || null });
   } catch (err) {
@@ -97,67 +180,143 @@ const getMyProfileBySlug = async (req, res) => {
 
 // POST /api/business-card/profiles  (create profile)
 const createMyProfile = async (req, res) => {
+  let created = null;
+
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
+    const plan = getPlanFromReq(req);
+    const userId = req.user._id;
+
     const slug = safeSlug(req.body.profile_slug);
-    if (slug.length < 3) return res.status(400).json({ error: "profile_slug must be at least 3 characters" });
+    if (!slug || slug.length < 3) {
+      return res.status(400).json({ error: "profile_slug must be at least 3 characters" });
+    }
 
-    const exists = await BusinessCard.findOne({ user: req.user._id, profile_slug: slug });
-    if (exists) return res.status(409).json({ error: "Profile slug already exists" });
+    // Plan gate: max profiles
+    const count = await BusinessCard.countDocuments({ user: userId });
+    const maxAllowed = maxProfilesForPlan(plan);
 
-    const created = await BusinessCard.create({
-      user: req.user._id,
+    if (count >= maxAllowed) {
+      return upgradeRequired(res, {
+        reason: "PROFILE_LIMIT",
+        plan,
+        maxProfiles: maxAllowed,
+        currentProfiles: count,
+      });
+    }
+
+    // GLOBAL slug uniqueness (critical for /u/:slug)
+    const slugTaken = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
+    if (slugTaken) {
+      return res.status(409).json({ error: "Profile slug already exists" });
+    }
+
+    const templateId = req.body.template_id || "template-1";
+    if (!isTemplateAllowed(plan, templateId)) {
+      return upgradeRequired(res, {
+        reason: "TEMPLATE_LOCKED",
+        plan,
+        allowedTemplates:
+          plan === "free"
+            ? ["template-1"]
+            : ["template-1", "template-2", "template-3", "template-4", "template-5"],
+      });
+    }
+
+    created = await BusinessCard.create({
+      user: userId,
       profile_slug: slug,
-      is_default: false,
-      template_id: req.body.template_id || "template-1",
+      template_id: templateId,
       business_card_name: req.body.business_card_name || "",
     });
+
+    // ✅ Teams billing: update quantity to new count (prorated)
+    if (plan === "teams") {
+      const newCount = await BusinessCard.countDocuments({ user: userId });
+      try {
+        await syncTeamsQuantityToStripe({ user: req.user, desiredQuantity: newCount });
+      } catch (e) {
+        // Rollback DB change so billing never drifts
+        try {
+          await BusinessCard.deleteOne({ _id: created._id });
+        } catch { }
+        return res.status(500).json({
+          error: "Profile created but billing sync failed. No changes were saved.",
+          code: "TEAMS_BILLING_SYNC_FAILED",
+        });
+      }
+    }
 
     return res.status(201).json({ data: created });
   } catch (err) {
     console.error("createMyProfile:", err);
+    // safety rollback if partially created
+    if (created?._id) {
+      try {
+        await BusinessCard.deleteOne({ _id: created._id });
+      } catch { }
+    }
     return res.status(500).json({ error: "Failed to create profile" });
   }
 };
 
-// PATCH /api/business-card/profiles/:slug/default
+// (COMPAT STUB) PATCH /api/business-card/profiles/:slug/default
+// Not supported anymore. No default profile concept.
 const setDefaultProfile = async (req, res) => {
-  try {
-    if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
-
-    const slug = safeSlug(req.params.slug || "main");
-
-    const card = await BusinessCard.findOne({ user: req.user._id, profile_slug: slug });
-    if (!card) return res.status(404).json({ error: "Profile not found" });
-
-    // unset others
-    await BusinessCard.updateMany({ user: req.user._id }, { $set: { is_default: false } });
-    card.is_default = true;
-    await card.save();
-
-    return res.json({ data: card });
-  } catch (err) {
-    console.error("setDefaultProfile:", err);
-    return res.status(500).json({ error: "Failed to set default profile" });
-  }
+  return res.status(400).json({
+    error: "Default profile is not supported. Profiles are independent. Pick by profile_slug.",
+    code: "NO_DEFAULT_PROFILE",
+  });
 };
 
 // DELETE /api/business-card/profiles/:slug
 const deleteMyProfile = async (req, res) => {
+  let removedDoc = null;
+
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-    const slug = safeSlug(req.params.slug || "main");
-    const card = await BusinessCard.findOne({ user: req.user._id, profile_slug: slug });
+    const plan = getPlanFromReq(req);
+    const userId = req.user._id;
+
+    const slug = safeSlug(req.params.slug);
+    if (!slug) return res.status(400).json({ error: "profile_slug required" });
+
+    const card = await BusinessCard.findOne({ user: userId, profile_slug: slug });
     if (!card) return res.status(404).json({ error: "Profile not found" });
 
-    if (card.is_default) return res.status(400).json({ error: "You can’t delete the default profile" });
+    removedDoc = card.toObject();
 
     await BusinessCard.deleteOne({ _id: card._id });
+
+    // ✅ Teams billing: update quantity to new count (prorated)
+    if (plan === "teams") {
+      const newCount = await BusinessCard.countDocuments({ user: userId });
+      try {
+        await syncTeamsQuantityToStripe({ user: req.user, desiredQuantity: newCount });
+      } catch (e) {
+        // rollback delete so billing doesn’t drift
+        try {
+          await BusinessCard.create(removedDoc);
+        } catch { }
+        return res.status(500).json({
+          error: "Profile deletion failed because billing sync failed. No changes were saved.",
+          code: "TEAMS_BILLING_SYNC_FAILED",
+        });
+      }
+    }
+
     return res.json({ success: true });
   } catch (err) {
     console.error("deleteMyProfile:", err);
+    // attempt rollback if needed
+    if (removedDoc && removedDoc._id) {
+      try {
+        const exists = await BusinessCard.findById(removedDoc._id).select("_id");
+        if (!exists) await BusinessCard.create(removedDoc);
+      } catch { }
+    }
     return res.status(500).json({ error: "Failed to delete profile" });
   }
 };
@@ -167,16 +326,28 @@ const saveBusinessCard = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
+    const plan = getPlanFromReq(req);
     const userId = req.user._id;
 
-    // ✅ IMPORTANT: NEVER trust req.body.user
-    const profile_slug = safeSlug(req.body.profile_slug || "main");
+    const profile_slug = safeSlug(req.body.profile_slug);
+    if (!profile_slug || profile_slug.length < 3) {
+      return res.status(400).json({ error: "profile_slug is required and must be at least 3 chars" });
+    }
+
+    // GLOBAL slug protection: if someone else owns this slug, block save
+    const otherOwner = await BusinessCard.findOne({
+      profile_slug,
+      user: { $ne: userId },
+    }).select("_id");
+    if (otherOwner) {
+      return res.status(409).json({ error: "Profile slug already exists" });
+    }
 
     // Arrays from FormData
     const services = parseJsonArray(req.body.services, []);
     const reviews = parseJsonArray(req.body.reviews, []);
 
-    // existing_works comes as repeated fields
+    // existing_works can come as repeated fields
     const existing_works = []
       .concat(req.body.existing_works || [])
       .flat()
@@ -207,17 +378,55 @@ const saveBusinessCard = async (req, res) => {
       if (url) uploadedWorkUrls.push(url);
     }
 
-    // Handle removals
-    const coverRemoved = asBool(req.body.cover_photo_removed, false);
-    const avatarRemoved = asBool(req.body.avatar_removed, false);
+    const works = [...existing_works, ...uploadedWorkUrls];
 
-    // Build update
+    // Plan enforcement: free limits for works/services/reviews
+    const limitHit = enforceFreeContentLimits({ plan, works, services, reviews });
+    if (limitHit) {
+      return upgradeRequired(res, {
+        reason: "SECTION_LIMIT",
+        plan,
+        ...limitHit,
+      });
+    }
+
+    // Template gating
+    const requestedTemplate = req.body.template_id || "template-1";
+    if (!isTemplateAllowed(plan, requestedTemplate)) {
+      return upgradeRequired(res, {
+        reason: "TEMPLATE_LOCKED",
+        plan,
+        allowedTemplates:
+          plan === "free"
+            ? ["template-1"]
+            : ["template-1", "template-2", "template-3", "template-4", "template-5"],
+      });
+    }
+
+    // If there is no existing card with this slug, we are creating it on upsert.
+    const existingCard = await BusinessCard.findOne({ user: userId, profile_slug }).select("_id");
+    if (!existingCard) {
+      const count = await BusinessCard.countDocuments({ user: userId });
+      const maxAllowed = maxProfilesForPlan(plan);
+      if (count >= maxAllowed) {
+        return upgradeRequired(res, {
+          reason: "PROFILE_LIMIT",
+          plan,
+          maxProfiles: maxAllowed,
+          currentProfiles: count,
+        });
+      }
+    }
+
     const update = {
       user: userId,
       profile_slug,
 
+      template_id: requestedTemplate,
+
       business_card_name: req.body.business_card_name || "",
       page_theme: req.body.page_theme || "light",
+      page_theme_variant: req.body.page_theme_variant || "subtle-light",
       style: req.body.style || "Inter",
       main_heading: req.body.main_heading || "",
       sub_heading: req.body.sub_heading || "",
@@ -231,7 +440,6 @@ const saveBusinessCard = async (req, res) => {
       services,
       reviews,
 
-      // these match your UserPage.jsx
       work_display_mode: req.body.work_display_mode || "list",
       services_display_mode: req.body.services_display_mode || "list",
       reviews_display_mode: req.body.reviews_display_mode || "list",
@@ -244,9 +452,9 @@ const saveBusinessCard = async (req, res) => {
       show_reviews_section: asBool(req.body.show_reviews_section, true),
       show_contact_section: asBool(req.body.show_contact_section, true),
 
-      button_bg_color: req.body.button_bg_color || "",
-      button_text_color: req.body.button_text_color || "",
-      text_alignment: req.body.text_alignment || "",
+      button_bg_color: req.body.button_bg_color || "#F47629",
+      button_text_color: req.body.button_text_color || "white",
+      text_alignment: req.body.text_alignment || "left",
 
       facebook_url: req.body.facebook_url || "",
       instagram_url: req.body.instagram_url || "",
@@ -254,31 +462,26 @@ const saveBusinessCard = async (req, res) => {
       x_url: req.body.x_url || "",
       tiktok_url: req.body.tiktok_url || "",
 
-      section_order: parseJsonArray(req.body.section_order, null),
+      section_order: parseJsonArray(req.body.section_order, ["main", "about", "work", "services", "reviews", "contact"]),
+
+      works,
     };
 
-    if (coverRemoved) update.cover_photo = null;
-    if (avatarRemoved) update.avatar = null;
+    // Handle removals
+    const coverRemoved = asBool(req.body.cover_photo_removed, false);
+    const avatarRemoved = asBool(req.body.avatar_removed, false);
+
+    if (coverRemoved) update.cover_photo = "";
+    if (avatarRemoved) update.avatar = "";
 
     if (cover_photo_url) update.cover_photo = cover_photo_url;
     if (avatar_url) update.avatar = avatar_url;
 
-    // Works = existing urls + newly uploaded
-    update.works = [...existing_works, ...uploadedWorkUrls];
-
-    // Upsert
     const saved = await BusinessCard.findOneAndUpdate(
       { user: userId, profile_slug },
-      { $set: update, $setOnInsert: { is_default: profile_slug === "main" } },
+      { $set: update },
       { new: true, upsert: true }
     );
-
-    // Ensure there is always ONE default
-    const anyDefault = await BusinessCard.findOne({ user: userId, is_default: true });
-    if (!anyDefault) {
-      await BusinessCard.updateOne({ _id: saved._id }, { $set: { is_default: true } });
-      saved.is_default = true;
-    }
 
     return res.json({ data: saved });
   } catch (err) {
@@ -288,50 +491,41 @@ const saveBusinessCard = async (req, res) => {
 };
 
 /**
- * =========================================================
+ * ---------------------------------------------------------
  * PUBLIC
- * =========================================================
+ * ---------------------------------------------------------
  */
 
-// GET /api/business-card/by_username/:username  (default)
-const getPublicByUsername = async (req, res) => {
+// NEW: GET /api/business-card/public/:slug
+// This matches www.konarcard.com/u/:slug requirement (GLOBAL slug)
+const getPublicBySlug = async (req, res) => {
   try {
-    const username = String(req.params.username || "").trim().toLowerCase();
-    if (!username) return res.status(400).json({ error: "username required" });
+    const slug = safeSlug(req.params.slug);
+    if (!slug) return res.status(400).json({ error: "slug required" });
 
-    const u = await User.findOne({ username }).select("_id");
-    if (!u) return res.status(404).json({ error: "User not found" });
-
-    const card = await pickDefaultCard(u._id);
+    const card = await BusinessCard.findOne({ profile_slug: slug });
     if (!card) return res.status(404).json({ error: "Business card not found" });
 
     return res.json(card);
   } catch (err) {
-    console.error("getPublicByUsername:", err);
+    console.error("getPublicBySlug:", err);
     return res.status(500).json({ error: "Failed to fetch business card" });
   }
 };
 
-// GET /api/business-card/by_username/:username/:slug
+// (COMPAT STUBS) Old username-based endpoints (not used in new /u/:slug system)
+const getPublicByUsername = async (req, res) => {
+  return res.status(400).json({
+    error: "Username-based public profiles are deprecated. Use GET /api/business-card/public/:slug",
+    code: "DEPRECATED",
+  });
+};
+
 const getPublicByUsernameAndSlug = async (req, res) => {
-  try {
-    const username = String(req.params.username || "").trim().toLowerCase();
-    const slug = safeSlug(req.params.slug);
-
-    if (!username) return res.status(400).json({ error: "username required" });
-    if (!slug) return res.status(400).json({ error: "slug required" });
-
-    const u = await User.findOne({ username }).select("_id");
-    if (!u) return res.status(404).json({ error: "User not found" });
-
-    const card = await BusinessCard.findOne({ user: u._id, profile_slug: slug });
-    if (!card) return res.status(404).json({ error: "Business card not found" });
-
-    return res.json(card);
-  } catch (err) {
-    console.error("getPublicByUsernameAndSlug:", err);
-    return res.status(500).json({ error: "Failed to fetch business card" });
-  }
+  return res.status(400).json({
+    error: "Username-based public profiles are deprecated. Use GET /api/business-card/public/:slug",
+    code: "DEPRECATED",
+  });
 };
 
 module.exports = {
@@ -346,6 +540,7 @@ module.exports = {
   deleteMyProfile,
 
   // public
+  getPublicBySlug,
   getPublicByUsername,
   getPublicByUsernameAndSlug,
 };

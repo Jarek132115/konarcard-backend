@@ -21,22 +21,15 @@ const reviewSchema = new mongoose.Schema(
 const businessCardSchema = new mongoose.Schema(
   {
     /* -------------------------------------------------
-       Multi-profile identity
-       - user can have MANY profiles now
-       - profile_slug identifies each profile under a user
+       GLOBAL profile identity (NO default profile)
+       Public URL: /u/:profile_slug
     ------------------------------------------------- */
     profile_slug: {
       type: String,
       trim: true,
       lowercase: true,
       required: true,
-      default: "main",
       match: [/^[a-z0-9-]+$/, "profile_slug can only contain a-z, 0-9 and hyphens"],
-    },
-
-    is_default: {
-      type: Boolean,
-      default: false,
     },
 
     /* -------------------------------------------------
@@ -49,7 +42,7 @@ const businessCardSchema = new mongoose.Schema(
     },
 
     /* -------------------------------------------------
-       QR for this specific profile link
+       QR for this specific profile
     ------------------------------------------------- */
     qr_code_url: {
       type: String,
@@ -67,9 +60,9 @@ const businessCardSchema = new mongoose.Schema(
     /* -------------------------------------------------
        Theme & typography
     ------------------------------------------------- */
-    page_theme: { type: String, default: "light" }, // light | dark
+    page_theme: { type: String, default: "light" },
     page_theme_variant: { type: String, default: "subtle-light" },
-    style: { type: String, default: "Inter" }, // font
+    style: { type: String, default: "Inter" },
 
     /* -------------------------------------------------
        Headings
@@ -84,7 +77,7 @@ const businessCardSchema = new mongoose.Schema(
     cover_photo: { type: String, default: "" },
 
     works: {
-      type: [String], // S3 URLs
+      type: [String],
       default: [],
     },
 
@@ -126,7 +119,7 @@ const businessCardSchema = new mongoose.Schema(
     },
 
     /* -------------------------------------------------
-       CTA button & text styling
+       CTA & text styling
     ------------------------------------------------- */
     button_bg_color: { type: String, default: "#F47629" },
     button_text_color: {
@@ -141,7 +134,7 @@ const businessCardSchema = new mongoose.Schema(
     },
 
     /* -------------------------------------------------
-       Section visibility toggles
+       Section visibility
     ------------------------------------------------- */
     show_main_section: { type: Boolean, default: true },
     show_about_me_section: { type: Boolean, default: true },
@@ -151,7 +144,7 @@ const businessCardSchema = new mongoose.Schema(
     show_contact_section: { type: Boolean, default: true },
 
     /* -------------------------------------------------
-       Section order (rendering order)
+       Section order
     ------------------------------------------------- */
     section_order: {
       type: [String],
@@ -174,8 +167,7 @@ const businessCardSchema = new mongoose.Schema(
     tiktok_url: { type: String, default: "" },
 
     /* -------------------------------------------------
-       Ownership (MULTI profile)
-       - removed unique:true so one user can create many profiles
+       Ownership
     ------------------------------------------------- */
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -191,17 +183,10 @@ const businessCardSchema = new mongoose.Schema(
 );
 
 /**
- * Each user can only have ONE profile with the same slug.
+ * ✅ GLOBAL uniqueness:
+ * profile_slug must be unique across the entire platform
+ * because public URL is /u/:slug
  */
-businessCardSchema.index({ user: 1, profile_slug: 1 }, { unique: true });
-
-/**
- * Each user can only have ONE default profile.
- * (Partial unique index: only enforced when is_default=true)
- */
-businessCardSchema.index(
-  { user: 1, is_default: 1 },
-  { unique: true, partialFilterExpression: { is_default: true } }
-);
+businessCardSchema.index({ profile_slug: 1 }, { unique: true });
 
 module.exports = mongoose.model("BusinessCard", businessCardSchema);

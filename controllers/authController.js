@@ -54,68 +54,44 @@ const toSafeUser = (userDoc) => {
 };
 
 /**
- * ✅ IMPORTANT (multi-profile):
- * Ensure at least the MAIN profile exists for the user.
- * - Upserts profile_slug="main"
- * - If it's the first profile, set is_default=true
+ * Slug rules for public profile URLs:
+ * - Global: https://www.konarcard.com/u/:slug
+ * - Must be a-z 0-9 hyphen
  */
-const ensureMainBusinessCard = async (userId, name = "") => {
-    const count = await BusinessCard.countDocuments({ user: userId });
-    const isFirst = count === 0;
-
-    const card = await BusinessCard.findOneAndUpdate(
-        { user: userId, profile_slug: "main" },
-        {
-            $setOnInsert: {
-                user: userId,
-                profile_slug: "main",
-                is_default: isFirst,
-                full_name: name || "",
-                template_id: "template-1",
-            },
-        },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-
-    // If there is no default yet, make main default (safety)
-    const hasDefault = await BusinessCard.exists({ user: userId, is_default: true });
-    if (!hasDefault && card) {
-        await BusinessCard.updateMany({ user: userId }, { $set: { is_default: false } });
-        card.is_default = true;
-        await card.save();
-    }
-
-    return card;
+const safeProfileSlug = (raw) => {
+    const s = String(raw || "").trim().toLowerCase();
+    if (!s) return "";
+    const cleaned = s
+        .replace(/_/g, "-")
+        .replace(/[^a-z0-9-]/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-+|-+$/g, "");
+    return cleaned;
 };
 
-/**
- * Public URL logic MUST match your backend businessCardRoutes.js
- * - main/default: /u/:username
- * - non-main: /u/:username/:slug
- */
-const buildPublicProfileUrl = (username, profileSlug) => {
-    const u = (username || "").toString().trim().toLowerCase();
-    const s = (profileSlug || "").toString().trim().toLowerCase();
-
-    if (!u) return "";
-    if (!s || s === "main") return `${FRONTEND_PROFILE_DOMAIN}/u/${u}`;
-    return `${FRONTEND_PROFILE_DOMAIN}/u/${u}/${s}`;
+const buildPublicProfileUrl = (profileSlug) => {
+    const s = safeProfileSlug(profileSlug);
+    if (!s) return "";
+    return `${FRONTEND_PROFILE_DOMAIN}/u/${s}`;
 };
 
 /**
  * Generate QR -> upload to S3 -> return URL
- * NOTE: we include profileSlug in key so each profile has its own QR.
+ * Each BusinessCard has its own QR, keyed by its profile_slug.
  */
-const generateAndUploadProfileQr = async (userId, profileUrl, profileSlug = "main") => {
-    const qrBuffer = await QRCode.toBuffer(profileUrl, {
+const generateAndUploadProfileQr = async (userId, profileSlug) => {
+    const url = buildPublicProfileUrl(profileSlug);
+    if (!url) return "";
+
+    const qrBuffer = await QRCode.toBuffer(url, {
         width: 900,
         margin: 2,
         errorCorrectionLevel: "M",
         color: { dark: "#000000", light: "#ffffff" },
     });
 
-    const safeSlug = (profileSlug || "main").toString().trim().toLowerCase() || "main";
-    const fileKey = `qr-codes/${userId}/${safeSlug}-${Date.now()}.png`; // unique key to avoid caching
+    const safeSlug = safeProfileSlug(profileSlug) || "profile";
+    const fileKey = `qr-codes/${userId}/${safeSlug}-${Date.now()}.png`; // unique to avoid caching
     const qrCodeUrl = await uploadToS3(qrBuffer, fileKey);
     return qrCodeUrl;
 };
@@ -124,36 +100,39 @@ const generateAndUploadProfileQr = async (userId, profileUrl, profileSlug = "mai
 const test = (req, res) => res.json("test is working");
 
 /**
- * ✅ CLAIM LINK
- * - If NOT logged in: availability check only
- * - If logged in: MUST be valid token + existing user
- *   then sets username/slug/profileUrl + QR + ensures MAIN BusinessCard
- *   and updates BusinessCard.qr_code_url for all profiles to match new username
+ * ✅ CLAIM LINK (NEW MEANING)
+ * You enter a "username" on the frontend — we treat that as the FIRST PROFILE SLUG.
  *
- * IMPORTANT:
- * - If token is present but invalid OR user missing, we return 401 so frontend can clear stale token.
+ * - If NOT logged in: availability check only for profile_slug global uniqueness.
+ * - If logged in: must be valid token + user exists
+ *   -> create FIRST BusinessCard with profile_slug = claimed slug (if user has none)
+ *   -> generate QR for that profile
+ *
+ * We keep user.username as an account identifier if you still want it, but URLs use /u/:slug only.
  */
 const claimLink = async (req, res) => {
     try {
         const raw = (req.body.username || "").trim().toLowerCase();
         if (!raw) return res.status(400).json({ error: "Username is required" });
 
-        const safe = raw.replace(/[^a-z0-9._-]/g, "");
-        if (safe.length < 3) {
+        // allow input like old system, but convert to strict profile slug
+        const profileSlug = safeProfileSlug(raw);
+        if (!profileSlug || profileSlug.length < 3) {
             return res.status(400).json({ error: "Link name must be at least 3 characters" });
         }
 
-        const existing = await User.findOne({ username: safe });
-        if (existing) return res.status(409).json({ error: "Username already taken" });
+        // Global availability check: BusinessCard.profile_slug must be unique platform-wide
+        const taken = await BusinessCard.findOne({ profile_slug: profileSlug }).select("_id");
+        if (taken) return res.status(409).json({ error: "Username already taken" });
 
         const token = getTokenFromReq(req);
 
-        // ✅ Availability check (no auth)
+        // Availability check (no auth) — frontend uses this as user types
         if (!token) {
-            return res.json({ success: true, available: true, username: safe });
+            return res.json({ success: true, available: true, username: profileSlug });
         }
 
-        // ✅ Token present => must be valid
+        // Token present => must be valid
         let decoded;
         try {
             decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -161,63 +140,42 @@ const claimLink = async (req, res) => {
             return res.status(401).json({ error: "Invalid token" });
         }
 
-        // ✅ Token valid => user must exist
+        // Token valid => user must exist
         const user = await User.findById(decoded.id);
         if (!user) {
             return res.status(401).json({ error: "User not found" });
         }
 
-        // Save user fields
-        const slug = safe; // legacy "slug" on user = username
-        const profileUrl = `${FRONTEND_PROFILE_DOMAIN}/u/${slug}`;
+        // Optional: store username on user (kept for UI/account, not routing)
+        user.username = profileSlug;
+        user.slug = profileSlug; // legacy field
+        user.profileUrl = buildPublicProfileUrl(profileSlug); // legacy field (now /u/:slug)
 
-        user.username = safe;
-        user.slug = slug;
-        user.profileUrl = profileUrl;
+        // If user has no profiles yet, create the first one using this slug
+        const existingCount = await BusinessCard.countDocuments({ user: user._id });
+        let card = null;
 
-        // ✅ Ensure at least MAIN business card exists
-        await ensureMainBusinessCard(user._id, user.name);
-
-        // ✅ Update/Generate QR codes for ALL existing profiles (multi-profile)
-        const cards = await BusinessCard.find({ user: user._id }).select("_id profile_slug qr_code_url is_default");
-
-        // If somehow none exist, create main then reload
-        let cardsToUpdate = cards;
-        if (!cardsToUpdate || cardsToUpdate.length === 0) {
-            await ensureMainBusinessCard(user._id, user.name);
-            cardsToUpdate = await BusinessCard.find({ user: user._id }).select("_id profile_slug qr_code_url is_default");
+        if (existingCount === 0) {
+            card = await BusinessCard.create({
+                user: user._id,
+                profile_slug: profileSlug,
+                template_id: "template-1",
+                full_name: user.name || "",
+            });
         }
 
-        // Generate per-profile QR and store on BusinessCard
-        // Also set user.qrCodeUrl (legacy) to the MAIN profile QR
-        let mainQrUrl = "";
-
-        for (const c of cardsToUpdate) {
-            const pSlug = (c.profile_slug || "main").toString().trim().toLowerCase() || "main";
-            const url = buildPublicProfileUrl(safe, pSlug);
-
-            // Always regenerate on claim so it matches the new username
-            const qrUrl = await generateAndUploadProfileQr(user._id, url, pSlug);
-
-            c.qr_code_url = qrUrl;
-            await c.save();
-
-            if (pSlug === "main") {
-                mainQrUrl = qrUrl;
+        // Ensure QR exists for the claimed slug profile (either just created or not)
+        const target = await BusinessCard.findOne({ profile_slug: profileSlug, user: user._id });
+        if (target) {
+            const qrUrl = await generateAndUploadProfileQr(user._id, profileSlug);
+            if (qrUrl) {
+                target.qr_code_url = qrUrl;
+                await target.save();
+                user.qrCodeUrl = qrUrl; // legacy field for “main QR”
             }
         }
 
-        // Legacy user QR (keep existing field for older parts of app)
-        if (mainQrUrl) {
-            user.qrCodeUrl = mainQrUrl;
-        } else {
-            // fallback: generate main QR anyway
-            const fallbackMainUrl = buildPublicProfileUrl(safe, "main");
-            user.qrCodeUrl = await generateAndUploadProfileQr(user._id, fallbackMainUrl, "main");
-        }
-
         await user.save();
-
         return res.json({ success: true, user: toSafeUser(user) });
     } catch (err) {
         console.error("claimLink error:", err);
@@ -238,20 +196,26 @@ const registerUser = async (req, res) => {
         }
 
         const cleanEmail = email.trim().toLowerCase();
-        const cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, "");
 
+        // Use username input as first profile slug
+        const desiredSlug = safeProfileSlug(username);
+        if (!desiredSlug || desiredSlug.length < 3) {
+            return res.status(400).json({ error: "Username must be at least 3 characters." });
+        }
+
+        // User email uniqueness
         const existingEmail = await User.findOne({ email: cleanEmail });
-        if (existingEmail) return res.json({ error: "This email is already registered. Please log in." });
+        if (existingEmail) {
+            return res.json({ error: "This email is already registered. Please log in." });
+        }
 
-        const existingUsername = await User.findOne({ username: cleanUsername });
-        if (existingUsername) {
+        // Global slug uniqueness for first profile
+        const slugTaken = await BusinessCard.findOne({ profile_slug: desiredSlug }).select("_id");
+        if (slugTaken) {
             return res.status(400).json({ error: "Username already taken. Please choose another." });
         }
 
         const hashedPassword = await hashPassword(password);
-
-        const slug = cleanUsername;
-        const profileUrl = `${FRONTEND_PROFILE_DOMAIN}/u/${slug}`;
 
         const code = Math.floor(100000 + Math.random() * 900000).toString();
         const expires = Date.now() + 10 * 60 * 1000;
@@ -259,41 +223,40 @@ const registerUser = async (req, res) => {
         const user = await User.create({
             name,
             email: cleanEmail,
-            username: cleanUsername,
+            username: desiredSlug, // kept for account/UI
             password: hashedPassword,
-            profileUrl,
+            profileUrl: buildPublicProfileUrl(desiredSlug), // legacy field
             isVerified: false,
             verificationCode: code,
             verificationCodeExpires: expires,
-            slug,
+            slug: desiredSlug, // legacy field
             authProvider: "local",
         });
 
-        // ✅ Ensure main profile exists and has QR (multi-profile)
-        await ensureMainBusinessCard(user._id, name);
+        // Create FIRST BusinessCard with the slug
+        const card = await BusinessCard.create({
+            user: user._id,
+            profile_slug: desiredSlug,
+            full_name: name || "",
+            template_id: "template-1",
+        });
 
-        // Generate QR for main profile and store on BOTH:
-        // - BusinessCard.qr_code_url (new)
-        // - user.qrCodeUrl (legacy)
-        const mainPublicUrl = buildPublicProfileUrl(cleanUsername, "main");
-        const mainQrUrl = await generateAndUploadProfileQr(user._id, mainPublicUrl, "main");
-
-        await BusinessCard.findOneAndUpdate(
-            { user: user._id, profile_slug: "main" },
-            { $set: { qr_code_url: mainQrUrl } },
-            { new: true }
-        );
-
-        user.qrCodeUrl = mainQrUrl;
-        await user.save();
+        // QR for first profile
+        const qrUrl = await generateAndUploadProfileQr(user._id, desiredSlug);
+        if (qrUrl) {
+            card.qr_code_url = qrUrl;
+            await card.save();
+            user.qrCodeUrl = qrUrl; // legacy
+            await user.save();
+        }
 
         const html = verificationEmailTemplate(name, code);
         await sendEmail(cleanEmail, "Verify Your Email", html);
 
-        res.json({ success: true, message: "Verification email sent" });
+        return res.json({ success: true, message: "Verification email sent" });
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: "Registration failed. Try again." });
+        return res.status(500).json({ error: "Registration failed. Try again." });
     }
 };
 
@@ -313,10 +276,10 @@ const verifyEmailCode = async (req, res) => {
         user.verificationCodeExpires = undefined;
         await user.save();
 
-        res.json({ success: true, message: "Email verified successfully" });
+        return res.json({ success: true, message: "Email verified successfully" });
     } catch (err) {
         console.log(err);
-        res.status(500).json({ error: "Verification failed" });
+        return res.status(500).json({ error: "Verification failed" });
     }
 };
 
@@ -339,10 +302,10 @@ const resendVerificationCode = async (req, res) => {
         const html = verificationEmailTemplate(user.name, newCode);
         await sendEmail(user.email, "Your New Verification Code", html);
 
-        res.json({ success: true, message: "Verification code resent" });
+        return res.json({ success: true, message: "Verification code resent" });
     } catch (err) {
         console.log(err);
-        res.status(500).json({ error: "Could not resend code" });
+        return res.status(500).json({ error: "Could not resend code" });
     }
 };
 
@@ -383,7 +346,7 @@ const loginUser = async (req, res) => {
         return res.json({ token, user: toSafeUser(user) });
     } catch (error) {
         console.log(error);
-        res.status(500).json({ error: "Login failed" });
+        return res.status(500).json({ error: "Login failed" });
     }
 };
 
@@ -405,10 +368,10 @@ const forgotPassword = async (req, res) => {
         const html = passwordResetTemplate(user.name, resetLink);
         await sendEmail(user.email, "Reset Your Password", html);
 
-        res.json({ success: true, message: "Password reset email sent" });
+        return res.json({ success: true, message: "Password reset email sent" });
     } catch (err) {
         console.log(err);
-        res.status(500).json({ error: "Could not send password reset email" });
+        return res.status(500).json({ error: "Could not send password reset email" });
     }
 };
 
@@ -431,10 +394,10 @@ const resetPassword = async (req, res) => {
         user.resetTokenExpires = undefined;
         await user.save();
 
-        res.json({ success: true, message: "Password updated successfully" });
+        return res.json({ success: true, message: "Password updated successfully" });
     } catch (err) {
         console.log(err);
-        res.status(500).json({ error: "Password reset failed" });
+        return res.status(500).json({ error: "Password reset failed" });
     }
 };
 
@@ -499,14 +462,14 @@ const subscribeUser = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = req.user; // ✅ hydrated by requireAuth
+        const user = req.user; // hydrated by requireAuth
 
-        // ✅ must have claimed link before checkout
-        const hasClaim = !!(user.username && user.slug);
-        if (!hasClaim) {
+        // ✅ must have at least 1 profile before checkout
+        const profileCount = await BusinessCard.countDocuments({ user: user._id });
+        if (profileCount <= 0) {
             return res.status(400).json({
-                error: "You must claim your link before subscribing.",
-                code: "CLAIM_REQUIRED",
+                error: "You must create a profile before subscribing.",
+                code: "PROFILE_REQUIRED",
             });
         }
 
@@ -529,10 +492,14 @@ const subscribeUser = async (req, res) => {
 
         const cancelUrl = `${FRONTEND_URL}/pricing`;
 
+        // ✅ Teams quantity billing: start quantity = current number of profiles (min 1)
+        const quantity =
+            parsed.plan === "teams" ? Math.max(1, profileCount) : 1;
+
         const session = await stripe.checkout.sessions.create({
             mode: "subscription",
             payment_method_types: ["card"],
-            line_items: [{ price: priceId, quantity: 1 }],
+            line_items: [{ price: priceId, quantity }],
             ...(user.stripeCustomerId ? { customer: user.stripeCustomerId } : { customer_email: user.email }),
             success_url: successUrl,
             cancel_url: cancelUrl,
@@ -541,6 +508,7 @@ const subscribeUser = async (req, res) => {
                 plan: parsed.plan,
                 interval: parsed.interval,
                 planKey,
+                teamsQuantityAtCheckout: String(quantity),
             },
         });
 
@@ -559,7 +527,7 @@ const cancelSubscription = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = req.user; // ✅ hydrated by requireAuth
+        const user = req.user;
 
         if (user.stripeSubscriptionId) {
             await stripe.subscriptions.update(user.stripeSubscriptionId, {
@@ -606,7 +574,7 @@ const checkSubscriptionStatus = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = req.user; // ✅ hydrated by requireAuth
+        const user = req.user;
 
         return res.json({
             active: !!user.isSubscribed,
@@ -629,7 +597,7 @@ const startTrial = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = req.user; // ✅ hydrated by requireAuth
+        const user = req.user;
 
         if (user.isSubscribed) {
             return res.json({
@@ -669,7 +637,7 @@ const syncSubscriptions = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = await User.findById(req.user._id); // need fresh doc for writes
+        const user = await User.findById(req.user._id);
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
         if (!user.stripeCustomerId) {
@@ -688,6 +656,7 @@ const syncSubscriptions = async (req, res) => {
         if (!latest) {
             user.isSubscribed = false;
             user.subscriptionStatus = "free";
+            user.plan = "free";
             user.stripeSubscriptionId = undefined;
             await user.save();
             return res.json({ success: true, synced: true, isSubscribed: false });
@@ -724,7 +693,7 @@ const createBillingPortal = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = req.user; // ✅ hydrated by requireAuth
+        const user = req.user;
 
         if (!user.stripeCustomerId) {
             return res.status(400).json({ error: "No Stripe customer found for this user" });
@@ -760,10 +729,10 @@ const submitContactForm = async (req, res) => {
 
     try {
         await sendEmail("supportteam@konarcard.com", `Contact Form: ${reason}`, html);
-        res.json({ success: true, message: "Message sent successfully" });
+        return res.json({ success: true, message: "Message sent successfully" });
     } catch (err) {
         console.error("Error sending contact form email:", err);
-        res.status(500).json({ error: "Failed to send message" });
+        return res.status(500).json({ error: "Failed to send message" });
     }
 };
 

@@ -28,12 +28,7 @@ const PRICE_TO_PLAN = {
 };
 
 /**
- * Add-on: extra profiles (£1.95/month) as a recurring price with quantity.
- * Put the Stripe price id(s) into env:
- * - STRIPE_PRICE_EXTRA_PROFILE_MONTHLY (required)
- * Optional if you later add quarterly/yearly add-ons:
- * - STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY
- * - STRIPE_PRICE_EXTRA_PROFILE_YEARLY
+ * Optional add-on: extra profiles (if you ever use Plus + add-on quantity billing)
  */
 const EXTRA_PROFILE_PRICE_IDS = [
   process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
@@ -98,7 +93,7 @@ function extractPlanAndExtrasFromSubscription(sub, sessionMetadataPlanKey) {
     }
   }
 
-  // If still unknown, fallback to metadata planKey (don’t overwrite if unknown)
+  // Fallback to metadata planKey (do not overwrite if unknown)
   if ((!plan || !interval) && sessionMetadataPlanKey) {
     const parsed = parsePlanKey(sessionMetadataPlanKey);
     if (parsed) {
@@ -157,12 +152,12 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
         });
 
         const status = sub.status;
-        const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
+        const currentPeriodEnd = sub.current_period_end
+          ? new Date(sub.current_period_end * 1000)
+          : undefined;
 
-        const { plan, interval, extraProfilesQty } = extractPlanAndExtrasFromSubscription(
-          sub,
-          session.metadata?.planKey
-        );
+        const { plan, interval, extraProfilesQty } =
+          extractPlanAndExtrasFromSubscription(sub, session.metadata?.planKey);
 
         const set = {
           stripeCustomerId: customerId,
@@ -173,24 +168,23 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
           extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
         };
 
-        // Only set plan fields if we actually know them (avoid nuking paid users to "free")
+        // Only set plan fields if known
         if (plan) set.plan = plan;
         if (interval) set.planInterval = interval;
 
-        // If they are now subscribed, clear trial so UI doesn't get confused
+        // If now subscribed, clear trial
         const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
 
-        if (userId) {
-          await updateUserById(userId, { set, unset });
-        } else {
-          await updateUserByCustomer(customerId, { set, unset });
-        }
+        if (userId) await updateUserById(userId, { set, unset });
+        else await updateUserByCustomer(customerId, { set, unset });
       }
 
-      // B) NFC card payment checkout (keep your email logic)
+      // B) One-time payment checkout (NFC cards)
       if (session.mode === "payment") {
         const customerEmail = session.customer_details?.email;
-        const amountPaid = session.amount_total ? (session.amount_total / 100).toFixed(2) : null;
+        const amountPaid = session.amount_total
+          ? (session.amount_total / 100).toFixed(2)
+          : null;
 
         await sendEmail(
           process.env.EMAIL_USER,
@@ -200,9 +194,50 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
         );
 
         if (customerEmail && amountPaid) {
-          await sendEmail(customerEmail, "Your Konar Card Order Confirmation", orderConfirmationTemplate(customerEmail, amountPaid));
+          await sendEmail(
+            customerEmail,
+            "Your Konar Card Order Confirmation",
+            orderConfirmationTemplate(customerEmail, amountPaid)
+          );
         }
       }
+    }
+
+    // -------------------------
+    // customer.subscription.created
+    // -------------------------
+    if (event.type === "customer.subscription.created") {
+      const sub = event.data.object;
+
+      const customerId = sub.customer;
+      const subscriptionId = sub.id;
+      const status = sub.status;
+
+      const currentPeriodEnd = sub.current_period_end
+        ? new Date(sub.current_period_end * 1000)
+        : undefined;
+
+      const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
+        expand: ["items.data.price"],
+      });
+
+      const { plan, interval, extraProfilesQty } =
+        extractPlanAndExtrasFromSubscription(fullSub, null);
+
+      const set = {
+        stripeSubscriptionId: subscriptionId,
+        subscriptionStatus: status || "active",
+        currentPeriodEnd,
+        isSubscribed: isActiveStatus(status),
+        extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
+      };
+
+      if (plan) set.plan = plan;
+      if (interval) set.planInterval = interval;
+
+      const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
+
+      await updateUserByCustomer(customerId, { set, unset });
     }
 
     // -------------------------
@@ -215,16 +250,17 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
       const subscriptionId = sub.id;
       const status = sub.status;
 
-      const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
+      const currentPeriodEnd = sub.current_period_end
+        ? new Date(sub.current_period_end * 1000)
+        : undefined;
 
-      // IMPORTANT:
-      // The event payload may not include expanded price objects.
-      // We need to retrieve with expand to reliably read price ids + add-on qty.
+      // Retrieve expanded to reliably read price ids + add-on qty
       const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
         expand: ["items.data.price"],
       });
 
-      const { plan, interval, extraProfilesQty } = extractPlanAndExtrasFromSubscription(fullSub, null);
+      const { plan, interval, extraProfilesQty } =
+        extractPlanAndExtrasFromSubscription(fullSub, null);
 
       const set = {
         stripeSubscriptionId: subscriptionId,
@@ -234,7 +270,6 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
         extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
       };
 
-      // Only set plan/interval if mapping exists
       if (plan) set.plan = plan;
       if (interval) set.planInterval = interval;
 
@@ -244,21 +279,22 @@ router.post("/stripe", express.raw({ type: "application/json" }), async (req, re
     }
 
     // -------------------------
-    // invoice.paid (keeps status accurate)
+    // invoice.paid
     // -------------------------
     if (event.type === "invoice.paid") {
       const invoice = event.data.object;
       const customerId = invoice.customer;
       const subscriptionId = invoice.subscription;
 
-      // Pull subscription so we can keep add-on qty accurate too
       let extraProfilesQty = 0;
       let plan = null;
       let interval = null;
 
       if (subscriptionId) {
         try {
-          const fullSub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ["items.data.price"] });
+          const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
+            expand: ["items.data.price"],
+          });
           const extracted = extractPlanAndExtrasFromSubscription(fullSub, null);
           extraProfilesQty = extracted.extraProfilesQty || 0;
           plan = extracted.plan;
