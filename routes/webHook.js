@@ -11,7 +11,10 @@ const { orderConfirmationTemplate } = require("../utils/emailTemplates");
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-// Map Stripe price IDs -> your internal plan + interval
+/**
+ * Map Stripe price IDs -> your internal plan + interval
+ * (base subscription line item)
+ */
 const PRICE_TO_PLAN = {
   // PLUS
   [process.env.STRIPE_PRICE_PLUS_MONTHLY]: { plan: "plus", interval: "monthly" },
@@ -23,6 +26,20 @@ const PRICE_TO_PLAN = {
   [process.env.STRIPE_PRICE_TEAMS_QUARTERLY]: { plan: "teams", interval: "quarterly" },
   [process.env.STRIPE_PRICE_TEAMS_YEARLY]: { plan: "teams", interval: "yearly" },
 };
+
+/**
+ * Add-on: extra profiles (£1.95/month) as a recurring price with quantity.
+ * Put the Stripe price id(s) into env:
+ * - STRIPE_PRICE_EXTRA_PROFILE_MONTHLY (required)
+ * Optional if you later add quarterly/yearly add-ons:
+ * - STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY
+ * - STRIPE_PRICE_EXTRA_PROFILE_YEARLY
+ */
+const EXTRA_PROFILE_PRICE_IDS = [
+  process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
+  process.env.STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY,
+  process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY,
+].filter(Boolean);
 
 function isActiveStatus(status) {
   return status === "active" || status === "trialing";
@@ -43,7 +60,6 @@ async function updateUserByCustomer(customerId, { set = {}, unset = {} }) {
   const update = {};
   if (Object.keys(set).length) update.$set = set;
   if (Object.keys(unset).length) update.$unset = unset;
-
   if (!Object.keys(update).length) return;
 
   await User.findOneAndUpdate({ stripeCustomerId: customerId }, update, { new: true });
@@ -56,214 +72,262 @@ async function updateUserById(userId, { set = {}, unset = {} }) {
   const update = {};
   if (Object.keys(set).length) update.$set = set;
   if (Object.keys(unset).length) update.$unset = unset;
-
   if (!Object.keys(update).length) return;
 
   await User.findByIdAndUpdate(userId, update, { new: true });
 }
 
-// IMPORTANT: express.raw must be used for Stripe signature verification
-router.post(
-  "/stripe",
-  express.raw({ type: "application/json" }),
-  async (req, res) => {
-    if (!endpointSecret) {
-      console.error("⚠️ Missing STRIPE_WEBHOOK_SECRET");
-      return res.status(500).send("Webhook not configured");
+/**
+ * Extract base plan + interval + extraProfilesQty from a Stripe subscription object
+ * NOTE: expects sub expanded with items.data.price
+ */
+function extractPlanAndExtrasFromSubscription(sub, sessionMetadataPlanKey) {
+  const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
+
+  // Base plan: find the first line item whose price id is in PRICE_TO_PLAN
+  let plan = null;
+  let interval = null;
+
+  for (const it of items) {
+    const priceId = it?.price?.id;
+    const mapped = priceId ? PRICE_TO_PLAN[priceId] : null;
+    if (mapped?.plan && mapped?.interval) {
+      plan = mapped.plan;
+      interval = mapped.interval;
+      break;
     }
+  }
 
-    const sig = req.headers["stripe-signature"];
-
-    let event;
-    try {
-      event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-    } catch (err) {
-      console.error("⚠️ Stripe webhook signature error:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
+  // If still unknown, fallback to metadata planKey (don’t overwrite if unknown)
+  if ((!plan || !interval) && sessionMetadataPlanKey) {
+    const parsed = parsePlanKey(sessionMetadataPlanKey);
+    if (parsed) {
+      plan = plan || parsed.plan;
+      interval = interval || parsed.interval;
     }
+  }
 
-    try {
-      // -------------------------
-      // checkout.session.completed
-      // -------------------------
-      if (event.type === "checkout.session.completed") {
-        const session = event.data.object;
-
-        // A) Subscription checkout
-        if (session.mode === "subscription") {
-          const customerId = session.customer;
-          const subscriptionId = session.subscription;
-          const userId = session.metadata?.userId;
-
-          // Retrieve subscription so we can read price + status + period end
-          const sub = await stripe.subscriptions.retrieve(subscriptionId, {
-            expand: ["items.data.price"],
-          });
-
-          const status = sub.status;
-          const currentPeriodEnd = sub.current_period_end
-            ? new Date(sub.current_period_end * 1000)
-            : undefined;
-
-          const priceId = sub.items?.data?.[0]?.price?.id;
-          const mapped = priceId ? PRICE_TO_PLAN[priceId] : null;
-
-          // Plan/interval resolution priority:
-          // 1) priceId mapping
-          // 2) session.metadata.planKey
-          // 3) DO NOT overwrite plan if we can’t determine it
-          let plan = mapped?.plan || null;
-          let interval = mapped?.interval || null;
-
-          if ((!plan || !interval) && session.metadata?.planKey) {
-            const parsed = parsePlanKey(session.metadata.planKey);
-            if (parsed) {
-              plan = plan || parsed.plan;
-              interval = interval || parsed.interval;
-            }
-          }
-
-          const set = {
-            stripeCustomerId: customerId,
-            stripeSubscriptionId: subscriptionId,
-            subscriptionStatus: status || "active",
-            currentPeriodEnd,
-            isSubscribed: isActiveStatus(status),
-          };
-
-          // Only set plan fields if we actually know them (avoid nuking paid users to "free")
-          if (plan) set.plan = plan;
-          if (interval) set.planInterval = interval;
-
-          // If they are now subscribed, clear trial so UI doesn't get confused
-          const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
-
-          if (userId) {
-            await updateUserById(userId, { set, unset });
-          } else {
-            await updateUserByCustomer(customerId, { set, unset });
-          }
-        }
-
-        // B) NFC card payment checkout (keep your email logic)
-        if (session.mode === "payment") {
-          const customerEmail = session.customer_details?.email;
-          const amountPaid = session.amount_total
-            ? (session.amount_total / 100).toFixed(2)
-            : null;
-
-          await sendEmail(
-            process.env.EMAIL_USER,
-            amountPaid ? `New Konar Card Order - £${amountPaid}` : `New Konar Card Order`,
-            `<p>New order from: ${customerEmail || "Unknown email"}</p>${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
-            }`
-          );
-
-          if (customerEmail && amountPaid) {
-            await sendEmail(
-              customerEmail,
-              "Your Konar Card Order Confirmation",
-              orderConfirmationTemplate(customerEmail, amountPaid)
-            );
-          }
-        }
+  // Extras: sum quantity of add-on line items
+  let extraProfilesQty = 0;
+  if (EXTRA_PROFILE_PRICE_IDS.length) {
+    for (const it of items) {
+      const priceId = it?.price?.id;
+      if (priceId && EXTRA_PROFILE_PRICE_IDS.includes(priceId)) {
+        extraProfilesQty += Number(it?.quantity || 0);
       }
+    }
+  }
 
-      // -------------------------
-      // customer.subscription.updated
-      // -------------------------
-      if (event.type === "customer.subscription.updated") {
-        const sub = event.data.object;
+  return { plan, interval, extraProfilesQty };
+}
 
-        const customerId = sub.customer;
-        const subscriptionId = sub.id;
+// IMPORTANT: express.raw must be used for Stripe signature verification
+router.post("/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  if (!endpointSecret) {
+    console.error("⚠️ Missing STRIPE_WEBHOOK_SECRET");
+    return res.status(500).send("Webhook not configured");
+  }
+
+  const sig = req.headers["stripe-signature"];
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    console.error("⚠️ Stripe webhook signature error:", err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  try {
+    // -------------------------
+    // checkout.session.completed
+    // -------------------------
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object;
+
+      // A) Subscription checkout
+      if (session.mode === "subscription") {
+        const customerId = session.customer;
+        const subscriptionId = session.subscription;
+        const userId = session.metadata?.userId;
+
+        // Retrieve subscription so we can read price + status + period end + add-ons
+        const sub = await stripe.subscriptions.retrieve(subscriptionId, {
+          expand: ["items.data.price"],
+        });
+
         const status = sub.status;
+        const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
 
-        const currentPeriodEnd = sub.current_period_end
-          ? new Date(sub.current_period_end * 1000)
-          : undefined;
-
-        const priceId = sub.items?.data?.[0]?.price?.id;
-        const mapped = priceId ? PRICE_TO_PLAN[priceId] : null;
+        const { plan, interval, extraProfilesQty } = extractPlanAndExtrasFromSubscription(
+          sub,
+          session.metadata?.planKey
+        );
 
         const set = {
+          stripeCustomerId: customerId,
           stripeSubscriptionId: subscriptionId,
           subscriptionStatus: status || "active",
           currentPeriodEnd,
           isSubscribed: isActiveStatus(status),
+          extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
         };
 
-        // Only set plan/interval if mapping exists
-        if (mapped?.plan) set.plan = mapped.plan;
-        if (mapped?.interval) set.planInterval = mapped.interval;
+        // Only set plan fields if we actually know them (avoid nuking paid users to "free")
+        if (plan) set.plan = plan;
+        if (interval) set.planInterval = interval;
 
+        // If they are now subscribed, clear trial so UI doesn't get confused
         const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
 
-        await updateUserByCustomer(customerId, { set, unset });
+        if (userId) {
+          await updateUserById(userId, { set, unset });
+        } else {
+          await updateUserByCustomer(customerId, { set, unset });
+        }
       }
 
-      // -------------------------
-      // invoice.paid (keeps status accurate)
-      // -------------------------
-      if (event.type === "invoice.paid") {
-        const invoice = event.data.object;
-        const customerId = invoice.customer;
-        const subscriptionId = invoice.subscription;
+      // B) NFC card payment checkout (keep your email logic)
+      if (session.mode === "payment") {
+        const customerEmail = session.customer_details?.email;
+        const amountPaid = session.amount_total ? (session.amount_total / 100).toFixed(2) : null;
 
-        await updateUserByCustomer(customerId, {
-          set: {
-            stripeSubscriptionId: subscriptionId || undefined,
-            subscriptionStatus: "active",
-            isSubscribed: true,
-          },
-          unset: { trialExpires: "" },
-        });
+        await sendEmail(
+          process.env.EMAIL_USER,
+          amountPaid ? `New Konar Card Order - £${amountPaid}` : `New Konar Card Order`,
+          `<p>New order from: ${customerEmail || "Unknown email"}</p>${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
+          }`
+        );
+
+        if (customerEmail && amountPaid) {
+          await sendEmail(customerEmail, "Your Konar Card Order Confirmation", orderConfirmationTemplate(customerEmail, amountPaid));
+        }
       }
-
-      // -------------------------
-      // invoice.payment_failed
-      // -------------------------
-      if (event.type === "invoice.payment_failed") {
-        const invoice = event.data.object;
-        const customerId = invoice.customer;
-        const subscriptionId = invoice.subscription;
-
-        await updateUserByCustomer(customerId, {
-          set: {
-            stripeSubscriptionId: subscriptionId || undefined,
-            subscriptionStatus: "past_due",
-            isSubscribed: false,
-          },
-        });
-      }
-
-      // -------------------------
-      // customer.subscription.deleted
-      // -------------------------
-      if (event.type === "customer.subscription.deleted") {
-        const sub = event.data.object;
-        const customerId = sub.customer;
-
-        await updateUserByCustomer(customerId, {
-          set: {
-            plan: "free",
-            planInterval: "monthly",
-            subscriptionStatus: "canceled",
-            isSubscribed: false,
-          },
-          unset: {
-            currentPeriodEnd: "",
-            stripeSubscriptionId: "",
-          },
-        });
-      }
-
-      return res.status(200).send("OK");
-    } catch (err) {
-      console.error("Webhook handler error:", err);
-      return res.status(500).send("Webhook handler failed");
     }
+
+    // -------------------------
+    // customer.subscription.updated
+    // -------------------------
+    if (event.type === "customer.subscription.updated") {
+      const sub = event.data.object;
+
+      const customerId = sub.customer;
+      const subscriptionId = sub.id;
+      const status = sub.status;
+
+      const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
+
+      // IMPORTANT:
+      // The event payload may not include expanded price objects.
+      // We need to retrieve with expand to reliably read price ids + add-on qty.
+      const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
+        expand: ["items.data.price"],
+      });
+
+      const { plan, interval, extraProfilesQty } = extractPlanAndExtrasFromSubscription(fullSub, null);
+
+      const set = {
+        stripeSubscriptionId: subscriptionId,
+        subscriptionStatus: status || "active",
+        currentPeriodEnd,
+        isSubscribed: isActiveStatus(status),
+        extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
+      };
+
+      // Only set plan/interval if mapping exists
+      if (plan) set.plan = plan;
+      if (interval) set.planInterval = interval;
+
+      const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
+
+      await updateUserByCustomer(customerId, { set, unset });
+    }
+
+    // -------------------------
+    // invoice.paid (keeps status accurate)
+    // -------------------------
+    if (event.type === "invoice.paid") {
+      const invoice = event.data.object;
+      const customerId = invoice.customer;
+      const subscriptionId = invoice.subscription;
+
+      // Pull subscription so we can keep add-on qty accurate too
+      let extraProfilesQty = 0;
+      let plan = null;
+      let interval = null;
+
+      if (subscriptionId) {
+        try {
+          const fullSub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ["items.data.price"] });
+          const extracted = extractPlanAndExtrasFromSubscription(fullSub, null);
+          extraProfilesQty = extracted.extraProfilesQty || 0;
+          plan = extracted.plan;
+          interval = extracted.interval;
+        } catch {
+          // ignore; still mark active
+        }
+      }
+
+      const set = {
+        stripeSubscriptionId: subscriptionId || undefined,
+        subscriptionStatus: "active",
+        isSubscribed: true,
+        extraProfilesQty: Number.isFinite(extraProfilesQty) ? extraProfilesQty : 0,
+      };
+
+      if (plan) set.plan = plan;
+      if (interval) set.planInterval = interval;
+
+      await updateUserByCustomer(customerId, {
+        set,
+        unset: { trialExpires: "" },
+      });
+    }
+
+    // -------------------------
+    // invoice.payment_failed
+    // -------------------------
+    if (event.type === "invoice.payment_failed") {
+      const invoice = event.data.object;
+      const customerId = invoice.customer;
+      const subscriptionId = invoice.subscription;
+
+      await updateUserByCustomer(customerId, {
+        set: {
+          stripeSubscriptionId: subscriptionId || undefined,
+          subscriptionStatus: "past_due",
+          isSubscribed: false,
+        },
+      });
+    }
+
+    // -------------------------
+    // customer.subscription.deleted
+    // -------------------------
+    if (event.type === "customer.subscription.deleted") {
+      const sub = event.data.object;
+      const customerId = sub.customer;
+
+      await updateUserByCustomer(customerId, {
+        set: {
+          plan: "free",
+          planInterval: "monthly",
+          subscriptionStatus: "canceled",
+          isSubscribed: false,
+          extraProfilesQty: 0,
+        },
+        unset: {
+          currentPeriodEnd: "",
+          stripeSubscriptionId: "",
+        },
+      });
+    }
+
+    return res.status(200).send("OK");
+  } catch (err) {
+    console.error("Webhook handler error:", err);
+    return res.status(500).send("Webhook handler failed");
   }
-);
+});
 
 module.exports = router;

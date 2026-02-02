@@ -21,6 +21,42 @@ const reviewSchema = new mongoose.Schema(
 const businessCardSchema = new mongoose.Schema(
   {
     /* -------------------------------------------------
+       Multi-profile identity
+       - user can have MANY profiles now
+       - profile_slug identifies each profile under a user
+    ------------------------------------------------- */
+    profile_slug: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      required: true,
+      default: "main",
+      match: [/^[a-z0-9-]+$/, "profile_slug can only contain a-z, 0-9 and hyphens"],
+    },
+
+    is_default: {
+      type: Boolean,
+      default: false,
+    },
+
+    /* -------------------------------------------------
+       Templates (5 total)
+    ------------------------------------------------- */
+    template_id: {
+      type: String,
+      enum: ["template-1", "template-2", "template-3", "template-4", "template-5"],
+      default: "template-1",
+    },
+
+    /* -------------------------------------------------
+       QR for this specific profile link
+    ------------------------------------------------- */
+    qr_code_url: {
+      type: String,
+      default: "",
+    },
+
+    /* -------------------------------------------------
        Core identity
     ------------------------------------------------- */
     business_card_name: { type: String, default: "" },
@@ -138,20 +174,34 @@ const businessCardSchema = new mongoose.Schema(
     tiktok_url: { type: String, default: "" },
 
     /* -------------------------------------------------
-       Ownership (1 profile per user for now)
+       Ownership (MULTI profile)
+       - removed unique:true so one user can create many profiles
     ------------------------------------------------- */
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      unique: true,
       index: true,
     },
   },
   {
     timestamps: true,
-    minimize: false, // IMPORTANT: keep empty objects/arrays
+    minimize: false,
   }
+);
+
+/**
+ * Each user can only have ONE profile with the same slug.
+ */
+businessCardSchema.index({ user: 1, profile_slug: 1 }, { unique: true });
+
+/**
+ * Each user can only have ONE default profile.
+ * (Partial unique index: only enforced when is_default=true)
+ */
+businessCardSchema.index(
+  { user: 1, is_default: 1 },
+  { unique: true, partialFilterExpression: { is_default: true } }
 );
 
 module.exports = mongoose.model("BusinessCard", businessCardSchema);
