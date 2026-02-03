@@ -91,9 +91,29 @@ const generateAndUploadProfileQr = async (userId, profileSlug) => {
     });
 
     const safeSlug = safeProfileSlug(profileSlug) || "profile";
-    const fileKey = `qr-codes/${userId}/${safeSlug}-${Date.now()}.png`; // unique to avoid caching
+    const fileKey = `qr-codes/${userId}/${safeSlug}-${Date.now()}.png`;
     const qrCodeUrl = await uploadToS3(qrBuffer, fileKey);
     return qrCodeUrl;
+};
+
+/**
+ * Ensure Stripe customer exists for a user (source of truth = DB)
+ */
+const ensureStripeCustomer = async (userDoc) => {
+    if (userDoc?.stripeCustomerId) return userDoc.stripeCustomerId;
+
+    const customer = await stripe.customers.create({
+        email: userDoc.email,
+        name: userDoc.name || userDoc.username || "",
+        metadata: {
+            userId: String(userDoc._id),
+            username: userDoc.username || "",
+        },
+    });
+
+    userDoc.stripeCustomerId = customer.id;
+    await userDoc.save();
+    return customer.id;
 };
 
 // TEST
@@ -101,38 +121,32 @@ const test = (req, res) => res.json("test is working");
 
 /**
  * ✅ CLAIM LINK (NEW MEANING)
- * You enter a "username" on the frontend — we treat that as the FIRST PROFILE SLUG.
+ * Frontend "username" = FIRST PROFILE SLUG.
  *
- * - If NOT logged in: availability check only for profile_slug global uniqueness.
- * - If logged in: must be valid token + user exists
- *   -> create FIRST BusinessCard with profile_slug = claimed slug (if user has none)
- *   -> generate QR for that profile
- *
- * We keep user.username as an account identifier if you still want it, but URLs use /u/:slug only.
+ * - If NOT logged in: availability check only.
+ * - If logged in: create FIRST BusinessCard if none, generate QR for it.
  */
 const claimLink = async (req, res) => {
     try {
         const raw = (req.body.username || "").trim().toLowerCase();
         if (!raw) return res.status(400).json({ error: "Username is required" });
 
-        // allow input like old system, but convert to strict profile slug
         const profileSlug = safeProfileSlug(raw);
         if (!profileSlug || profileSlug.length < 3) {
             return res.status(400).json({ error: "Link name must be at least 3 characters" });
         }
 
-        // Global availability check: BusinessCard.profile_slug must be unique platform-wide
+        // Global availability check
         const taken = await BusinessCard.findOne({ profile_slug: profileSlug }).select("_id");
         if (taken) return res.status(409).json({ error: "Username already taken" });
 
         const token = getTokenFromReq(req);
 
-        // Availability check (no auth) — frontend uses this as user types
+        // No auth => just availability
         if (!token) {
             return res.json({ success: true, available: true, username: profileSlug });
         }
 
-        // Token present => must be valid
         let decoded;
         try {
             decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -140,23 +154,19 @@ const claimLink = async (req, res) => {
             return res.status(401).json({ error: "Invalid token" });
         }
 
-        // Token valid => user must exist
         const user = await User.findById(decoded.id);
-        if (!user) {
-            return res.status(401).json({ error: "User not found" });
-        }
+        if (!user) return res.status(401).json({ error: "User not found" });
 
-        // Optional: store username on user (kept for UI/account, not routing)
+        // Keep for account/UI only (routing uses /u/:slug)
         user.username = profileSlug;
-        user.slug = profileSlug; // legacy field
-        user.profileUrl = buildPublicProfileUrl(profileSlug); // legacy field (now /u/:slug)
+        user.slug = profileSlug;
+        user.profileUrl = buildPublicProfileUrl(profileSlug);
 
-        // If user has no profiles yet, create the first one using this slug
+        // Create FIRST profile if none
         const existingCount = await BusinessCard.countDocuments({ user: user._id });
-        let card = null;
 
         if (existingCount === 0) {
-            card = await BusinessCard.create({
+            await BusinessCard.create({
                 user: user._id,
                 profile_slug: profileSlug,
                 template_id: "template-1",
@@ -164,14 +174,14 @@ const claimLink = async (req, res) => {
             });
         }
 
-        // Ensure QR exists for the claimed slug profile (either just created or not)
+        // Ensure QR exists for this slug/profile
         const target = await BusinessCard.findOne({ profile_slug: profileSlug, user: user._id });
         if (target) {
             const qrUrl = await generateAndUploadProfileQr(user._id, profileSlug);
             if (qrUrl) {
                 target.qr_code_url = qrUrl;
                 await target.save();
-                user.qrCodeUrl = qrUrl; // legacy field for “main QR”
+                user.qrCodeUrl = qrUrl; // legacy “main QR”
             }
         }
 
@@ -197,19 +207,18 @@ const registerUser = async (req, res) => {
 
         const cleanEmail = email.trim().toLowerCase();
 
-        // Use username input as first profile slug
+        // Username input is first profile slug
         const desiredSlug = safeProfileSlug(username);
         if (!desiredSlug || desiredSlug.length < 3) {
             return res.status(400).json({ error: "Username must be at least 3 characters." });
         }
 
-        // User email uniqueness
         const existingEmail = await User.findOne({ email: cleanEmail });
         if (existingEmail) {
             return res.json({ error: "This email is already registered. Please log in." });
         }
 
-        // Global slug uniqueness for first profile
+        // Global slug uniqueness
         const slugTaken = await BusinessCard.findOne({ profile_slug: desiredSlug }).select("_id");
         if (slugTaken) {
             return res.status(400).json({ error: "Username already taken. Please choose another." });
@@ -223,17 +232,16 @@ const registerUser = async (req, res) => {
         const user = await User.create({
             name,
             email: cleanEmail,
-            username: desiredSlug, // kept for account/UI
+            username: desiredSlug,
             password: hashedPassword,
-            profileUrl: buildPublicProfileUrl(desiredSlug), // legacy field
+            profileUrl: buildPublicProfileUrl(desiredSlug),
             isVerified: false,
             verificationCode: code,
             verificationCodeExpires: expires,
-            slug: desiredSlug, // legacy field
+            slug: desiredSlug,
             authProvider: "local",
         });
 
-        // Create FIRST BusinessCard with the slug
         const card = await BusinessCard.create({
             user: user._id,
             profile_slug: desiredSlug,
@@ -241,12 +249,11 @@ const registerUser = async (req, res) => {
             template_id: "template-1",
         });
 
-        // QR for first profile
         const qrUrl = await generateAndUploadProfileQr(user._id, desiredSlug);
         if (qrUrl) {
             card.qr_code_url = qrUrl;
             await card.save();
-            user.qrCodeUrl = qrUrl; // legacy
+            user.qrCodeUrl = qrUrl;
             await user.save();
         }
 
@@ -339,8 +346,6 @@ const loginUser = async (req, res) => {
         }
 
         const token = signToken(user);
-
-        // Optional cookie (frontend uses Bearer token anyway)
         res.cookie("token", token, { httpOnly: true, sameSite: "lax" });
 
         return res.json({ token, user: toSafeUser(user) });
@@ -462,7 +467,9 @@ const subscribeUser = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        const user = req.user; // hydrated by requireAuth
+        // ✅ always re-fetch fresh user doc (to save stripeCustomerId if needed)
+        const user = await User.findById(req.user._id);
+        if (!user) return res.status(401).json({ error: "Unauthorized" });
 
         // ✅ must have at least 1 profile before checkout
         const profileCount = await BusinessCard.countDocuments({ user: user._id });
@@ -492,23 +499,45 @@ const subscribeUser = async (req, res) => {
 
         const cancelUrl = `${FRONTEND_URL}/pricing`;
 
-        // ✅ Teams quantity billing: start quantity = current number of profiles (min 1)
-        const quantity =
-            parsed.plan === "teams" ? Math.max(1, profileCount) : 1;
+        // ✅ TEAMS quantity model:
+        // - You said Teams allows multiple profiles, priced per profile.
+        // - Stripe proration is handled automatically when quantity increases later.
+        // - On initial subscribe, quantity should match current profiles (usually 1).
+        const quantity = parsed.plan === "teams" ? Math.max(1, profileCount) : 1;
+
+        // ✅ ensure a Stripe customer so later we can UPDATE subscription quantities cleanly
+        const stripeCustomerId = await ensureStripeCustomer(user);
 
         const session = await stripe.checkout.sessions.create({
             mode: "subscription",
+            customer: stripeCustomerId,
             payment_method_types: ["card"],
+            allow_promotion_codes: true,
+
             line_items: [{ price: priceId, quantity }],
-            ...(user.stripeCustomerId ? { customer: user.stripeCustomerId } : { customer_email: user.email }),
+
             success_url: successUrl,
             cancel_url: cancelUrl,
+
+            // helpful in Stripe dashboard + webhook
+            client_reference_id: String(user._id),
             metadata: {
                 userId: String(user._id),
                 plan: parsed.plan,
                 interval: parsed.interval,
                 planKey,
                 teamsQuantityAtCheckout: String(quantity),
+                checkoutType: "base_subscription",
+            },
+
+            subscription_data: {
+                metadata: {
+                    userId: String(user._id),
+                    plan: parsed.plan,
+                    interval: parsed.interval,
+                    planKey,
+                    checkoutType: "base_subscription",
+                },
             },
         });
 

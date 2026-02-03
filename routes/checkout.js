@@ -15,7 +15,7 @@ const safeSlug = (v) =>
     String(v || "")
         .trim()
         .toLowerCase()
-        .replace(/[^a-z0-9-]/g, "")
+        .replace(/[^a-z0-9-]/g, "");
 
 function getTeamsPriceId(interval = "monthly") {
     const i = String(interval || "monthly").toLowerCase();
@@ -23,6 +23,14 @@ function getTeamsPriceId(interval = "monthly") {
     if (i === "quarterly") return process.env.STRIPE_PRICE_TEAMS_QUARTERLY;
     if (i === "yearly") return process.env.STRIPE_PRICE_TEAMS_YEARLY;
     return process.env.STRIPE_PRICE_TEAMS_MONTHLY;
+}
+
+function getExtraProfilePriceId(interval = "monthly") {
+    const i = String(interval || "monthly").toLowerCase();
+    if (i === "monthly") return process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY;
+    if (i === "quarterly") return process.env.STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY;
+    if (i === "yearly") return process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY;
+    return process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY;
 }
 
 async function ensureStripeCustomer(user) {
@@ -46,8 +54,14 @@ async function ensureStripeCustomer(user) {
  * POST /api/checkout/teams
  * Body:
  *  - interval: monthly|quarterly|yearly (default monthly)
- *  - desiredQuantity OR quantity: number (default 2, min 2)
+ *  - desiredProfiles OR desiredQuantity OR quantity: number (default 2, min 2)
+ *      NOTE: this is the TOTAL profiles the user wants to have.
  *  - claimedSlug: the new profile slug user wants to claim (required)
+ *
+ * Pricing model:
+ *  - Teams base = qty 1
+ *  - Extra profiles add-on = £1.95 each (qty = desiredProfiles - 1)
+ *  - Stripe handles proration automatically on subscription changes.
  */
 router.post("/teams", requireAuth, async (req, res) => {
     try {
@@ -58,10 +72,15 @@ router.post("/teams", requireAuth, async (req, res) => {
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
         const interval = String(req.body?.interval || "monthly").toLowerCase();
-        const desiredQuantity = Math.max(
+
+        // TOTAL number of profiles user wants
+        const desiredProfiles = Math.max(
             2,
-            Number(req.body?.desiredQuantity || req.body?.quantity || 2)
+            Number(req.body?.desiredProfiles || req.body?.desiredQuantity || req.body?.quantity || 2)
         );
+
+        // Extra profiles beyond the 1 included with Teams
+        const extraProfilesQty = Math.max(1, desiredProfiles - 1);
 
         const claimedSlugRaw = req.body?.claimedSlug || req.body?.profile_slug || "";
         const claimedSlug = safeSlug(claimedSlugRaw);
@@ -73,27 +92,38 @@ router.post("/teams", requireAuth, async (req, res) => {
             });
         }
 
-        // Server-side availability check (prevents obvious duplicates)
+        // Server-side availability check
         const exists = await BusinessCard.findOne({ profile_slug: claimedSlug }).select("_id");
         if (exists) {
-            return res.status(409).json({ error: "Profile slug already exists", code: "SLUG_TAKEN" });
+            return res.status(409).json({
+                error: "Profile slug already exists",
+                code: "SLUG_TAKEN",
+            });
         }
 
-        const priceId = getTeamsPriceId(interval);
-        if (!priceId) {
+        const teamsPriceId = getTeamsPriceId(interval);
+        const extraPriceId = getExtraProfilePriceId(interval);
+
+        if (!teamsPriceId) {
             return res.status(500).json({
                 error: "Teams price ID missing in env",
                 code: "MISSING_TEAMS_PRICE_ID",
             });
         }
 
+        if (!extraPriceId) {
+            return res.status(500).json({
+                error: "Extra profile price ID missing in env",
+                code: "MISSING_EXTRA_PROFILE_PRICE_ID",
+            });
+        }
+
         const stripeCustomerId = await ensureStripeCustomer(user);
 
-        // ✅ include claimedSlug + qty in return URL so frontend can refetch + show status
         const successUrl =
             `${FRONTEND_URL}/profiles?checkout=success` +
             `&slug=${encodeURIComponent(claimedSlug)}` +
-            `&qty=${encodeURIComponent(String(desiredQuantity))}` +
+            `&profiles=${encodeURIComponent(String(desiredProfiles))}` +
             `&session_id={CHECKOUT_SESSION_ID}`;
 
         const cancelUrl = `${FRONTEND_URL}/profiles?checkout=cancel`;
@@ -103,16 +133,23 @@ router.post("/teams", requireAuth, async (req, res) => {
             customer: stripeCustomerId,
             payment_method_types: ["card"],
 
-            // Optional: helpful in Stripe dashboard
+            // Helpful for Stripe dashboard
             client_reference_id: String(user._id),
 
-            line_items: [{ price: priceId, quantity: desiredQuantity }],
+            // IMPORTANT: Two-line-item subscription
+            // - Teams base (qty 1)
+            // - Extra profiles add-on (qty desiredProfiles - 1)
+            line_items: [
+                { price: teamsPriceId, quantity: 1 },
+                { price: extraPriceId, quantity: extraProfilesQty },
+            ],
 
             metadata: {
                 userId: String(user._id),
                 planKey: `teams-${interval}`,
                 claimedSlug,
-                desiredQuantity: String(desiredQuantity),
+                desiredProfiles: String(desiredProfiles),
+                extraProfilesQty: String(extraProfilesQty),
                 checkoutType: "teams_add_profile",
             },
 
@@ -121,7 +158,8 @@ router.post("/teams", requireAuth, async (req, res) => {
                     userId: String(user._id),
                     planKey: `teams-${interval}`,
                     claimedSlug,
-                    desiredQuantity: String(desiredQuantity),
+                    desiredProfiles: String(desiredProfiles),
+                    extraProfilesQty: String(extraProfilesQty),
                     checkoutType: "teams_add_profile",
                 },
             },

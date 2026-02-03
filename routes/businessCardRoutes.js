@@ -24,6 +24,27 @@ const {
 // ✅ Model needed for slug availability check
 const BusinessCard = require("../models/BusinessCard");
 
+/**
+ * IMPORTANT:
+ * profile_slug must match BusinessCard schema: /^[a-z0-9-]+$/
+ * (hyphens only, NO underscore/dot)
+ */
+const safeProfileSlug = (v) =>
+  String(v || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "");
+
+/* =========================================================
+   NO-CACHE (helps avoid weird 304/stale behavior on protected APIs)
+   ========================================================= */
+router.use((req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  next();
+});
+
 /* =========================================================
    MULTER (memory)
    ========================================================= */
@@ -61,7 +82,7 @@ router.get("/me", requireAuth, getMyBusinessCard);
 router.get("/profiles", requireAuth, getMyProfiles);
 router.get("/profiles/:slug", requireAuth, getMyProfileBySlug);
 
-// Create profile
+// Create profile (manual create, not the webhook-created one)
 router.post("/profiles", requireAuth, createMyProfile);
 
 // Delete profile
@@ -79,11 +100,13 @@ router.post("/", requireAuth, upload, saveBusinessCard);
    ========================================================= */
 router.get("/slug-available/:slug", async (req, res) => {
   try {
-    const slug = String(req.params.slug || "").trim().toLowerCase();
-    if (!slug) return res.status(400).json({ error: "slug required" });
+    const slug = safeProfileSlug(req.params.slug);
+    if (!slug || slug.length < 3) {
+      return res.status(400).json({ error: "slug required (min 3 chars, a-z 0-9 hyphen)" });
+    }
 
     const exists = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
-    return res.json({ available: !exists });
+    return res.json({ available: !exists, normalized: slug });
   } catch (err) {
     console.error("slug-available:", err);
     return res.status(500).json({ error: "Failed to check slug" });
@@ -94,10 +117,10 @@ router.get("/slug-available/:slug", async (req, res) => {
    PUBLIC
    ========================================================= */
 
-// Public by GLOBAL slug
+// Public by GLOBAL slug (THIS is what /u/:slug should use on frontend)
 router.get("/public/:slug", getPublicBySlug);
 
-// Username-based public endpoints (RESTORED and ACTIVE)
+// Username-based public endpoints (kept for compatibility)
 router.get("/by_username/:username", getPublicByUsername);
 router.get("/by_username/:username/:slug", getPublicByUsernameAndSlug);
 

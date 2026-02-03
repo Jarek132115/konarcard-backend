@@ -9,12 +9,13 @@ const uploadToS3 = require("../utils/uploadToS3");
  * ---------------------------------------------------------
  */
 
+// ✅ IMPORTANT: must match BusinessCard model validation:
+// profile_slug allows ONLY a-z 0-9 and hyphens
 const safeSlug = (v) =>
   String(v || "")
     .trim()
     .toLowerCase()
-    // allow: letters, numbers, dot, underscore, hyphen
-    .replace(/[^a-z0-9._-]/g, "") || "main";
+    .replace(/[^a-z0-9-]/g, "") || "";
 
 const parseJsonArray = (v, fallback = []) => {
   try {
@@ -69,9 +70,16 @@ const clampFreeContent = ({ plan, works, services, reviews }) => {
 
 /**
  * Force free plan template to template-1 (never block saving).
+ * Plus + Teams can use all 5 templates.
  */
 const normalizeTemplateForPlan = (plan, requestedTemplate) => {
-  const allowed = new Set(["template-1", "template-2", "template-3", "template-4", "template-5"]);
+  const allowed = new Set([
+    "template-1",
+    "template-2",
+    "template-3",
+    "template-4",
+    "template-5",
+  ]);
   const t = String(requestedTemplate || "template-1");
   if (!allowed.has(t)) return "template-1";
   if (plan === "free") return "template-1";
@@ -79,23 +87,30 @@ const normalizeTemplateForPlan = (plan, requestedTemplate) => {
 };
 
 /**
- * ✅ IMPORTANT:
- * Allowed profiles logic:
- * - free: 1
- * - plus: 1 (for now, you said plus should not add profiles yet)
- * - teams: user.teamsProfilesQty (from Stripe quantity)
+ * ✅ Profile limits (YOUR REQUIREMENT):
+ * - free: 1 profile
+ * - plus: 1 profile (but all 5 templates)
+ * - teams: multiple profiles (based on Stripe quantity)
  *
- * We read userDoc from DB so it’s never stale.
+ * We support BOTH fields, because your DB shows both:
+ * - teamsProfilesQty (your current source of truth)
+ * - extraProfilesQty (in case you switch to "base+extra" later)
+ *
+ * Current behavior:
+ * - If teamsProfilesQty is set => use it as total allowed profiles
+ * - Else fallback to (1 + extraProfilesQty)
  */
 const getMaxProfilesForUser = (userDoc) => {
   const plan = getPlan(userDoc);
 
-  if (plan === "teams") {
-    const qty = Number(userDoc?.teamsProfilesQty || 1);
-    return Math.max(1, Number.isFinite(qty) ? qty : 1);
-  }
+  if (plan !== "teams") return 1;
 
-  return 1; // free + plus (your requirement)
+  const teamsQty = Number(userDoc?.teamsProfilesQty);
+  if (Number.isFinite(teamsQty) && teamsQty > 0) return Math.max(1, teamsQty);
+
+  const extra = Number(userDoc?.extraProfilesQty);
+  const extraSafe = Number.isFinite(extra) ? Math.max(0, extra) : 0;
+  return 1 + extraSafe;
 };
 
 /**
@@ -107,7 +122,8 @@ const getMaxProfilesForUser = (userDoc) => {
 // Legacy stub
 const getMyBusinessCard = async (req, res) => {
   return res.status(400).json({
-    error: "No default profile. Use GET /api/business-card/profiles and pick a profile_slug.",
+    error:
+      "No default profile. Use GET /api/business-card/profiles and pick a profile_slug.",
     code: "NO_DEFAULT_PROFILE",
   });
 };
@@ -117,7 +133,10 @@ const getMyProfiles = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-    const cards = await BusinessCard.find({ user: req.user._id }).sort({ updatedAt: -1 });
+    const cards = await BusinessCard.find({ user: req.user._id }).sort({
+      updatedAt: -1,
+    });
+
     return res.json({ data: cards || [] });
   } catch (err) {
     console.error("getMyProfiles:", err);
@@ -133,7 +152,11 @@ const getMyProfileBySlug = async (req, res) => {
     const slug = safeSlug(req.params.slug);
     if (!slug) return res.status(400).json({ error: "profile_slug required" });
 
-    const card = await BusinessCard.findOne({ user: req.user._id, profile_slug: slug });
+    const card = await BusinessCard.findOne({
+      user: req.user._id,
+      profile_slug: slug,
+    });
+
     return res.json({ data: card || null });
   } catch (err) {
     console.error("getMyProfileBySlug:", err);
@@ -158,7 +181,9 @@ const createMyProfile = async (req, res) => {
 
     const slug = safeSlug(req.body.profile_slug);
     if (!slug || slug.length < 3) {
-      return res.status(400).json({ error: "profile_slug must be at least 3 characters" });
+      return res
+        .status(400)
+        .json({ error: "profile_slug must be at least 3 characters" });
     }
 
     // ✅ Profile cap enforced ONLY here
@@ -169,16 +194,23 @@ const createMyProfile = async (req, res) => {
         plan,
         maxProfiles: maxAllowed,
         currentProfiles: count,
-        teamsProfilesQty: freshUser?.teamsProfilesQty || 1,
+        teamsProfilesQty: freshUser?.teamsProfilesQty || null,
+        extraProfilesQty: freshUser?.extraProfilesQty || 0,
       });
     }
 
     // ✅ GLOBAL slug uniqueness
-    const slugTaken = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
-    if (slugTaken) return res.status(409).json({ error: "Profile slug already exists" });
+    const slugTaken = await BusinessCard.findOne({ profile_slug: slug }).select(
+      "_id"
+    );
+    if (slugTaken)
+      return res.status(409).json({ error: "Profile slug already exists" });
 
     // ✅ Never 403 for template. Normalize instead.
-    const effectiveTemplate = normalizeTemplateForPlan(plan, req.body.template_id || "template-1");
+    const effectiveTemplate = normalizeTemplateForPlan(
+      plan,
+      req.body.template_id || "template-1"
+    );
 
     const created = await BusinessCard.create({
       user: userId,
@@ -187,10 +219,8 @@ const createMyProfile = async (req, res) => {
       business_card_name: req.body.business_card_name || "",
     });
 
-    // ✅ IMPORTANT CHANGE:
-    // We DO NOT sync Stripe quantity from profile count anymore.
-    // Stripe quantity is the source of truth for Teams.
-    // If user wants more profiles, they upgrade quantity in Stripe / your subscription page.
+    // ✅ We DO NOT sync Stripe quantity from profile count here.
+    // Stripe quantity (teamsProfilesQty) is the source of truth for Teams.
 
     return res.status(201).json({ data: created });
   } catch (err) {
@@ -202,7 +232,8 @@ const createMyProfile = async (req, res) => {
 // Legacy stub
 const setDefaultProfile = async (req, res) => {
   return res.status(400).json({
-    error: "Default profile is not supported. Profiles are independent. Pick by profile_slug.",
+    error:
+      "Default profile is not supported. Profiles are independent. Pick by profile_slug.",
     code: "NO_DEFAULT_PROFILE",
   });
 };
@@ -222,8 +253,7 @@ const deleteMyProfile = async (req, res) => {
 
     await BusinessCard.deleteOne({ _id: card._id });
 
-    // ✅ IMPORTANT CHANGE:
-    // We DO NOT sync Stripe quantity from profile count anymore.
+    // ✅ We DO NOT sync Stripe quantity from profile count here.
 
     return res.json({ success: true });
   } catch (err) {
@@ -237,7 +267,7 @@ const deleteMyProfile = async (req, res) => {
 // - Saving edits must ALWAYS work for ALL plans (free/plus/teams)
 // - Free plan limits still apply (clamp + normalize), but never 403
 // - Teams supports multiple profiles
-// - Free/Plus should not be able to create 2nd profile, BUT saving should not 403:
+// - Free/Plus should not be able to create 2nd profile via SAVE:
 //   if they already have 1 profile and try to save another slug, we update their only profile instead.
 const saveBusinessCard = async (req, res) => {
   try {
@@ -246,12 +276,16 @@ const saveBusinessCard = async (req, res) => {
     const userId = req.user._id;
 
     // ✅ Fresh user
-    const freshUser = await User.findById(userId).select("plan teamsProfilesQty extraProfilesQty");
+    const freshUser = await User.findById(userId).select(
+      "plan teamsProfilesQty extraProfilesQty"
+    );
     const plan = getPlan(freshUser);
 
-    const requestedSlug = safeSlug(req.body.profile_slug || "main");
+    const requestedSlug = safeSlug(req.body.profile_slug || "");
     if (!requestedSlug || requestedSlug.length < 3) {
-      return res.status(400).json({ error: "profile_slug is required and must be at least 3 chars" });
+      return res.status(400).json({
+        error: "profile_slug is required and must be at least 3 chars",
+      });
     }
 
     // GLOBAL slug protection (never allow two different owners)
@@ -264,9 +298,10 @@ const saveBusinessCard = async (req, res) => {
     }
 
     // Try to find the exact profile by slug
-    let existingCard = await BusinessCard.findOne({ user: userId, profile_slug: requestedSlug }).select(
-      "_id profile_slug template_id works services reviews"
-    );
+    let existingCard = await BusinessCard.findOne({
+      user: userId,
+      profile_slug: requestedSlug,
+    }).select("_id profile_slug template_id works services reviews");
 
     // If not found and plan only allows 1 profile, fall back to the user's only profile
     let targetQuery = { user: userId, profile_slug: requestedSlug };
@@ -276,9 +311,9 @@ const saveBusinessCard = async (req, res) => {
       const count = await BusinessCard.countDocuments({ user: userId });
 
       if (count >= 1) {
-        const onlyCard = await BusinessCard.findOne({ user: userId }).sort({ createdAt: 1 }).select(
-          "_id profile_slug template_id works services reviews"
-        );
+        const onlyCard = await BusinessCard.findOne({ user: userId })
+          .sort({ createdAt: 1 })
+          .select("_id profile_slug template_id works services reviews");
 
         if (onlyCard?._id) {
           existingCard = onlyCard;
@@ -321,11 +356,17 @@ const saveBusinessCard = async (req, res) => {
     const maxWorks = plan === "free" ? FREE_LIMIT : Infinity;
 
     let works = [...existing_works].filter(Boolean);
-    const remainingSlots = Math.max(0, maxWorks === Infinity ? workFiles.length : maxWorks - works.length);
-    const filesToUpload = plan === "free" ? workFiles.slice(0, remainingSlots) : workFiles;
+    const remainingSlots = Math.max(
+      0,
+      maxWorks === Infinity ? workFiles.length : maxWorks - works.length
+    );
+    const filesToUpload =
+      plan === "free" ? workFiles.slice(0, remainingSlots) : workFiles;
 
     for (const f of filesToUpload) {
-      const key = `works/${userId}/${Date.now()}-${Math.random().toString(16).slice(2)}-${f.originalname}`;
+      const key = `works/${userId}/${Date.now()}-${Math.random()
+        .toString(16)
+        .slice(2)}-${f.originalname}`;
       const url = await uploadToS3(f.buffer, key);
       if (url) uploadedWorkUrls.push(url);
     }
@@ -333,14 +374,22 @@ const saveBusinessCard = async (req, res) => {
     works = [...works, ...uploadedWorkUrls];
 
     // Clamp free plan content instead of blocking
-    ({ works, services, reviews } = clampFreeContent({ plan, works, services, reviews }));
+    ({ works, services, reviews } = clampFreeContent({
+      plan,
+      works,
+      services,
+      reviews,
+    }));
 
     // Template normalize (free => template-1)
-    const requestedTemplate = req.body.template_id || existingCard?.template_id || "template-1";
+    const requestedTemplate =
+      req.body.template_id || existingCard?.template_id || "template-1";
     const effectiveTemplate = normalizeTemplateForPlan(plan, requestedTemplate);
 
     const update = {
       user: userId,
+
+      // ✅ If free/plus user tried to save to a new slug, we "rename" their single profile
       profile_slug: willRenameSlug ? requestedSlug : requestedSlug,
 
       template_id: effectiveTemplate,
@@ -383,7 +432,14 @@ const saveBusinessCard = async (req, res) => {
       x_url: req.body.x_url || "",
       tiktok_url: req.body.tiktok_url || "",
 
-      section_order: parseJsonArray(req.body.section_order, ["main", "about", "work", "services", "reviews", "contact"]),
+      section_order: parseJsonArray(req.body.section_order, [
+        "main",
+        "about",
+        "work",
+        "services",
+        "reviews",
+        "contact",
+      ]),
 
       works,
     };
@@ -398,10 +454,14 @@ const saveBusinessCard = async (req, res) => {
     if (cover_photo_url) update.cover_photo = cover_photo_url;
     if (avatar_url) update.avatar = avatar_url;
 
+    // ✅ Upsert only if teams (or user has no card yet)
+    // For free/plus we prefer updating the only card (handled above).
+    const allowUpsert = plan === "teams" || !existingCard;
+
     const saved = await BusinessCard.findOneAndUpdate(
       targetQuery,
       { $set: update },
-      { new: true, upsert: !existingCard }
+      { new: true, upsert: allowUpsert }
     );
 
     return res.json({
@@ -426,6 +486,7 @@ const saveBusinessCard = async (req, res) => {
  */
 
 // ✅ Public profile by GLOBAL slug
+// This is the canonical public lookup for /u/:profile_slug
 const getPublicBySlug = async (req, res) => {
   try {
     const slug = safeSlug(req.params.slug);
@@ -441,7 +502,8 @@ const getPublicBySlug = async (req, res) => {
   }
 };
 
-// GET /api/business-card/by_username/:username
+// Legacy support (old route): GET /api/business-card/by_username/:username
+// Returns "main" if exists, otherwise newest.
 const getPublicByUsername = async (req, res) => {
   try {
     const username = String(req.params.username || "").trim();
@@ -466,7 +528,7 @@ const getPublicByUsername = async (req, res) => {
   }
 };
 
-// GET /api/business-card/by_username/:username/:slug
+// Legacy support (old route): GET /api/business-card/by_username/:username/:slug
 const getPublicByUsernameAndSlug = async (req, res) => {
   try {
     const username = String(req.params.username || "").trim();

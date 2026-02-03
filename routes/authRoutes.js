@@ -161,12 +161,8 @@ router.get(
 
 /**
  * ✅ IMPORTANT:
- * We REMOVED the old /public_profile/:slug endpoint from authRoutes
- * because:
- * - Your public profiles are now GLOBAL slugs at /u/:slug
- * - Public profile data must come from BusinessCard.profile_slug
- *
- * Public profile API is now:
+ * Public profile data comes from BusinessCard.profile_slug (GLOBAL)
+ * Public profile API is:
  * - GET /api/business-card/public/:slug   (in businessCardRoutes.js)
  */
 
