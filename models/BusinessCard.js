@@ -1,4 +1,3 @@
-// backend/models/BusinessCard.js
 const mongoose = require("mongoose");
 
 const serviceSchema = new mongoose.Schema(
@@ -21,7 +20,7 @@ const reviewSchema = new mongoose.Schema(
 const businessCardSchema = new mongoose.Schema(
   {
     /* -------------------------------------------------
-       GLOBAL profile identity (NO default profile)
+       GLOBAL profile identity
        Public URL: /u/:profile_slug
     ------------------------------------------------- */
     profile_slug: {
@@ -30,6 +29,27 @@ const businessCardSchema = new mongoose.Schema(
       lowercase: true,
       required: true,
       match: [/^[a-z0-9-]+$/, "profile_slug can only contain a-z, 0-9 and hyphens"],
+    },
+
+    /* -------------------------------------------------
+       Ownership (MULTI-PROFILE = many cards per user)
+       IMPORTANT: user is NOT unique
+    ------------------------------------------------- */
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true, // non-unique (this will create user_1 but NOT unique)
+    },
+
+    /* -------------------------------------------------
+       Default profile flag (optional but useful)
+       Ensures only one default profile per user
+    ------------------------------------------------- */
+    is_default: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
 
     /* -------------------------------------------------
@@ -165,16 +185,6 @@ const businessCardSchema = new mongoose.Schema(
     linkedin_url: { type: String, default: "" },
     x_url: { type: String, default: "" },
     tiktok_url: { type: String, default: "" },
-
-    /* -------------------------------------------------
-       Ownership
-    ------------------------------------------------- */
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-      index: true,
-    },
   },
   {
     timestamps: true,
@@ -185,8 +195,16 @@ const businessCardSchema = new mongoose.Schema(
 /**
  * ✅ GLOBAL uniqueness:
  * profile_slug must be unique across the entire platform
- * because public URL is /u/:slug
  */
 businessCardSchema.index({ profile_slug: 1 }, { unique: true });
+
+/**
+ * ✅ ONE default profile per user (partial unique)
+ * Only enforces uniqueness when is_default = true
+ */
+businessCardSchema.index(
+  { user: 1, is_default: 1 },
+  { unique: true, partialFilterExpression: { is_default: true } }
+);
 
 module.exports = mongoose.model("BusinessCard", businessCardSchema);
