@@ -2,6 +2,7 @@
 const BusinessCard = require("../models/BusinessCard");
 const User = require("../models/user");
 const uploadToS3 = require("../utils/uploadToS3");
+const QRCode = require("qrcode");
 
 /**
  * ---------------------------------------------------------
@@ -115,6 +116,39 @@ const getMaxProfilesForUser = (userDoc) => {
 
 /**
  * ---------------------------------------------------------
+ * ✅ QR helpers (each BusinessCard gets its own QR)
+ * Public URL is ALWAYS: /u/:profile_slug
+ * ---------------------------------------------------------
+ */
+
+const FRONTEND_PROFILE_DOMAIN =
+  process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
+
+const buildPublicProfileUrl = (profileSlug) => {
+  const s = safeSlug(profileSlug);
+  if (!s) return "";
+  return `${FRONTEND_PROFILE_DOMAIN}/u/${s}`;
+};
+
+const generateAndUploadProfileQr = async (userId, profileSlug) => {
+  const url = buildPublicProfileUrl(profileSlug);
+  if (!url) return "";
+
+  const qrBuffer = await QRCode.toBuffer(url, {
+    width: 900,
+    margin: 2,
+    errorCorrectionLevel: "M",
+    color: { dark: "#000000", light: "#ffffff" },
+  });
+
+  const safe = safeSlug(profileSlug) || "profile";
+  const fileKey = `qr-codes/${userId}/${safe}-${Date.now()}.png`; // unique to avoid caching
+  const qrCodeUrl = await uploadToS3(qrBuffer, fileKey);
+  return qrCodeUrl;
+};
+
+/**
+ * ---------------------------------------------------------
  * PROTECTED (requireAuth)
  * ---------------------------------------------------------
  */
@@ -173,7 +207,7 @@ const createMyProfile = async (req, res) => {
 
     // ✅ Always read fresh user from DB (webhook may have just updated plan)
     const freshUser = await User.findById(userId).select(
-      "plan planInterval subscriptionStatus isSubscribed trialExpires extraProfilesQty teamsProfilesQty"
+      "plan planInterval subscriptionStatus isSubscribed trialExpires extraProfilesQty teamsProfilesQty username slug profileUrl qrCodeUrl"
     );
 
     const plan = getPlan(freshUser);
@@ -212,12 +246,39 @@ const createMyProfile = async (req, res) => {
       req.body.template_id || "template-1"
     );
 
+    // ✅ Create profile
     const created = await BusinessCard.create({
       user: userId,
       profile_slug: slug,
       template_id: effectiveTemplate,
       business_card_name: req.body.business_card_name || "",
     });
+
+    // ✅ Generate QR + save to this BusinessCard (ALWAYS for any created profile)
+    try {
+      const qrUrl = await generateAndUploadProfileQr(userId, slug);
+      if (qrUrl) {
+        created.qr_code_url = qrUrl;
+        await created.save();
+
+        // If this is the user's first profile OR user has no "main qr", store legacy "main qr" too
+        // (helps older UI pieces that still read user.qrCodeUrl)
+        if (!freshUser?.qrCodeUrl) {
+          await User.findByIdAndUpdate(userId, {
+            $set: {
+              qrCodeUrl: qrUrl,
+              // Keep legacy url field in sync (optional)
+              profileUrl: buildPublicProfileUrl(slug),
+              slug: slug,
+              username: freshUser?.username || slug,
+            },
+          });
+        }
+      }
+    } catch (e) {
+      // Do not fail creation if QR generation fails
+      console.error("QR generation failed (createMyProfile):", e);
+    }
 
     // ✅ We DO NOT sync Stripe quantity from profile count here.
     // Stripe quantity (teamsProfilesQty) is the source of truth for Teams.
@@ -277,7 +338,7 @@ const saveBusinessCard = async (req, res) => {
 
     // ✅ Fresh user
     const freshUser = await User.findById(userId).select(
-      "plan teamsProfilesQty extraProfilesQty"
+      "plan teamsProfilesQty extraProfilesQty username slug profileUrl qrCodeUrl"
     );
     const plan = getPlan(freshUser);
 
@@ -301,7 +362,7 @@ const saveBusinessCard = async (req, res) => {
     let existingCard = await BusinessCard.findOne({
       user: userId,
       profile_slug: requestedSlug,
-    }).select("_id profile_slug template_id works services reviews");
+    }).select("_id profile_slug template_id works services reviews qr_code_url");
 
     // If not found and plan only allows 1 profile, fall back to the user's only profile
     let targetQuery = { user: userId, profile_slug: requestedSlug };
@@ -313,7 +374,7 @@ const saveBusinessCard = async (req, res) => {
       if (count >= 1) {
         const onlyCard = await BusinessCard.findOne({ user: userId })
           .sort({ createdAt: 1 })
-          .select("_id profile_slug template_id works services reviews");
+          .select("_id profile_slug template_id works services reviews qr_code_url");
 
         if (onlyCard?._id) {
           existingCard = onlyCard;
@@ -464,6 +525,35 @@ const saveBusinessCard = async (req, res) => {
       { new: true, upsert: allowUpsert }
     );
 
+    // ✅ Ensure QR exists for this profile.
+    // Also: if free/plus "renamed" their single profile slug, generate a new QR for the new URL.
+    try {
+      const needsQr =
+        !saved?.qr_code_url || (willRenameSlug && safeSlug(saved.profile_slug) === requestedSlug);
+
+      if (needsQr) {
+        const qrUrl = await generateAndUploadProfileQr(userId, saved.profile_slug);
+        if (qrUrl) {
+          saved.qr_code_url = qrUrl;
+          await saved.save();
+
+          // If free/plus renames their only profile, sync legacy user fields too
+          if (plan !== "teams" && willRenameSlug) {
+            await User.findByIdAndUpdate(userId, {
+              $set: {
+                username: requestedSlug,
+                slug: requestedSlug,
+                profileUrl: buildPublicProfileUrl(requestedSlug),
+                qrCodeUrl: qrUrl,
+              },
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.error("QR ensure failed (saveBusinessCard):", e);
+    }
+
     return res.json({
       data: saved,
       normalized: {
@@ -515,10 +605,15 @@ const getPublicByUsername = async (req, res) => {
 
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    const main = await BusinessCard.findOne({ user: user._id, profile_slug: "main" });
+    const main = await BusinessCard.findOne({
+      user: user._id,
+      profile_slug: "main",
+    });
     if (main) return res.json(main);
 
-    const newest = await BusinessCard.findOne({ user: user._id }).sort({ updatedAt: -1 });
+    const newest = await BusinessCard.findOne({ user: user._id }).sort({
+      updatedAt: -1,
+    });
     if (!newest) return res.status(404).json({ error: "Business card not found" });
 
     return res.json(newest);
@@ -543,7 +638,10 @@ const getPublicByUsernameAndSlug = async (req, res) => {
 
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    const card = await BusinessCard.findOne({ user: user._id, profile_slug: slug });
+    const card = await BusinessCard.findOne({
+      user: user._id,
+      profile_slug: slug,
+    });
     if (!card) return res.status(404).json({ error: "Business card not found" });
 
     return res.json(card);
