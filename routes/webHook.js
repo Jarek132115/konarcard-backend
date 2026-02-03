@@ -50,7 +50,6 @@ function isActiveStatus(status) {
 
 /**
  * IMPORTANT: BusinessCard schema requires /^[a-z0-9-]+$/
- * (hyphens only, NO underscore/dot)
  */
 function safeProfileSlug(v) {
   return String(v || "")
@@ -79,6 +78,13 @@ async function updateUserById(userId, { set = {}, unset = {} }) {
   if (!Object.keys(update).length) return;
 
   await User.findByIdAndUpdate(userId, update, { new: true });
+}
+
+async function findUserIdByCustomer(customerId) {
+  if (!customerId) return null;
+  const u = await User.findOne({ stripeCustomerId: customerId }).select("_id username");
+  if (!u) return null;
+  return { userId: String(u._id), username: u.username || "" };
 }
 
 /**
@@ -112,7 +118,7 @@ function extractEntitlementsFromSubscription(sub) {
     }
   }
 
-  // TEAMS quantity (seats/profiles)
+  // TEAMS quantity
   let teamsProfilesQty = 1;
   let teamsStripeItemId;
   let teamsStripePriceId;
@@ -136,7 +142,7 @@ function extractEntitlementsFromSubscription(sub) {
 /**
  * Create BusinessCard for claimed slug (idempotent)
  */
-async function ensureClaimedProfile({ userId, claimedSlug }) {
+async function ensureClaimedProfile({ userId, claimedSlug, username }) {
   const slug = safeProfileSlug(claimedSlug);
   if (!slug || slug.length < 3) return { created: false, reason: "invalid_slug" };
 
@@ -144,10 +150,13 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
   const existing = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
   if (existing) return { created: false, reason: "already_exists" };
 
-  // Create QR -> upload to S3
-  let qrUrl = "";
-  const publicUrl = `${PUBLIC_PROFILE_DOMAIN}/u/${slug}`;
+  // QR link: match your frontend routing: /u/:username/:slug (main is special, but this is for new)
+  const u = String(username || "").trim().toLowerCase();
+  const publicUrl = u
+    ? `${PUBLIC_PROFILE_DOMAIN}/u/${u}/${slug}`
+    : `${PUBLIC_PROFILE_DOMAIN}/u/${slug}`;
 
+  let qrUrl = "";
   try {
     const pngBuffer = await QRCode.toBuffer(publicUrl, {
       errorCorrectionLevel: "M",
@@ -157,8 +166,7 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
 
     const key = `qr-codes/${slug}-${Date.now()}.png`;
     qrUrl = await uploadToS3(pngBuffer, key, "image/png");
-  } catch (e) {
-    // QR is nice-to-have; profile can still exist without it
+  } catch {
     qrUrl = "";
   }
 
@@ -175,7 +183,6 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
 
 /**
  * Export as a SINGLE handler function
- * Mounted in index.js at POST /api/checkout/webhook with express.raw()
  */
 module.exports = async function stripeWebhookHandler(req, res) {
   if (!endpointSecret) {
@@ -204,7 +211,11 @@ module.exports = async function stripeWebhookHandler(req, res) {
       if (session.mode === "subscription") {
         const customerId = session.customer;
         const subscriptionId = session.subscription;
-        const userId = session.metadata?.userId;
+
+        // metadata might be missing in some sessions, so we also resolve via customerId
+        const metaUserId = session.metadata?.userId ? String(session.metadata.userId) : null;
+        const claimedSlug = session.metadata?.claimedSlug;
+        const checkoutType = session.metadata?.checkoutType;
 
         const sub = await stripe.subscriptions.retrieve(subscriptionId, {
           expand: ["items.data.price"],
@@ -223,10 +234,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
           subscriptionStatus: status || "active",
           currentPeriodEnd,
           isSubscribed: isActiveStatus(status),
-
           extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
-
-          // Teams fields (even if not teams we normalize below)
           teamsProfilesQty: extracted.plan === "teams"
             ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
             : 1,
@@ -241,25 +249,37 @@ module.exports = async function stripeWebhookHandler(req, res) {
         }
 
         const unset = isActiveStatus(status) ? { trialExpires: "" } : {};
-
         if (extracted.plan !== "teams") {
           unset.teamsStripeItemId = "";
           unset.teamsStripePriceId = "";
         }
 
-        if (userId) await updateUserById(userId, { set, unset });
+        // Update user (by id if possible, else by customer)
+        if (metaUserId) await updateUserById(metaUserId, { set, unset });
         else await updateUserByCustomer(customerId, { set, unset });
 
-        // ✅ Create the claimed profile AFTER user is set to teams
-        const claimedSlug = session.metadata?.claimedSlug;
-        const checkoutType = session.metadata?.checkoutType;
+        // ✅ Create claimed profile even if meta userId missing
+        if (checkoutType === "teams_add_profile" && claimedSlug) {
+          let resolved = { userId: metaUserId, username: "" };
 
-        if (checkoutType === "teams_add_profile" && userId && claimedSlug) {
-          await ensureClaimedProfile({ userId, claimedSlug });
+          if (!resolved.userId) {
+            const found = await findUserIdByCustomer(customerId);
+            if (found) resolved = found;
+          }
+
+          if (resolved.userId) {
+            await ensureClaimedProfile({
+              userId: resolved.userId,
+              claimedSlug,
+              username: resolved.username,
+            });
+          } else {
+            console.warn("⚠️ Could not resolve userId for claimed profile creation");
+          }
         }
       }
 
-      // One-time NFC cards payment
+      // One-time payment (NFC)
       if (session.mode === "payment") {
         const customerEmail = session.customer_details?.email;
         const amountPaid = session.amount_total
@@ -285,7 +305,10 @@ module.exports = async function stripeWebhookHandler(req, res) {
     // ---------------------------------------
     // subscription created / updated
     // ---------------------------------------
-    if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
+    if (
+      event.type === "customer.subscription.created" ||
+      event.type === "customer.subscription.updated"
+    ) {
       const subObj = event.data.object;
 
       const customerId = subObj.customer;
@@ -306,7 +329,6 @@ module.exports = async function stripeWebhookHandler(req, res) {
         subscriptionStatus: status || "active",
         currentPeriodEnd,
         isSubscribed: isActiveStatus(status),
-
         extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
         teamsProfilesQty: extracted.plan === "teams"
           ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
