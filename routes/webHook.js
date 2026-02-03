@@ -13,7 +13,6 @@ const { orderConfirmationTemplate } = require("../utils/emailTemplates");
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-// IMPORTANT: your public profile domain (what the QR should point to)
 const PUBLIC_PROFILE_DOMAIN =
   process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
 
@@ -26,7 +25,7 @@ const PRICE_TO_PLAN = {
   [process.env.STRIPE_PRICE_PLUS_QUARTERLY]: { plan: "plus", interval: "quarterly" },
   [process.env.STRIPE_PRICE_PLUS_YEARLY]: { plan: "plus", interval: "yearly" },
 
-  // TEAMS
+  // TEAMS (base item)
   [process.env.STRIPE_PRICE_TEAMS_MONTHLY]: { plan: "teams", interval: "monthly" },
   [process.env.STRIPE_PRICE_TEAMS_QUARTERLY]: { plan: "teams", interval: "quarterly" },
   [process.env.STRIPE_PRICE_TEAMS_YEARLY]: { plan: "teams", interval: "yearly" },
@@ -48,9 +47,6 @@ function isActiveStatus(status) {
   return status === "active" || status === "trialing";
 }
 
-/**
- * IMPORTANT: BusinessCard schema requires /^[a-z0-9-]+$/
- */
 function safeProfileSlug(v) {
   return String(v || "")
     .trim()
@@ -87,8 +83,18 @@ async function findUserIdByCustomer(customerId) {
   return { userId: String(u._id), username: u.username || "" };
 }
 
+function buildPublicUrlBySlug(profileSlug) {
+  const s = safeProfileSlug(profileSlug);
+  if (!s) return "";
+  return `${PUBLIC_PROFILE_DOMAIN}/u/${s}`;
+}
+
 /**
  * Extract entitlements from subscription (expanded with items.data.price)
+ *
+ * ✅ IMPORTANT CHANGE:
+ * Teams allowed profiles is NOT teamsItem.quantity anymore.
+ * It is: 1 (included) + extraProfilesQty (add-on quantity)
  */
 function extractEntitlementsFromSubscription(sub) {
   const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
@@ -97,64 +103,58 @@ function extractEntitlementsFromSubscription(sub) {
   let plan = null;
   let interval = null;
 
+  let teamsStripeItemId;
+  let teamsStripePriceId;
+
   for (const it of items) {
     const priceId = it?.price?.id;
     const mapped = priceId ? PRICE_TO_PLAN[priceId] : null;
     if (mapped?.plan && mapped?.interval) {
       plan = mapped.plan;
       interval = mapped.interval;
+      if (mapped.plan === "teams") {
+        teamsStripeItemId = it.id;
+        teamsStripePriceId = priceId;
+      }
       break;
     }
   }
 
-  // PLUS add-on
+  // Extra profiles add-on quantity (sum)
   let extraProfilesQty = 0;
-  if (EXTRA_PROFILE_PRICE_IDS.length) {
-    for (const it of items) {
-      const priceId = it?.price?.id;
-      if (priceId && EXTRA_PROFILE_PRICE_IDS.includes(priceId)) {
-        extraProfilesQty += Number(it?.quantity || 0);
-      }
+  for (const it of items) {
+    const priceId = it?.price?.id;
+    if (priceId && EXTRA_PROFILE_PRICE_IDS.includes(priceId)) {
+      extraProfilesQty += Number(it?.quantity || 0);
     }
   }
 
-  // TEAMS quantity
-  let teamsProfilesQty = 1;
-  let teamsStripeItemId;
-  let teamsStripePriceId;
+  // Teams total allowed profiles
+  const teamsProfilesQty =
+    plan === "teams" ? Math.max(1, 1 + Math.max(0, extraProfilesQty)) : 1;
 
-  if (TEAMS_PRICE_IDS.length) {
-    const teamsItem = items.find((it) => {
-      const pid = it?.price?.id;
-      return pid && TEAMS_PRICE_IDS.includes(pid);
-    });
-
-    if (teamsItem) {
-      teamsProfilesQty = Math.max(1, Number(teamsItem.quantity || 1));
-      teamsStripeItemId = teamsItem.id;
-      teamsStripePriceId = teamsItem?.price?.id;
-    }
-  }
-
-  return { plan, interval, extraProfilesQty, teamsProfilesQty, teamsStripeItemId, teamsStripePriceId };
+  return {
+    plan,
+    interval,
+    extraProfilesQty,
+    teamsProfilesQty,
+    teamsStripeItemId,
+    teamsStripePriceId,
+  };
 }
 
 /**
  * Create BusinessCard for claimed slug (idempotent)
+ * ✅ URL + QR must be /u/:slug ONLY
  */
-async function ensureClaimedProfile({ userId, claimedSlug, username }) {
+async function ensureClaimedProfile({ userId, claimedSlug }) {
   const slug = safeProfileSlug(claimedSlug);
   if (!slug || slug.length < 3) return { created: false, reason: "invalid_slug" };
 
-  // Already exists? (webhooks can retry)
   const existing = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
   if (existing) return { created: false, reason: "already_exists" };
 
-  // QR link: match your frontend routing: /u/:username/:slug (main is special, but this is for new)
-  const u = String(username || "").trim().toLowerCase();
-  const publicUrl = u
-    ? `${PUBLIC_PROFILE_DOMAIN}/u/${u}/${slug}`
-    : `${PUBLIC_PROFILE_DOMAIN}/u/${slug}`;
+  const publicUrl = buildPublicUrlBySlug(slug);
 
   let qrUrl = "";
   try {
@@ -164,8 +164,8 @@ async function ensureClaimedProfile({ userId, claimedSlug, username }) {
       width: 512,
     });
 
-    const key = `qr-codes/${slug}-${Date.now()}.png`;
-    qrUrl = await uploadToS3(pngBuffer, key, "image/png");
+    const key = `qr-codes/${userId}/${slug}-${Date.now()}.png`;
+    qrUrl = await uploadToS3(pngBuffer, key);
   } catch {
     qrUrl = "";
   }
@@ -212,7 +212,6 @@ module.exports = async function stripeWebhookHandler(req, res) {
         const customerId = session.customer;
         const subscriptionId = session.subscription;
 
-        // metadata might be missing in some sessions, so we also resolve via customerId
         const metaUserId = session.metadata?.userId ? String(session.metadata.userId) : null;
         const claimedSlug = session.metadata?.claimedSlug;
         const checkoutType = session.metadata?.checkoutType;
@@ -254,24 +253,22 @@ module.exports = async function stripeWebhookHandler(req, res) {
           unset.teamsStripePriceId = "";
         }
 
-        // Update user (by id if possible, else by customer)
         if (metaUserId) await updateUserById(metaUserId, { set, unset });
         else await updateUserByCustomer(customerId, { set, unset });
 
-        // ✅ Create claimed profile even if meta userId missing
+        // ✅ Create claimed profile on Teams add flow
         if (checkoutType === "teams_add_profile" && claimedSlug) {
-          let resolved = { userId: metaUserId, username: "" };
+          let resolved = { userId: metaUserId };
 
           if (!resolved.userId) {
             const found = await findUserIdByCustomer(customerId);
-            if (found) resolved = found;
+            if (found) resolved.userId = found.userId;
           }
 
           if (resolved.userId) {
             await ensureClaimedProfile({
               userId: resolved.userId,
               claimedSlug,
-              username: resolved.username,
             });
           } else {
             console.warn("⚠️ Could not resolve userId for claimed profile creation");

@@ -33,6 +33,18 @@ function getExtraProfilePriceId(interval = "monthly") {
     return process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY;
 }
 
+const TEAMS_PRICE_IDS = [
+    process.env.STRIPE_PRICE_TEAMS_MONTHLY,
+    process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
+    process.env.STRIPE_PRICE_TEAMS_YEARLY,
+].filter(Boolean);
+
+const EXTRA_PROFILE_PRICE_IDS = [
+    process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
+    process.env.STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY,
+    process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY,
+].filter(Boolean);
+
 async function ensureStripeCustomer(user) {
     if (user.stripeCustomerId) return user.stripeCustomerId;
 
@@ -50,6 +62,56 @@ async function ensureStripeCustomer(user) {
     return customer.id;
 }
 
+function isActiveStatus(status) {
+    return status === "active" || status === "trialing";
+}
+
+/**
+ * Find subscription item IDs for:
+ * - Teams base item (one of TEAMS_PRICE_IDS)
+ * - Extra profiles add-on item (one of EXTRA_PROFILE_PRICE_IDS)
+ */
+function findSubItems(subscription) {
+    const items = Array.isArray(subscription?.items?.data) ? subscription.items.data : [];
+
+    const teamsItem = items.find((it) => {
+        const pid = it?.price?.id;
+        return pid && TEAMS_PRICE_IDS.includes(pid);
+    });
+
+    const extraItem = items.find((it) => {
+        const pid = it?.price?.id;
+        return pid && EXTRA_PROFILE_PRICE_IDS.includes(pid);
+    });
+
+    return { teamsItem, extraItem };
+}
+
+/**
+ * Create and attempt to charge an immediate proration invoice.
+ * This matches your requirement: if they add mid-cycle, charge the proportional amount now.
+ */
+async function invoiceAndPayNow({ customerId, subscriptionId }) {
+    // Create invoice for the subscription
+    const invoice = await stripe.invoices.create({
+        customer: customerId,
+        subscription: subscriptionId,
+        collection_method: "charge_automatically",
+        auto_advance: true,
+    });
+
+    // Finalize then attempt pay
+    const finalized = await stripe.invoices.finalizeInvoice(invoice.id);
+
+    // If amount_due is 0, nothing to pay
+    if (!finalized || !finalized.amount_due || finalized.amount_due <= 0) {
+        return { paid: true, invoiceId: finalized?.id, amount_due: 0 };
+    }
+
+    const paid = await stripe.invoices.pay(finalized.id);
+    return { paid: paid?.paid === true, invoiceId: paid?.id, amount_due: paid?.amount_due || 0 };
+}
+
 /**
  * POST /api/checkout/teams
  * Body:
@@ -61,7 +123,10 @@ async function ensureStripeCustomer(user) {
  * Pricing model:
  *  - Teams base = qty 1
  *  - Extra profiles add-on = £1.95 each (qty = desiredProfiles - 1)
- *  - Stripe handles proration automatically on subscription changes.
+ *
+ * ✅ IMPORTANT:
+ * If already subscribed to Teams, we UPDATE the existing subscription (no second subscription)
+ * and charge prorations immediately.
  */
 router.post("/teams", requireAuth, async (req, res) => {
     try {
@@ -120,6 +185,65 @@ router.post("/teams", requireAuth, async (req, res) => {
 
         const stripeCustomerId = await ensureStripeCustomer(user);
 
+        // ✅ If user already has an active Teams subscription: UPDATE + PRORATE NOW
+        if (user.plan === "teams" && user.stripeSubscriptionId) {
+            const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId, {
+                expand: ["items.data.price"],
+            });
+
+            if (sub && isActiveStatus(sub.status)) {
+                const { teamsItem, extraItem } = findSubItems(sub);
+
+                if (!teamsItem) {
+                    return res.status(500).json({
+                        error: "Could not find Teams item on subscription. Check Stripe prices mapping.",
+                        code: "TEAMS_ITEM_NOT_FOUND",
+                    });
+                }
+
+                // Build update items:
+                // - teams stays qty 1
+                // - extra item: set qty = extraProfilesQty
+                const items = [{ id: teamsItem.id, quantity: 1 }];
+
+                if (extraItem) {
+                    items.push({ id: extraItem.id, quantity: extraProfilesQty });
+                } else {
+                    // Add the extra price line if missing
+                    items.push({ price: extraPriceId, quantity: extraProfilesQty });
+                }
+
+                // Update subscription (keeps billing_cycle_anchor, creates prorations)
+                await stripe.subscriptions.update(sub.id, {
+                    items,
+                    proration_behavior: "create_prorations",
+                });
+
+                // Charge prorations immediately (your requirement)
+                let prorationResult = { paid: false };
+                try {
+                    prorationResult = await invoiceAndPayNow({
+                        customerId: stripeCustomerId,
+                        subscriptionId: sub.id,
+                    });
+                } catch (e) {
+                    // If invoice fails (no default payment method etc.), still return success so UI can continue.
+                    console.error("Proration invoice/pay failed:", e?.message || e);
+                    prorationResult = { paid: false, error: "proration_charge_failed" };
+                }
+
+                return res.json({
+                    updated: true,
+                    mode: "subscription_update",
+                    desiredProfiles,
+                    extraProfilesQty,
+                    proration: prorationResult,
+                    // frontend can just refetch user + profiles after this
+                });
+            }
+        }
+
+        // ✅ Otherwise: create a new Teams subscription checkout session
         const successUrl =
             `${FRONTEND_URL}/profiles?checkout=success` +
             `&slug=${encodeURIComponent(claimedSlug)}` +
@@ -133,12 +257,9 @@ router.post("/teams", requireAuth, async (req, res) => {
             customer: stripeCustomerId,
             payment_method_types: ["card"],
 
-            // Helpful for Stripe dashboard
             client_reference_id: String(user._id),
 
-            // IMPORTANT: Two-line-item subscription
-            // - Teams base (qty 1)
-            // - Extra profiles add-on (qty desiredProfiles - 1)
+            // Two-line-item subscription
             line_items: [
                 { price: teamsPriceId, quantity: 1 },
                 { price: extraPriceId, quantity: extraProfilesQty },
