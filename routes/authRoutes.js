@@ -22,8 +22,12 @@ const {
     submitContactForm,
 } = require("../controllers/authController");
 
-// ✅ NEW: Public interactions (exchange contact)
-const { exchangeContact } = require("../controllers/publicController");
+// ✅ Public + Contact Book endpoints live here
+const {
+    exchangeContact,
+    listMyContactExchanges,
+    deleteMyContactExchange,
+} = require("../controllers/publicController");
 
 // ✅ Stripe logic lives in its own controller now
 const {
@@ -65,10 +69,16 @@ router.get("/", test);
 router.post("/claim-link", claimLink);
 router.post("/api/claim-link", claimLink);
 
-// ✅ NEW: Exchange contact (PUBLIC)
-// Visitor submits their details on /u/:slug page
+// ✅ Exchange contact (PUBLIC) — visitor submits details from /u/:slug
 router.post("/exchange-contact", exchangeContact);
 router.post("/api/exchange-contact", exchangeContact);
+
+// ✅ Contact Book (PROTECTED) — owner views/deletes exchanges
+router.get("/contact-exchanges", requireAuth, listMyContactExchanges);
+router.get("/api/contact-exchanges", requireAuth, listMyContactExchanges);
+
+router.delete("/contact-exchanges/:id", requireAuth, deleteMyContactExchange);
+router.delete("/api/contact-exchanges/:id", requireAuth, deleteMyContactExchange);
 
 // Register/Login — support both / and /api variants to avoid deploy mismatches.
 router.post("/register", registerUser);
