@@ -245,16 +245,23 @@ const registerUser = async (req, res) => {
     }
 };
 
-// VERIFY EMAIL
 const verifyEmailCode = async (req, res) => {
     try {
-        const { email, code } = req.body;
-        const user = await User.findOne({ email: String(email || "").trim().toLowerCase() });
+        const email = String(req.body.email || "").trim().toLowerCase();
+        const code = String(req.body.code || "").trim();
 
-        if (!user) return res.json({ error: "User not found" });
-        if (user.isVerified) return res.json({ error: "Email already verified" });
-        if (user.verificationCode !== code) return res.json({ error: "Invalid verification code" });
-        if (user.verificationCodeExpires < Date.now()) return res.json({ error: "Code has expired" });
+        const user = await User.findOne({ email });
+
+        if (!user) return res.status(404).json({ error: "User not found" });
+        if (user.isVerified) return res.status(400).json({ error: "Email already verified" });
+
+        const stored = String(user.verificationCode || "").trim();
+
+        if (!stored) return res.status(400).json({ error: "No verification code found. Please resend." });
+        if (stored !== code) return res.status(400).json({ error: "Invalid verification code" });
+        if (Number(user.verificationCodeExpires || 0) < Date.now()) {
+            return res.status(400).json({ error: "Code has expired" });
+        }
 
         user.isVerified = true;
         user.verificationCode = undefined;
@@ -263,10 +270,11 @@ const verifyEmailCode = async (req, res) => {
 
         return res.json({ success: true, message: "Email verified successfully" });
     } catch (err) {
-        console.log("verifyEmailCode error:", err);
+        console.log(err);
         return res.status(500).json({ error: "Verification failed" });
     }
 };
+
 
 // RESEND VERIFICATION CODE
 const resendVerificationCode = async (req, res) => {
@@ -321,33 +329,32 @@ const loginUser = async (req, res) => {
         if (!match) return res.json({ error: "Passwords don’t match" });
 
         if (!user.isVerified) {
-            const newCode = Math.floor(100000 + Math.random() * 900000).toString();
-            const expires = Date.now() + 10 * 60 * 1000;
+            const now = Date.now();
 
-            user.verificationCode = newCode;
-            user.verificationCodeExpires = expires;
-            await user.save();
+            // ✅ if there is already a valid code, reuse it
+            let codeToSend = user.verificationCode;
+            let expires = Number(user.verificationCodeExpires || 0);
 
-            const html = verificationEmailTemplate(user.name, newCode);
+            const hasValidExisting = codeToSend && expires > now;
 
-            try {
-                const info = await sendEmail(user.email, "Verify Your Email", html);
-                console.log("[loginUser] verification resend result:", {
-                    to: user.email,
-                    accepted: info?.accepted,
-                    rejected: info?.rejected,
-                    messageId: info?.messageId,
-                    response: info?.response,
-                });
-            } catch (e) {
-                console.error("[loginUser] verification resend failed:", e?.message || e);
+            if (!hasValidExisting) {
+                codeToSend = Math.floor(100000 + Math.random() * 900000).toString();
+                expires = now + 10 * 60 * 1000;
+
+                user.verificationCode = codeToSend;
+                user.verificationCodeExpires = expires;
+                await user.save();
             }
 
-            return res.json({
+            const html = verificationEmailTemplate(user.name, String(codeToSend));
+            await sendEmail(user.email, "Verify Your Email", html);
+
+            return res.status(401).json({
                 error: "Please verify your email before logging in.",
                 resend: true,
             });
         }
+
 
         const token = signToken(user);
         res.cookie("token", token, { httpOnly: true, sameSite: "lax" });
