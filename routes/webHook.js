@@ -37,12 +37,6 @@ const EXTRA_PROFILE_PRICE_IDS = [
   process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY,
 ].filter(Boolean);
 
-const TEAMS_PRICE_IDS = [
-  process.env.STRIPE_PRICE_TEAMS_MONTHLY,
-  process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
-  process.env.STRIPE_PRICE_TEAMS_YEARLY,
-].filter(Boolean);
-
 function isActiveStatus(status) {
   return status === "active" || status === "trialing";
 }
@@ -92,9 +86,7 @@ function buildPublicUrlBySlug(profileSlug) {
 /**
  * Extract entitlements from subscription (expanded with items.data.price)
  *
- * ✅ IMPORTANT CHANGE:
- * Teams allowed profiles is NOT teamsItem.quantity anymore.
- * It is: 1 (included) + extraProfilesQty (add-on quantity)
+ * Teams allowed profiles = 1 (included) + extraProfilesQty
  */
 function extractEntitlementsFromSubscription(sub) {
   const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
@@ -145,7 +137,6 @@ function extractEntitlementsFromSubscription(sub) {
 
 /**
  * Create BusinessCard for claimed slug (idempotent)
- * ✅ URL + QR must be /u/:slug ONLY
  */
 async function ensureClaimedProfile({ userId, claimedSlug }) {
   const slug = safeProfileSlug(claimedSlug);
@@ -181,9 +172,6 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
   return { created: true, id: created?._id, slug, qrUrl };
 }
 
-/**
- * Export as a SINGLE handler function
- */
 module.exports = async function stripeWebhookHandler(req, res) {
   if (!endpointSecret) {
     console.error("⚠️ Missing STRIPE_WEBHOOK_SECRET");
@@ -234,9 +222,10 @@ module.exports = async function stripeWebhookHandler(req, res) {
           currentPeriodEnd,
           isSubscribed: isActiveStatus(status),
           extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
-          teamsProfilesQty: extracted.plan === "teams"
-            ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
-            : 1,
+          teamsProfilesQty:
+            extracted.plan === "teams"
+              ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+              : 1,
         };
 
         if (extracted.plan) set.plan = extracted.plan;
@@ -256,7 +245,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
         if (metaUserId) await updateUserById(metaUserId, { set, unset });
         else await updateUserByCustomer(customerId, { set, unset });
 
-        // ✅ Create claimed profile on Teams add flow
+        // Create claimed profile on Teams add flow
         if (checkoutType === "teams_add_profile" && claimedSlug) {
           let resolved = { userId: metaUserId };
 
@@ -286,7 +275,8 @@ module.exports = async function stripeWebhookHandler(req, res) {
         await sendEmail(
           process.env.EMAIL_USER,
           amountPaid ? `New Konar Card Order - £${amountPaid}` : `New Konar Card Order`,
-          `<p>New order from: ${customerEmail || "Unknown email"}</p>${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""}`
+          `<p>New order from: ${customerEmail || "Unknown email"}</p>${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
+          }`
         );
 
         if (customerEmail && amountPaid) {
@@ -327,9 +317,10 @@ module.exports = async function stripeWebhookHandler(req, res) {
         currentPeriodEnd,
         isSubscribed: isActiveStatus(status),
         extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
-        teamsProfilesQty: extracted.plan === "teams"
-          ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
-          : 1,
+        teamsProfilesQty:
+          extracted.plan === "teams"
+            ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+            : 1,
       };
 
       if (extracted.plan) set.plan = extracted.plan;
@@ -351,6 +342,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
 
     // ---------------------------------------
     // invoice.paid
+    // ✅ FIX: also set currentPeriodEnd from subscription
     // ---------------------------------------
     if (event.type === "invoice.paid") {
       const invoice = event.data.object;
@@ -358,6 +350,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
       const subscriptionId = invoice.subscription;
 
       let extracted = { plan: null, interval: null, extraProfilesQty: 0, teamsProfilesQty: 1 };
+      let currentPeriodEnd;
 
       if (subscriptionId) {
         try {
@@ -365,6 +358,10 @@ module.exports = async function stripeWebhookHandler(req, res) {
             expand: ["items.data.price"],
           });
           extracted = extractEntitlementsFromSubscription(fullSub);
+
+          currentPeriodEnd = fullSub.current_period_end
+            ? new Date(fullSub.current_period_end * 1000)
+            : undefined;
         } catch { }
       }
 
@@ -372,10 +369,12 @@ module.exports = async function stripeWebhookHandler(req, res) {
         stripeSubscriptionId: subscriptionId || undefined,
         subscriptionStatus: "active",
         isSubscribed: true,
+        currentPeriodEnd, // ✅ NOW SAVED
         extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
-        teamsProfilesQty: extracted.plan === "teams"
-          ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
-          : 1,
+        teamsProfilesQty:
+          extracted.plan === "teams"
+            ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+            : 1,
       };
 
       if (extracted.plan) set.plan = extracted.plan;
