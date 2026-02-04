@@ -22,6 +22,9 @@ const {
     submitContactForm,
 } = require("../controllers/authController");
 
+// ✅ NEW: Public interactions (exchange contact)
+const { exchangeContact } = require("../controllers/publicController");
+
 // ✅ Stripe logic lives in its own controller now
 const {
     subscribeUser,
@@ -61,6 +64,11 @@ router.get("/", test);
 // Some deployed builds call /api/claim-link, so we support both.
 router.post("/claim-link", claimLink);
 router.post("/api/claim-link", claimLink);
+
+// ✅ NEW: Exchange contact (PUBLIC)
+// Visitor submits their details on /u/:slug page
+router.post("/exchange-contact", exchangeContact);
+router.post("/api/exchange-contact", exchangeContact);
 
 // Register/Login — support both / and /api variants to avoid deploy mismatches.
 router.post("/register", registerUser);
