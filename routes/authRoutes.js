@@ -18,19 +18,25 @@ const {
     resetPassword,
     updateProfile,
     deleteAccount,
-
-    // Trial + Sync
     startTrial,
-    syncSubscriptions,
+    submitContactForm,
+} = require("../controllers/authController");
 
-    // Stripe
+// ✅ Stripe logic lives in its own controller now
+const {
     subscribeUser,
     cancelSubscription,
     checkSubscriptionStatus,
+    syncSubscriptions,
     createBillingPortal,
+} = require("../controllers/stripeController");
 
-    submitContactForm,
-} = require("../controllers/authController");
+// ✅ Settings/Billing controllers live in their own file now
+const {
+    getBillingSummary,
+    listBillingInvoices,
+    listBillingPayments,
+} = require("../controllers/billingController");
 
 const router = express.Router();
 
@@ -52,8 +58,6 @@ const signToken = (user) => {
 router.get("/", test);
 
 // ✅ Claim link
-// - no token => availability check
-// - token => finalise claim (creates first profile if none)
 router.post("/claim-link", claimLink);
 
 router.post("/register", registerUser);
@@ -79,6 +83,13 @@ router.post("/subscribe", requireAuth, subscribeUser);
 router.post("/cancel-subscription", requireAuth, cancelSubscription);
 router.get("/subscription-status", requireAuth, checkSubscriptionStatus);
 router.post("/billing-portal", requireAuth, createBillingPortal);
+
+// ==============================
+// ✅ SETTINGS / BILLING ROUTES (PROTECTED)
+// ==============================
+router.get("/billing/summary", requireAuth, getBillingSummary);
+router.get("/billing/invoices", requireAuth, listBillingInvoices);
+router.get("/billing/payments", requireAuth, listBillingPayments);
 
 // ==============================
 // TRIAL + SYNC ROUTES (PROTECTED)
@@ -116,7 +127,6 @@ router.get(
                 return res.redirect(`${FRONTEND_URL}/login?oauth=missing_jwt_secret`);
             }
 
-            // ✅ Frontend stores token then continues flow
             return res.redirect(`${FRONTEND_URL}/oauth?token=${encodeURIComponent(token)}`);
         } catch (err) {
             console.error("Google OAuth callback error:", err);
@@ -150,7 +160,6 @@ router.get(
                 return res.redirect(`${FRONTEND_URL}/login?oauth=missing_jwt_secret`);
             }
 
-            // ✅ Frontend stores token then continues flow
             return res.redirect(`${FRONTEND_URL}/oauth?token=${encodeURIComponent(token)}`);
         } catch (err) {
             console.error("Facebook OAuth callback error:", err);
@@ -158,12 +167,5 @@ router.get(
         }
     }
 );
-
-/**
- * ✅ IMPORTANT:
- * Public profile data comes from BusinessCard.profile_slug (GLOBAL)
- * Public profile API is:
- * - GET /api/business-card/public/:slug   (in businessCardRoutes.js)
- */
 
 module.exports = router;
