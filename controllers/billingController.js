@@ -14,26 +14,30 @@ const isoOrNull = (unixSeconds) => {
     }
 };
 
+const noStore = (res) => {
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+    res.set("Surrogate-Control", "no-store");
+};
+
 // ----------------------------------------------------
-// ✅ SETTINGS: Billing summary (subscriptions + portal-ready)
-// (PROTECTED BY requireAuth)
 // GET /api/billing/summary
 // ----------------------------------------------------
 const getBillingSummary = async (req, res) => {
     try {
+        noStore(res);
+
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
         const user = await User.findById(req.user._id).lean();
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
-        // If Stripe not configured, still return basic info so UI can render safely
         if (!stripe) {
             return res.json({
                 ok: true,
                 stripeConfigured: false,
                 customerExists: !!user.stripeCustomerId,
-
-                // account
                 account: {
                     name: user.name || "",
                     email: user.email || "",
@@ -42,25 +46,20 @@ const getBillingSummary = async (req, res) => {
                     googleEmail: user.googleEmail || null,
                     googleId: user.googleId || null,
                 },
-
-                // billing snapshot (DB only)
                 plan: user.plan || "free",
                 planInterval: user.planInterval || null,
                 subscriptionStatus: user.subscriptionStatus || "free",
                 currentPeriodEnd: user.currentPeriodEnd ? new Date(user.currentPeriodEnd).toISOString() : null,
-
                 stripeCustomerId: user.stripeCustomerId || null,
                 stripeSubscriptionId: user.stripeSubscriptionId || null,
             });
         }
 
-        // No customer => free user
         if (!user.stripeCustomerId) {
             return res.json({
                 ok: true,
                 stripeConfigured: true,
                 customerExists: false,
-
                 account: {
                     name: user.name || "",
                     email: user.email || "",
@@ -69,18 +68,15 @@ const getBillingSummary = async (req, res) => {
                     googleEmail: user.googleEmail || null,
                     googleId: user.googleId || null,
                 },
-
                 plan: user.plan || "free",
                 planInterval: user.planInterval || null,
                 subscriptionStatus: user.subscriptionStatus || "free",
                 currentPeriodEnd: user.currentPeriodEnd ? new Date(user.currentPeriodEnd).toISOString() : null,
-
                 stripeCustomerId: null,
                 stripeSubscriptionId: user.stripeSubscriptionId || null,
             });
         }
 
-        // Pull latest subscription state from Stripe (best-effort)
         let subscription = null;
 
         if (user.stripeSubscriptionId) {
@@ -101,8 +97,6 @@ const getBillingSummary = async (req, res) => {
                     subs.data.find((s) => ["active", "trialing"].includes(s.status)) ||
                     subs.data[0] ||
                     null;
-
-                // NOTE: We do NOT write to DB here (lean user). DB sync can be handled by your existing sync endpoint/webhook.
             } catch {
                 subscription = null;
             }
@@ -117,7 +111,6 @@ const getBillingSummary = async (req, res) => {
             ok: true,
             stripeConfigured: true,
             customerExists: true,
-
             account: {
                 name: user.name || "",
                 email: user.email || "",
@@ -126,12 +119,10 @@ const getBillingSummary = async (req, res) => {
                 googleEmail: user.googleEmail || null,
                 googleId: user.googleId || null,
             },
-
             plan: user.plan || "free",
             planInterval: user.planInterval || null,
             subscriptionStatus,
             currentPeriodEnd: currentPeriodEndISO,
-
             stripeCustomerId: user.stripeCustomerId,
             stripeSubscriptionId: user.stripeSubscriptionId || subscription?.id || null,
         });
@@ -142,12 +133,12 @@ const getBillingSummary = async (req, res) => {
 };
 
 // ----------------------------------------------------
-// ✅ SETTINGS: List invoices
-// (PROTECTED BY requireAuth)
 // GET /api/billing/invoices?limit=10
 // ----------------------------------------------------
 const listBillingInvoices = async (req, res) => {
     try {
+        noStore(res);
+
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
         if (!stripe) return res.json({ ok: true, stripeConfigured: false, invoices: [] });
 
@@ -168,14 +159,10 @@ const listBillingInvoices = async (req, res) => {
             number: inv.number || null,
             status: inv.status || null,
             currency: inv.currency || null,
-
-            // Stripe amounts are in the smallest unit (e.g. pence/cents)
             total: typeof inv.total === "number" ? inv.total : null,
             amount_paid: typeof inv.amount_paid === "number" ? inv.amount_paid : null,
             amount_due: typeof inv.amount_due === "number" ? inv.amount_due : null,
-
             created: isoOrNull(inv.created),
-
             hosted_invoice_url: inv.hosted_invoice_url || null,
             invoice_pdf: inv.invoice_pdf || null,
         }));
@@ -188,12 +175,12 @@ const listBillingInvoices = async (req, res) => {
 };
 
 // ----------------------------------------------------
-// ✅ SETTINGS: List payments (PaymentIntents)
-// (PROTECTED BY requireAuth)
 // GET /api/billing/payments?limit=10
 // ----------------------------------------------------
 const listBillingPayments = async (req, res) => {
     try {
+        noStore(res);
+
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
         if (!stripe) return res.json({ ok: true, stripeConfigured: false, payments: [] });
 
