@@ -22,6 +22,7 @@ const noStore = (res) => {
 };
 
 // ----------------------------------------------------
+// ✅ SETTINGS: Billing summary
 // GET /api/billing/summary
 // ----------------------------------------------------
 const getBillingSummary = async (req, res) => {
@@ -33,11 +34,13 @@ const getBillingSummary = async (req, res) => {
         const user = await User.findById(req.user._id).lean();
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
+        // If Stripe not configured, still return basic info so UI can render safely
         if (!stripe) {
             return res.json({
                 ok: true,
                 stripeConfigured: false,
                 customerExists: !!user.stripeCustomerId,
+
                 account: {
                     name: user.name || "",
                     email: user.email || "",
@@ -46,20 +49,24 @@ const getBillingSummary = async (req, res) => {
                     googleEmail: user.googleEmail || null,
                     googleId: user.googleId || null,
                 },
+
                 plan: user.plan || "free",
                 planInterval: user.planInterval || null,
                 subscriptionStatus: user.subscriptionStatus || "free",
                 currentPeriodEnd: user.currentPeriodEnd ? new Date(user.currentPeriodEnd).toISOString() : null,
+
                 stripeCustomerId: user.stripeCustomerId || null,
                 stripeSubscriptionId: user.stripeSubscriptionId || null,
             });
         }
 
+        // No customer => free user
         if (!user.stripeCustomerId) {
             return res.json({
                 ok: true,
                 stripeConfigured: true,
                 customerExists: false,
+
                 account: {
                     name: user.name || "",
                     email: user.email || "",
@@ -68,24 +75,34 @@ const getBillingSummary = async (req, res) => {
                     googleEmail: user.googleEmail || null,
                     googleId: user.googleId || null,
                 },
+
                 plan: user.plan || "free",
                 planInterval: user.planInterval || null,
                 subscriptionStatus: user.subscriptionStatus || "free",
                 currentPeriodEnd: user.currentPeriodEnd ? new Date(user.currentPeriodEnd).toISOString() : null,
+
                 stripeCustomerId: null,
                 stripeSubscriptionId: user.stripeSubscriptionId || null,
             });
         }
 
+        // ---------------------------------------
+        // Pull latest subscription state from Stripe (best-effort)
+        // IMPORTANT: If retrieve fails, FALL BACK to list by customer.
+        // ---------------------------------------
         let subscription = null;
 
+        // Try retrieve first if we have an ID
         if (user.stripeSubscriptionId) {
             try {
                 subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
             } catch {
                 subscription = null;
             }
-        } else {
+        }
+
+        // ✅ Fallback: list subs by customer if retrieve failed OR no subscriptionId
+        if (!subscription) {
             try {
                 const subs = await stripe.subscriptions.list({
                     customer: user.stripeCustomerId,
@@ -103,6 +120,8 @@ const getBillingSummary = async (req, res) => {
         }
 
         const subscriptionStatus = user.subscriptionStatus || subscription?.status || "free";
+
+        // Prefer DB date if present, else Stripe
         const currentPeriodEndISO =
             (user.currentPeriodEnd ? new Date(user.currentPeriodEnd).toISOString() : null) ||
             isoOrNull(subscription?.current_period_end);
@@ -111,6 +130,7 @@ const getBillingSummary = async (req, res) => {
             ok: true,
             stripeConfigured: true,
             customerExists: true,
+
             account: {
                 name: user.name || "",
                 email: user.email || "",
@@ -119,10 +139,12 @@ const getBillingSummary = async (req, res) => {
                 googleEmail: user.googleEmail || null,
                 googleId: user.googleId || null,
             },
+
             plan: user.plan || "free",
             planInterval: user.planInterval || null,
             subscriptionStatus,
             currentPeriodEnd: currentPeriodEndISO,
+
             stripeCustomerId: user.stripeCustomerId,
             stripeSubscriptionId: user.stripeSubscriptionId || subscription?.id || null,
         });
@@ -133,6 +155,7 @@ const getBillingSummary = async (req, res) => {
 };
 
 // ----------------------------------------------------
+// ✅ SETTINGS: List invoices
 // GET /api/billing/invoices?limit=10
 // ----------------------------------------------------
 const listBillingInvoices = async (req, res) => {
@@ -159,10 +182,13 @@ const listBillingInvoices = async (req, res) => {
             number: inv.number || null,
             status: inv.status || null,
             currency: inv.currency || null,
+
             total: typeof inv.total === "number" ? inv.total : null,
             amount_paid: typeof inv.amount_paid === "number" ? inv.amount_paid : null,
             amount_due: typeof inv.amount_due === "number" ? inv.amount_due : null,
+
             created: isoOrNull(inv.created),
+
             hosted_invoice_url: inv.hosted_invoice_url || null,
             invoice_pdf: inv.invoice_pdf || null,
         }));
@@ -175,6 +201,7 @@ const listBillingInvoices = async (req, res) => {
 };
 
 // ----------------------------------------------------
+// ✅ SETTINGS: List payments (PaymentIntents)
 // GET /api/billing/payments?limit=10
 // ----------------------------------------------------
 const listBillingPayments = async (req, res) => {
