@@ -171,6 +171,7 @@ const registerUser = async (req, res) => {
 
         const existingEmail = await User.findOne({ email: cleanEmail });
         if (existingEmail) {
+            // keep legacy style: 200 with error so frontend can toast
             return res.json({ error: "This email is already registered. Please log in." });
         }
 
@@ -182,8 +183,8 @@ const registerUser = async (req, res) => {
 
         const hashedPassword = await hashPassword(password);
 
-        const code = Math.floor(100000 + Math.random() * 900000).toString();
-        const expires = Date.now() + 10 * 60 * 1000;
+        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const expires = new Date(Date.now() + 10 * 60 * 1000);
 
         const user = await User.create({
             name,
@@ -213,13 +214,10 @@ const registerUser = async (req, res) => {
             await user.save();
         }
 
-        // ✅ EMAIL SEND (with proper error handling + debug)
         const html = verificationEmailTemplate(name, code);
 
         try {
             const info = await sendEmail(cleanEmail, "Verify Your Email", html);
-
-            // Useful in Cloud Run logs to confirm accepted/rejected
             console.log("[registerUser] verification email result:", {
                 to: cleanEmail,
                 accepted: info?.accepted,
@@ -227,24 +225,24 @@ const registerUser = async (req, res) => {
                 messageId: info?.messageId,
                 response: info?.response,
             });
-
-            return res.json({ success: true, message: "Verification email sent", emailSent: true });
         } catch (e) {
             console.error("[registerUser] verification email failed:", e?.message || e);
-
-            // IMPORTANT: user exists, so tell frontend to show "Resend code" UI
-            return res.status(201).json({
+            // user exists - allow resend in UI
+            return res.json({
                 success: true,
-                message: "Account created, but verification email failed to send. Please resend the code.",
+                message: "Account created, but verification email failed. Please resend the code.",
                 emailSent: false,
             });
         }
+
+        return res.json({ success: true, message: "Verification email sent", emailSent: true });
     } catch (err) {
         console.error("registerUser error:", err);
         return res.status(500).json({ error: "Registration failed. Try again." });
     }
 };
 
+// VERIFY EMAIL
 const verifyEmailCode = async (req, res) => {
     try {
         const email = String(req.body.email || "").trim().toLowerCase();
@@ -252,15 +250,28 @@ const verifyEmailCode = async (req, res) => {
 
         const user = await User.findOne({ email });
 
-        if (!user) return res.status(404).json({ error: "User not found" });
-        if (user.isVerified) return res.status(400).json({ error: "Email already verified" });
+        // keep legacy style: 200 with error (frontend checks res.data.error)
+        if (!user) return res.json({ error: "User not found" });
+        if (user.isVerified) return res.json({ error: "Email already verified" });
 
         const stored = String(user.verificationCode || "").trim();
+        if (!stored) return res.json({ error: "No verification code found. Please resend." });
 
-        if (!stored) return res.status(400).json({ error: "No verification code found. Please resend." });
-        if (stored !== code) return res.status(400).json({ error: "Invalid verification code" });
-        if (Number(user.verificationCodeExpires || 0) < Date.now()) {
-            return res.status(400).json({ error: "Code has expired" });
+        // IMPORTANT: Date in DB -> compare safely
+        const expMs = user.verificationCodeExpires ? new Date(user.verificationCodeExpires).getTime() : 0;
+        if (expMs && expMs < Date.now()) return res.json({ error: "Code has expired" });
+
+        if (stored !== code) {
+            // optional debug (helps you confirm mismatch in Cloud Run logs)
+            console.log("[verifyEmailCode] mismatch:", {
+                email,
+                providedLen: code.length,
+                storedLen: stored.length,
+                provided: code,
+                stored: stored,
+                expires: user.verificationCodeExpires,
+            });
+            return res.json({ error: "Invalid verification code" });
         }
 
         user.isVerified = true;
@@ -270,23 +281,22 @@ const verifyEmailCode = async (req, res) => {
 
         return res.json({ success: true, message: "Email verified successfully" });
     } catch (err) {
-        console.log(err);
+        console.error("verifyEmailCode error:", err);
         return res.status(500).json({ error: "Verification failed" });
     }
 };
 
-
 // RESEND VERIFICATION CODE
 const resendVerificationCode = async (req, res) => {
     try {
-        const { email } = req.body;
-        const user = await User.findOne({ email: String(email || "").trim().toLowerCase() });
+        const email = String(req.body.email || "").trim().toLowerCase();
+        const user = await User.findOne({ email });
 
         if (!user) return res.json({ error: "User not found" });
         if (user.isVerified) return res.json({ error: "Email already verified" });
 
-        const newCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expires = Date.now() + 10 * 60 * 1000;
+        const newCode = String(Math.floor(100000 + Math.random() * 900000));
+        const expires = new Date(Date.now() + 10 * 60 * 1000);
 
         user.verificationCode = newCode;
         user.verificationCodeExpires = expires;
@@ -296,7 +306,6 @@ const resendVerificationCode = async (req, res) => {
 
         try {
             const info = await sendEmail(user.email, "Your New Verification Code", html);
-
             console.log("[resendVerificationCode] email result:", {
                 to: user.email,
                 accepted: info?.accepted,
@@ -304,14 +313,14 @@ const resendVerificationCode = async (req, res) => {
                 messageId: info?.messageId,
                 response: info?.response,
             });
-
-            return res.json({ success: true, message: "Verification code resent", emailSent: true });
         } catch (e) {
             console.error("[resendVerificationCode] email failed:", e?.message || e);
-            return res.status(500).json({ error: "Could not resend code", emailSent: false });
+            return res.json({ error: "Could not resend code" });
         }
+
+        return res.json({ success: true, message: "Verification code resent" });
     } catch (err) {
-        console.log("resendVerificationCode error:", err);
+        console.error("resendVerificationCode error:", err);
         return res.status(500).json({ error: "Could not resend code" });
     }
 };
@@ -319,49 +328,61 @@ const resendVerificationCode = async (req, res) => {
 // LOGIN
 const loginUser = async (req, res) => {
     try {
-        const { email, password } = req.body;
-        const cleanEmail = String(email || "").trim().toLowerCase();
+        const email = String(req.body.email || "").trim().toLowerCase();
+        const password = String(req.body.password || "");
 
-        const user = await User.findOne({ email: cleanEmail });
+        const user = await User.findOne({ email });
         if (!user) return res.json({ error: "No user found" });
 
         const match = await comparePassword(password, user.password);
         if (!match) return res.json({ error: "Passwords don’t match" });
 
+        // ✅ DO NOT return 401 here — frontend expects 200 and uses res.data.resend
         if (!user.isVerified) {
             const now = Date.now();
 
-            // ✅ if there is already a valid code, reuse it
-            let codeToSend = user.verificationCode;
-            let expires = Number(user.verificationCodeExpires || 0);
+            // reuse existing valid code (prevents overwriting -> “invalid code” confusion)
+            const stored = String(user.verificationCode || "").trim();
+            const expMs = user.verificationCodeExpires ? new Date(user.verificationCodeExpires).getTime() : 0;
+            const hasValidExisting = stored && expMs > now;
 
-            const hasValidExisting = codeToSend && expires > now;
+            let codeToSend = stored;
 
             if (!hasValidExisting) {
-                codeToSend = Math.floor(100000 + Math.random() * 900000).toString();
-                expires = now + 10 * 60 * 1000;
-
+                codeToSend = String(Math.floor(100000 + Math.random() * 900000));
                 user.verificationCode = codeToSend;
-                user.verificationCodeExpires = expires;
+                user.verificationCodeExpires = new Date(now + 10 * 60 * 1000);
                 await user.save();
             }
 
-            const html = verificationEmailTemplate(user.name, String(codeToSend));
-            await sendEmail(user.email, "Verify Your Email", html);
+            const html = verificationEmailTemplate(user.name, codeToSend);
 
-            return res.status(401).json({
+            try {
+                const info = await sendEmail(user.email, "Verify Your Email", html);
+                console.log("[loginUser] verification resend result:", {
+                    to: user.email,
+                    accepted: info?.accepted,
+                    rejected: info?.rejected,
+                    messageId: info?.messageId,
+                    response: info?.response,
+                });
+            } catch (e) {
+                console.error("[loginUser] verification resend failed:", e?.message || e);
+                // still tell frontend to go to verify step
+            }
+
+            return res.json({
                 error: "Please verify your email before logging in.",
                 resend: true,
             });
         }
-
 
         const token = signToken(user);
         res.cookie("token", token, { httpOnly: true, sameSite: "lax" });
 
         return res.json({ token, user: toSafeUser(user) });
     } catch (error) {
-        console.log("loginUser error:", error);
+        console.error("loginUser error:", error);
         return res.status(500).json({ error: "Login failed" });
     }
 };
@@ -369,15 +390,14 @@ const loginUser = async (req, res) => {
 // FORGOT PASSWORD
 const forgotPassword = async (req, res) => {
     try {
-        const { email } = req.body;
-        const cleanEmail = String(email || "").trim().toLowerCase();
+        const cleanEmail = String(req.body.email || "").trim().toLowerCase();
 
         const user = await User.findOne({ email: cleanEmail });
         if (!user) return res.json({ error: "User not found" });
 
         const token = crypto.randomBytes(32).toString("hex");
         user.resetToken = token;
-        user.resetTokenExpires = Date.now() + 60 * 60 * 1000;
+        user.resetTokenExpires = new Date(Date.now() + 60 * 60 * 1000);
         await user.save();
 
         const resetLink = `${FRONTEND_URL}/reset-password/${token}`;
@@ -399,7 +419,7 @@ const forgotPassword = async (req, res) => {
 
         return res.json({ success: true, message: "Password reset email sent" });
     } catch (err) {
-        console.log("forgotPassword error:", err);
+        console.error("forgotPassword error:", err);
         return res.status(500).json({ error: "Could not send password reset email" });
     }
 };
@@ -425,7 +445,7 @@ const resetPassword = async (req, res) => {
 
         return res.json({ success: true, message: "Password updated successfully" });
     } catch (err) {
-        console.log("resetPassword error:", err);
+        console.error("resetPassword error:", err);
         return res.status(500).json({ error: "Password reset failed" });
     }
 };
