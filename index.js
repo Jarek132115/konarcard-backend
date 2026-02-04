@@ -15,9 +15,6 @@ const contactRoutes = require("./routes/contactRoutes");
 const businessCardRoutes = require("./routes/businessCardRoutes");
 const authRoutes = require("./routes/authRoutes");
 
-// ✅ NEW: Public routes (Exchange contact, etc.)
-const publicRoutes = require("./routes/publicRoutes");
-
 // ✅ Stripe webhook handler (exports a FUNCTION, not a router)
 const stripeWebhookHandler = require("./routes/webHook");
 
@@ -87,19 +84,31 @@ configurePassport();
 app.use(passport.initialize());
 
 /* -------------------- Routes -------------------- */
-// Auth routes (both base + /api for compatibility)
+/**
+ * ✅ IMPORTANT:
+ * authRoutes now contains:
+ * - /exchange-contact (PUBLIC)
+ * - /contact-exchanges (PROTECTED)
+ * plus login/register/etc
+ *
+ * So we mount it twice to support:
+ * - /register
+ * - /api/register
+ */
 app.use("/", authRoutes);
 app.use("/api", authRoutes);
-
-// ✅ Public routes (both base + /api for compatibility)
-// Exchange contact endpoint lives here:
-app.use("/", publicRoutes);
-app.use("/api", publicRoutes);
 
 app.use("/api/checkout", checkoutRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/business-card", businessCardRoutes);
 
+/* -------------------- Health -------------------- */
+app.get("/healthz", (req, res) => res.status(200).send("ok"));
+
 /* -------------------- Start -------------------- */
-const port = process.env.PORT || 8000;
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+const port = Number(process.env.PORT || 8080);
+
+// ✅ Cloud Run: listen on 0.0.0.0
+app.listen(port, "0.0.0.0", () => {
+  console.log(`🚀 Server running on port ${port}`);
+});
