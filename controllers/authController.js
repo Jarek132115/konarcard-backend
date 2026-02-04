@@ -9,16 +9,13 @@ const { verificationEmailTemplate, passwordResetTemplate } = require("../utils/e
 const crypto = require("crypto");
 const uploadToS3 = require("../utils/uploadToS3");
 
-const FRONTEND_PROFILE_DOMAIN =
-    process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
+const FRONTEND_PROFILE_DOMAIN = process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 const signToken = (user) => {
-    return jwt.sign(
-        { email: user.email, id: user._id, name: user.name },
-        process.env.JWT_SECRET,
-        { expiresIn: "30d" }
-    );
+    return jwt.sign({ email: user.email, id: user._id, name: user.name }, process.env.JWT_SECRET, {
+        expiresIn: "30d",
+    });
 };
 
 const toSafeUser = (userDoc) => {
@@ -164,7 +161,7 @@ const registerUser = async (req, res) => {
             return res.status(400).json({ error: "Passwords do not match." });
         }
 
-        const cleanEmail = email.trim().toLowerCase();
+        const cleanEmail = String(email || "").trim().toLowerCase();
 
         // Username input is first profile slug
         const desiredSlug = safeProfileSlug(username);
@@ -216,12 +213,34 @@ const registerUser = async (req, res) => {
             await user.save();
         }
 
+        // ✅ EMAIL SEND (with proper error handling + debug)
         const html = verificationEmailTemplate(name, code);
-        await sendEmail(cleanEmail, "Verify Your Email", html);
 
-        return res.json({ success: true, message: "Verification email sent" });
+        try {
+            const info = await sendEmail(cleanEmail, "Verify Your Email", html);
+
+            // Useful in Cloud Run logs to confirm accepted/rejected
+            console.log("[registerUser] verification email result:", {
+                to: cleanEmail,
+                accepted: info?.accepted,
+                rejected: info?.rejected,
+                messageId: info?.messageId,
+                response: info?.response,
+            });
+
+            return res.json({ success: true, message: "Verification email sent", emailSent: true });
+        } catch (e) {
+            console.error("[registerUser] verification email failed:", e?.message || e);
+
+            // IMPORTANT: user exists, so tell frontend to show "Resend code" UI
+            return res.status(201).json({
+                success: true,
+                message: "Account created, but verification email failed to send. Please resend the code.",
+                emailSent: false,
+            });
+        }
     } catch (err) {
-        console.error(err);
+        console.error("registerUser error:", err);
         return res.status(500).json({ error: "Registration failed. Try again." });
     }
 };
@@ -230,7 +249,7 @@ const registerUser = async (req, res) => {
 const verifyEmailCode = async (req, res) => {
     try {
         const { email, code } = req.body;
-        const user = await User.findOne({ email: email.trim().toLowerCase() });
+        const user = await User.findOne({ email: String(email || "").trim().toLowerCase() });
 
         if (!user) return res.json({ error: "User not found" });
         if (user.isVerified) return res.json({ error: "Email already verified" });
@@ -244,7 +263,7 @@ const verifyEmailCode = async (req, res) => {
 
         return res.json({ success: true, message: "Email verified successfully" });
     } catch (err) {
-        console.log(err);
+        console.log("verifyEmailCode error:", err);
         return res.status(500).json({ error: "Verification failed" });
     }
 };
@@ -253,7 +272,7 @@ const verifyEmailCode = async (req, res) => {
 const resendVerificationCode = async (req, res) => {
     try {
         const { email } = req.body;
-        const user = await User.findOne({ email: email.trim().toLowerCase() });
+        const user = await User.findOne({ email: String(email || "").trim().toLowerCase() });
 
         if (!user) return res.json({ error: "User not found" });
         if (user.isVerified) return res.json({ error: "Email already verified" });
@@ -266,11 +285,25 @@ const resendVerificationCode = async (req, res) => {
         await user.save();
 
         const html = verificationEmailTemplate(user.name, newCode);
-        await sendEmail(user.email, "Your New Verification Code", html);
 
-        return res.json({ success: true, message: "Verification code resent" });
+        try {
+            const info = await sendEmail(user.email, "Your New Verification Code", html);
+
+            console.log("[resendVerificationCode] email result:", {
+                to: user.email,
+                accepted: info?.accepted,
+                rejected: info?.rejected,
+                messageId: info?.messageId,
+                response: info?.response,
+            });
+
+            return res.json({ success: true, message: "Verification code resent", emailSent: true });
+        } catch (e) {
+            console.error("[resendVerificationCode] email failed:", e?.message || e);
+            return res.status(500).json({ error: "Could not resend code", emailSent: false });
+        }
     } catch (err) {
-        console.log(err);
+        console.log("resendVerificationCode error:", err);
         return res.status(500).json({ error: "Could not resend code" });
     }
 };
@@ -279,7 +312,7 @@ const resendVerificationCode = async (req, res) => {
 const loginUser = async (req, res) => {
     try {
         const { email, password } = req.body;
-        const cleanEmail = (email || "").trim().toLowerCase();
+        const cleanEmail = String(email || "").trim().toLowerCase();
 
         const user = await User.findOne({ email: cleanEmail });
         if (!user) return res.json({ error: "No user found" });
@@ -296,7 +329,19 @@ const loginUser = async (req, res) => {
             await user.save();
 
             const html = verificationEmailTemplate(user.name, newCode);
-            await sendEmail(user.email, "Verify Your Email", html);
+
+            try {
+                const info = await sendEmail(user.email, "Verify Your Email", html);
+                console.log("[loginUser] verification resend result:", {
+                    to: user.email,
+                    accepted: info?.accepted,
+                    rejected: info?.rejected,
+                    messageId: info?.messageId,
+                    response: info?.response,
+                });
+            } catch (e) {
+                console.error("[loginUser] verification resend failed:", e?.message || e);
+            }
 
             return res.json({
                 error: "Please verify your email before logging in.",
@@ -309,7 +354,7 @@ const loginUser = async (req, res) => {
 
         return res.json({ token, user: toSafeUser(user) });
     } catch (error) {
-        console.log(error);
+        console.log("loginUser error:", error);
         return res.status(500).json({ error: "Login failed" });
     }
 };
@@ -318,7 +363,7 @@ const loginUser = async (req, res) => {
 const forgotPassword = async (req, res) => {
     try {
         const { email } = req.body;
-        const cleanEmail = (email || "").trim().toLowerCase();
+        const cleanEmail = String(email || "").trim().toLowerCase();
 
         const user = await User.findOne({ email: cleanEmail });
         if (!user) return res.json({ error: "User not found" });
@@ -330,11 +375,24 @@ const forgotPassword = async (req, res) => {
 
         const resetLink = `${FRONTEND_URL}/reset-password/${token}`;
         const html = passwordResetTemplate(user.name, resetLink);
-        await sendEmail(user.email, "Reset Your Password", html);
+
+        try {
+            const info = await sendEmail(user.email, "Reset Your Password", html);
+            console.log("[forgotPassword] email result:", {
+                to: user.email,
+                accepted: info?.accepted,
+                rejected: info?.rejected,
+                messageId: info?.messageId,
+                response: info?.response,
+            });
+        } catch (e) {
+            console.error("[forgotPassword] email failed:", e?.message || e);
+            return res.status(500).json({ error: "Could not send password reset email" });
+        }
 
         return res.json({ success: true, message: "Password reset email sent" });
     } catch (err) {
-        console.log(err);
+        console.log("forgotPassword error:", err);
         return res.status(500).json({ error: "Could not send password reset email" });
     }
 };
@@ -360,7 +418,7 @@ const resetPassword = async (req, res) => {
 
         return res.json({ success: true, message: "Password updated successfully" });
     } catch (err) {
-        console.log(err);
+        console.log("resetPassword error:", err);
         return res.status(500).json({ error: "Password reset failed" });
     }
 };
