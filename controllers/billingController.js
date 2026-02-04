@@ -5,10 +5,21 @@ const User = require("../models/user");
 const stripeSecret = process.env.STRIPE_SECRET_KEY || "";
 const stripe = stripeSecret ? Stripe(stripeSecret) : null;
 
-const isoOrNull = (unixSeconds) => {
+const isoFromUnixSeconds = (unixSeconds) => {
     if (!unixSeconds) return null;
     try {
         return new Date(unixSeconds * 1000).toISOString();
+    } catch {
+        return null;
+    }
+};
+
+const isoFromDateLike = (v) => {
+    if (!v) return null;
+    try {
+        const d = v instanceof Date ? v : new Date(v);
+        if (Number.isNaN(d.getTime())) return null;
+        return d.toISOString();
     } catch {
         return null;
     }
@@ -22,7 +33,6 @@ const noStore = (res) => {
 };
 
 // ----------------------------------------------------
-// ✅ SETTINGS: Billing summary
 // GET /api/billing/summary
 // ----------------------------------------------------
 const getBillingSummary = async (req, res) => {
@@ -34,65 +44,52 @@ const getBillingSummary = async (req, res) => {
         const user = await User.findById(req.user._id).lean();
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
-        // If Stripe not configured, still return basic info so UI can render safely
+        const account = {
+            name: user.name || "",
+            email: user.email || "",
+            avatar: user.avatar || user.picture || "",
+            authProvider: user.authProvider || "local",
+            googleEmail: user.googleEmail || null,
+            googleId: user.googleId || null,
+        };
+
+        // Stripe not configured
         if (!stripe) {
             return res.json({
                 ok: true,
                 stripeConfigured: false,
                 customerExists: !!user.stripeCustomerId,
-
-                account: {
-                    name: user.name || "",
-                    email: user.email || "",
-                    avatar: user.avatar || user.picture || "",
-                    authProvider: user.authProvider || "local",
-                    googleEmail: user.googleEmail || null,
-                    googleId: user.googleId || null,
-                },
-
+                account,
                 plan: user.plan || "free",
                 planInterval: user.planInterval || null,
                 subscriptionStatus: user.subscriptionStatus || "free",
-                currentPeriodEnd: user.currentPeriodEnd ? new Date(user.currentPeriodEnd).toISOString() : null,
-
+                currentPeriodEnd: isoFromDateLike(user.currentPeriodEnd),
                 stripeCustomerId: user.stripeCustomerId || null,
                 stripeSubscriptionId: user.stripeSubscriptionId || null,
             });
         }
 
-        // No customer => free user
+        // No customer => free
         if (!user.stripeCustomerId) {
             return res.json({
                 ok: true,
                 stripeConfigured: true,
                 customerExists: false,
-
-                account: {
-                    name: user.name || "",
-                    email: user.email || "",
-                    avatar: user.avatar || user.picture || "",
-                    authProvider: user.authProvider || "local",
-                    googleEmail: user.googleEmail || null,
-                    googleId: user.googleId || null,
-                },
-
+                account,
                 plan: user.plan || "free",
                 planInterval: user.planInterval || null,
                 subscriptionStatus: user.subscriptionStatus || "free",
-                currentPeriodEnd: user.currentPeriodEnd ? new Date(user.currentPeriodEnd).toISOString() : null,
-
+                currentPeriodEnd: isoFromDateLike(user.currentPeriodEnd),
                 stripeCustomerId: null,
                 stripeSubscriptionId: user.stripeSubscriptionId || null,
             });
         }
 
-        // ---------------------------------------
-        // Pull latest subscription state from Stripe (best-effort)
-        // IMPORTANT: If retrieve fails, FALL BACK to list by customer.
-        // ---------------------------------------
+        // ------------------------------
+        // 1) Try Stripe subscription
+        // ------------------------------
         let subscription = null;
 
-        // Try retrieve first if we have an ID
         if (user.stripeSubscriptionId) {
             try {
                 subscription = await stripe.subscriptions.retrieve(user.stripeSubscriptionId);
@@ -101,7 +98,6 @@ const getBillingSummary = async (req, res) => {
             }
         }
 
-        // ✅ Fallback: list subs by customer if retrieve failed OR no subscriptionId
         if (!subscription) {
             try {
                 const subs = await stripe.subscriptions.list({
@@ -121,24 +117,37 @@ const getBillingSummary = async (req, res) => {
 
         const subscriptionStatus = user.subscriptionStatus || subscription?.status || "free";
 
-        // Prefer DB date if present, else Stripe
-        const currentPeriodEndISO =
-            (user.currentPeriodEnd ? new Date(user.currentPeriodEnd).toISOString() : null) ||
-            isoOrNull(subscription?.current_period_end);
+        // Prefer DB -> then Stripe sub
+        let currentPeriodEndISO =
+            isoFromDateLike(user.currentPeriodEnd) ||
+            isoFromUnixSeconds(subscription?.current_period_end);
+
+        // ------------------------------
+        // 2) Fallback: derive renew date from latest invoice line period end
+        // (This fixes cases where subscription fetch fails / returns no current_period_end)
+        // ------------------------------
+        if (!currentPeriodEndISO) {
+            try {
+                const inv = await stripe.invoices.list({
+                    customer: user.stripeCustomerId,
+                    limit: 1,
+                });
+
+                const latest = inv?.data?.[0];
+                const linePeriodEnd = latest?.lines?.data?.[0]?.period?.end;
+
+                // Stripe gives unix seconds
+                currentPeriodEndISO = isoFromUnixSeconds(linePeriodEnd);
+            } catch {
+                // ignore
+            }
+        }
 
         return res.json({
             ok: true,
             stripeConfigured: true,
             customerExists: true,
-
-            account: {
-                name: user.name || "",
-                email: user.email || "",
-                avatar: user.avatar || user.picture || "",
-                authProvider: user.authProvider || "local",
-                googleEmail: user.googleEmail || null,
-                googleId: user.googleId || null,
-            },
+            account,
 
             plan: user.plan || "free",
             planInterval: user.planInterval || null,
@@ -155,7 +164,6 @@ const getBillingSummary = async (req, res) => {
 };
 
 // ----------------------------------------------------
-// ✅ SETTINGS: List invoices
 // GET /api/billing/invoices?limit=10
 // ----------------------------------------------------
 const listBillingInvoices = async (req, res) => {
@@ -167,7 +175,6 @@ const listBillingInvoices = async (req, res) => {
 
         const user = await User.findById(req.user._id).lean();
         if (!user) return res.status(401).json({ error: "Unauthorized" });
-
         if (!user.stripeCustomerId) return res.json({ ok: true, stripeConfigured: true, invoices: [] });
 
         const limit = Math.min(25, Math.max(1, Number(req.query.limit || 10)));
@@ -182,13 +189,10 @@ const listBillingInvoices = async (req, res) => {
             number: inv.number || null,
             status: inv.status || null,
             currency: inv.currency || null,
-
             total: typeof inv.total === "number" ? inv.total : null,
             amount_paid: typeof inv.amount_paid === "number" ? inv.amount_paid : null,
             amount_due: typeof inv.amount_due === "number" ? inv.amount_due : null,
-
-            created: isoOrNull(inv.created),
-
+            created: isoFromUnixSeconds(inv.created),
             hosted_invoice_url: inv.hosted_invoice_url || null,
             invoice_pdf: inv.invoice_pdf || null,
         }));
@@ -201,7 +205,6 @@ const listBillingInvoices = async (req, res) => {
 };
 
 // ----------------------------------------------------
-// ✅ SETTINGS: List payments (PaymentIntents)
 // GET /api/billing/payments?limit=10
 // ----------------------------------------------------
 const listBillingPayments = async (req, res) => {
@@ -213,7 +216,6 @@ const listBillingPayments = async (req, res) => {
 
         const user = await User.findById(req.user._id).lean();
         if (!user) return res.status(401).json({ error: "Unauthorized" });
-
         if (!user.stripeCustomerId) return res.json({ ok: true, stripeConfigured: true, payments: [] });
 
         const limit = Math.min(25, Math.max(1, Number(req.query.limit || 10)));
@@ -228,7 +230,7 @@ const listBillingPayments = async (req, res) => {
             status: pi.status || null,
             currency: pi.currency || null,
             amount: typeof pi.amount === "number" ? pi.amount : null,
-            created: isoOrNull(pi.created),
+            created: isoFromUnixSeconds(pi.created),
             description: pi.description || null,
             receipt_email: pi.receipt_email || null,
         }));
