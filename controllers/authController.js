@@ -76,15 +76,19 @@ const generateAndUploadProfileQr = async (userId, profileSlug) => {
 const test = (req, res) => res.json("test is working");
 
 /**
- * ✅ CLAIM LINK (NEW MEANING)
+ * ✅ CLAIM LINK (PUBLIC-FIRST)
  * Frontend "username" = FIRST PROFILE SLUG.
  *
  * - If NOT logged in: availability check only.
- * - If logged in: create FIRST BusinessCard if none, generate QR for it.
+ * - If logged in with VALID token + user exists: set user.username/slug/profileUrl and create first BusinessCard if none.
+ *
+ * IMPORTANT FIX:
+ * If token is missing/invalid/stale, DO NOT return 401.
+ * Treat as public availability check so Register flow cannot get stuck.
  */
 const claimLink = async (req, res) => {
     try {
-        const raw = (req.body.username || "").trim().toLowerCase();
+        const raw = String(req.body.username || "").trim().toLowerCase();
         if (!raw) return res.status(400).json({ error: "Username is required" });
 
         const profileSlug = safeProfileSlug(raw);
@@ -92,9 +96,14 @@ const claimLink = async (req, res) => {
             return res.status(400).json({ error: "Link name must be at least 3 characters" });
         }
 
-        // Global availability check
-        const taken = await BusinessCard.findOne({ profile_slug: profileSlug }).select("_id");
-        if (taken) return res.status(409).json({ error: "Username already taken" });
+        // Global availability check (BusinessCard + User, to be safe)
+        const takenCard = await BusinessCard.findOne({ profile_slug: profileSlug }).select("_id");
+        const takenUser = await User.findOne({ username: profileSlug }).select("_id");
+
+        if (takenCard || takenUser) {
+            // keep consistent with frontend expectations
+            return res.status(409).json({ error: "Username already taken" });
+        }
 
         const token = getTokenFromReq(req);
 
@@ -103,17 +112,22 @@ const claimLink = async (req, res) => {
             return res.json({ success: true, available: true, username: profileSlug });
         }
 
-        let decoded;
+        // If auth exists but is invalid/stale => DO NOT fail claim step.
+        // Just behave like public availability check.
+        let decoded = null;
         try {
             decoded = jwt.verify(token, process.env.JWT_SECRET);
         } catch {
-            return res.status(401).json({ error: "Invalid token" });
+            return res.json({ success: true, available: true, username: profileSlug });
         }
 
-        const user = await User.findById(decoded.id);
-        if (!user) return res.status(401).json({ error: "User not found" });
+        const user = decoded?.id ? await User.findById(decoded.id) : null;
+        if (!user) {
+            // Stale token — treat as public check
+            return res.json({ success: true, available: true, username: profileSlug });
+        }
 
-        // Keep for account/UI only (routing uses /u/:slug)
+        // Logged-in: persist claim onto user
         user.username = profileSlug;
         user.slug = profileSlug;
         user.profileUrl = buildPublicProfileUrl(profileSlug);
@@ -177,7 +191,8 @@ const registerUser = async (req, res) => {
 
         // Global slug uniqueness
         const slugTaken = await BusinessCard.findOne({ profile_slug: desiredSlug }).select("_id");
-        if (slugTaken) {
+        const userSlugTaken = await User.findOne({ username: desiredSlug }).select("_id");
+        if (slugTaken || userSlugTaken) {
             return res.status(400).json({ error: "Username already taken. Please choose another." });
         }
 
@@ -262,7 +277,6 @@ const verifyEmailCode = async (req, res) => {
         if (expMs && expMs < Date.now()) return res.json({ error: "Code has expired" });
 
         if (stored !== code) {
-            // optional debug (helps you confirm mismatch in Cloud Run logs)
             console.log("[verifyEmailCode] mismatch:", {
                 email,
                 providedLen: code.length,
@@ -368,7 +382,6 @@ const loginUser = async (req, res) => {
                 });
             } catch (e) {
                 console.error("[loginUser] verification resend failed:", e?.message || e);
-                // still tell frontend to go to verify step
             }
 
             return res.json({
