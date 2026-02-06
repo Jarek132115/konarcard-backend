@@ -6,6 +6,8 @@ const QRCode = require("qrcode");
 
 const User = require("../models/user");
 const BusinessCard = require("../models/BusinessCard");
+const NfcOrder = require("../models/NfcOrder");
+
 const uploadToS3 = require("../utils/uploadToS3");
 
 const sendEmail = require("../utils/SendEmail");
@@ -267,15 +269,51 @@ module.exports = async function stripeWebhookHandler(req, res) {
 
       // One-time payment (NFC)
       if (session.mode === "payment") {
+        const checkoutType = session.metadata?.checkoutType;
+        const orderId = session.metadata?.orderId ? String(session.metadata.orderId) : "";
+        const productKey = session.metadata?.productKey ? String(session.metadata.productKey) : "";
+        const qtyMeta = session.metadata?.quantity ? Number(session.metadata.quantity) : null;
+
+        const amountTotal = Number(session.amount_total || 0); // pennies
+        const currency = String(session.currency || "gbp").toLowerCase();
+        const paymentIntentId = session.payment_intent ? String(session.payment_intent) : "";
+
+        // ✅ If this is our NFC order checkout: mark paid
+        if (checkoutType === "nfc_order" && orderId) {
+          try {
+            const nextStatus = session.payment_status === "paid" ? "paid" : "pending";
+
+            await NfcOrder.findByIdAndUpdate(
+              orderId,
+              {
+                $set: {
+                  status: nextStatus,
+                  amountTotal: Number.isFinite(amountTotal) ? amountTotal : 0,
+                  currency: currency || "gbp",
+                  stripeCheckoutSessionId: String(session.id || ""),
+                  stripePaymentIntentId: paymentIntentId,
+                },
+              },
+              { new: true }
+            );
+          } catch (e) {
+            console.error("⚠️ Failed to update NfcOrder:", e?.message || e);
+          }
+        }
+
+        // ✅ Keep your existing email notifications
         const customerEmail = session.customer_details?.email;
-        const amountPaid = session.amount_total
-          ? (session.amount_total / 100).toFixed(2)
-          : null;
+        const amountPaid = amountTotal ? (amountTotal / 100).toFixed(2) : null;
+
+        const productLine =
+          productKey || qtyMeta
+            ? `<p>Product: ${productKey || "nfc"}${qtyMeta ? ` • Qty: ${qtyMeta}` : ""}</p>`
+            : "";
 
         await sendEmail(
           process.env.EMAIL_USER,
           amountPaid ? `New Konar Card Order - £${amountPaid}` : `New Konar Card Order`,
-          `<p>New order from: ${customerEmail || "Unknown email"}</p>${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
+          `<p>New order from: ${customerEmail || "Unknown email"}</p>${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
           }`
         );
 
@@ -369,7 +407,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
         stripeSubscriptionId: subscriptionId || undefined,
         subscriptionStatus: "active",
         isSubscribed: true,
-        currentPeriodEnd, // ✅ NOW SAVED
+        currentPeriodEnd,
         extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
         teamsProfilesQty:
           extracted.plan === "teams"

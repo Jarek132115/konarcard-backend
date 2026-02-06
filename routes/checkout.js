@@ -1,4 +1,3 @@
-// backend/routes/checkout.js
 const express = require("express");
 const router = express.Router();
 
@@ -8,6 +7,9 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const { requireAuth } = require("../helpers/auth");
 const User = require("../models/user");
 const BusinessCard = require("../models/BusinessCard");
+const NfcOrder = require("../models/NfcOrder");
+
+const uploadToS3 = require("../utils/uploadToS3");
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
@@ -17,6 +19,9 @@ const safeSlug = (v) =>
         .toLowerCase()
         .replace(/[^a-z0-9-]/g, "");
 
+// -------------------------
+// Subscription helpers (EXISTING)
+// -------------------------
 function getTeamsPriceId(interval = "monthly") {
     const i = String(interval || "monthly").toLowerCase();
     if (i === "monthly") return process.env.STRIPE_PRICE_TEAMS_MONTHLY;
@@ -66,11 +71,6 @@ function isActiveStatus(status) {
     return status === "active" || status === "trialing";
 }
 
-/**
- * Find subscription item IDs for:
- * - Teams base item (one of TEAMS_PRICE_IDS)
- * - Extra profiles add-on item (one of EXTRA_PROFILE_PRICE_IDS)
- */
 function findSubItems(subscription) {
     const items = Array.isArray(subscription?.items?.data) ? subscription.items.data : [];
 
@@ -87,12 +87,7 @@ function findSubItems(subscription) {
     return { teamsItem, extraItem };
 }
 
-/**
- * Create and attempt to charge an immediate proration invoice.
- * This matches your requirement: if they add mid-cycle, charge the proportional amount now.
- */
 async function invoiceAndPayNow({ customerId, subscriptionId }) {
-    // Create invoice for the subscription
     const invoice = await stripe.invoices.create({
         customer: customerId,
         subscription: subscriptionId,
@@ -100,10 +95,8 @@ async function invoiceAndPayNow({ customerId, subscriptionId }) {
         auto_advance: true,
     });
 
-    // Finalize then attempt pay
     const finalized = await stripe.invoices.finalizeInvoice(invoice.id);
 
-    // If amount_due is 0, nothing to pay
     if (!finalized || !finalized.amount_due || finalized.amount_due <= 0) {
         return { paid: true, invoiceId: finalized?.id, amount_due: 0 };
     }
@@ -112,22 +105,53 @@ async function invoiceAndPayNow({ customerId, subscriptionId }) {
     return { paid: paid?.paid === true, invoiceId: paid?.id, amount_due: paid?.amount_due || 0 };
 }
 
-/**
- * POST /api/checkout/teams
- * Body:
- *  - interval: monthly|quarterly|yearly (default monthly)
- *  - desiredProfiles OR desiredQuantity OR quantity: number (default 2, min 2)
- *      NOTE: this is the TOTAL profiles the user wants to have.
- *  - claimedSlug: the new profile slug user wants to claim (required)
- *
- * Pricing model:
- *  - Teams base = qty 1
- *  - Extra profiles add-on = £1.95 each (qty = desiredProfiles - 1)
- *
- * ✅ IMPORTANT:
- * If already subscribed to Teams, we UPDATE the existing subscription (no second subscription)
- * and charge prorations immediately.
- */
+// -------------------------
+// NEW: NFC product price mapping
+// -------------------------
+// Set these in env:
+// STRIPE_PRICE_PLASTIC_CARD
+// STRIPE_PRICE_METAL_CARD
+// STRIPE_PRICE_KONARTAG
+const NFC_PRICE_MAP = {
+    "plastic-card": process.env.STRIPE_PRICE_PLASTIC_CARD,
+    "metal-card": process.env.STRIPE_PRICE_METAL_CARD,
+    konartag: process.env.STRIPE_PRICE_KONARTAG,
+};
+
+function normalizeProductKey(v) {
+    const s = String(v || "").trim().toLowerCase();
+    if (s === "plastic" || s === "plastic-card" || s === "konarcard-plastic") return "plastic-card";
+    if (s === "metal" || s === "metal-card" || s === "konarcard-metal") return "metal-card";
+    if (s === "konartag" || s === "tag") return "konartag";
+    return s;
+}
+
+function decodeDataUrlToBuffer(dataUrl) {
+    // data:image/png;base64,AAAA
+    const str = String(dataUrl || "");
+    const m = str.match(/^data:([^;]+);base64,(.+)$/);
+    if (!m) return null;
+
+    const mime = String(m[1] || "").trim().toLowerCase();
+    const b64 = String(m[2] || "").trim();
+
+    if (!mime || !b64) return null;
+
+    let buf;
+    try {
+        buf = Buffer.from(b64, "base64");
+    } catch {
+        return null;
+    }
+
+    if (!buf || !buf.length) return null;
+
+    return { mime, buf };
+}
+
+// ----------------------------------------------------
+// ✅ EXISTING: /api/checkout/teams (UNCHANGED)
+// ----------------------------------------------------
 router.post("/teams", requireAuth, async (req, res) => {
     try {
         const userId = req.user?._id;
@@ -138,13 +162,11 @@ router.post("/teams", requireAuth, async (req, res) => {
 
         const interval = String(req.body?.interval || "monthly").toLowerCase();
 
-        // TOTAL number of profiles user wants
         const desiredProfiles = Math.max(
             2,
             Number(req.body?.desiredProfiles || req.body?.desiredQuantity || req.body?.quantity || 2)
         );
 
-        // Extra profiles beyond the 1 included with Teams
         const extraProfilesQty = Math.max(1, desiredProfiles - 1);
 
         const claimedSlugRaw = req.body?.claimedSlug || req.body?.profile_slug || "";
@@ -157,7 +179,6 @@ router.post("/teams", requireAuth, async (req, res) => {
             });
         }
 
-        // Server-side availability check
         const exists = await BusinessCard.findOne({ profile_slug: claimedSlug }).select("_id");
         if (exists) {
             return res.status(409).json({
@@ -185,7 +206,6 @@ router.post("/teams", requireAuth, async (req, res) => {
 
         const stripeCustomerId = await ensureStripeCustomer(user);
 
-        // ✅ If user already has an active Teams subscription: UPDATE + PRORATE NOW
         if (user.plan === "teams" && user.stripeSubscriptionId) {
             const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId, {
                 expand: ["items.data.price"],
@@ -201,25 +221,16 @@ router.post("/teams", requireAuth, async (req, res) => {
                     });
                 }
 
-                // Build update items:
-                // - teams stays qty 1
-                // - extra item: set qty = extraProfilesQty
                 const items = [{ id: teamsItem.id, quantity: 1 }];
 
-                if (extraItem) {
-                    items.push({ id: extraItem.id, quantity: extraProfilesQty });
-                } else {
-                    // Add the extra price line if missing
-                    items.push({ price: extraPriceId, quantity: extraProfilesQty });
-                }
+                if (extraItem) items.push({ id: extraItem.id, quantity: extraProfilesQty });
+                else items.push({ price: extraPriceId, quantity: extraProfilesQty });
 
-                // Update subscription (keeps billing_cycle_anchor, creates prorations)
                 await stripe.subscriptions.update(sub.id, {
                     items,
                     proration_behavior: "create_prorations",
                 });
 
-                // Charge prorations immediately (your requirement)
                 let prorationResult = { paid: false };
                 try {
                     prorationResult = await invoiceAndPayNow({
@@ -227,7 +238,6 @@ router.post("/teams", requireAuth, async (req, res) => {
                         subscriptionId: sub.id,
                     });
                 } catch (e) {
-                    // If invoice fails (no default payment method etc.), still return success so UI can continue.
                     console.error("Proration invoice/pay failed:", e?.message || e);
                     prorationResult = { paid: false, error: "proration_charge_failed" };
                 }
@@ -238,12 +248,10 @@ router.post("/teams", requireAuth, async (req, res) => {
                     desiredProfiles,
                     extraProfilesQty,
                     proration: prorationResult,
-                    // frontend can just refetch user + profiles after this
                 });
             }
         }
 
-        // ✅ Otherwise: create a new Teams subscription checkout session
         const successUrl =
             `${FRONTEND_URL}/profiles?checkout=success` +
             `&slug=${encodeURIComponent(claimedSlug)}` +
@@ -259,7 +267,6 @@ router.post("/teams", requireAuth, async (req, res) => {
 
             client_reference_id: String(user._id),
 
-            // Two-line-item subscription
             line_items: [
                 { price: teamsPriceId, quantity: 1 },
                 { price: extraPriceId, quantity: extraProfilesQty },
@@ -294,6 +301,162 @@ router.post("/teams", requireAuth, async (req, res) => {
     } catch (err) {
         console.error("Teams checkout error:", err);
         return res.status(500).json({ error: "Stripe checkout session failed" });
+    }
+});
+
+// ----------------------------------------------------
+// ✅ NEW: Upload logo (base64 data URL -> S3)
+// POST /api/checkout/nfc/logo
+// Body: { dataUrl: "data:image/png;base64,...", filename?: "logo.png" }
+// ----------------------------------------------------
+router.post("/nfc/logo", requireAuth, async (req, res) => {
+    try {
+        const userId = req.user?._id;
+        if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+        const { dataUrl, filename } = req.body || {};
+        const decoded = decodeDataUrlToBuffer(dataUrl);
+
+        if (!decoded?.buf || !decoded?.mime) {
+            return res.status(400).json({ error: "Invalid dataUrl", code: "INVALID_DATA_URL" });
+        }
+
+        if (!decoded.mime.startsWith("image/")) {
+            return res.status(400).json({ error: "Only image uploads allowed", code: "INVALID_MIME" });
+        }
+
+        // Size guard (~3MB)
+        if (decoded.buf.length > 3 * 1024 * 1024) {
+            return res.status(400).json({ error: "Logo too large (max 3MB)", code: "LOGO_TOO_LARGE" });
+        }
+
+        const ext =
+            decoded.mime === "image/png"
+                ? "png"
+                : decoded.mime === "image/jpeg"
+                    ? "jpg"
+                    : decoded.mime === "image/webp"
+                        ? "webp"
+                        : "png";
+
+        const safeName = String(filename || `logo.${ext}`)
+            .trim()
+            .replace(/[^a-zA-Z0-9._-]/g, "")
+            .slice(0, 80);
+
+        const key = `nfc-logos/${String(userId)}/${Date.now()}-${safeName || `logo.${ext}`}`;
+
+        // ✅ compatible with both signatures:
+        // uploadToS3(buffer, key) OR uploadToS3(buffer, key, mime)
+        let url;
+        try {
+            url = await uploadToS3(decoded.buf, key, decoded.mime);
+        } catch {
+            url = await uploadToS3(decoded.buf, key);
+        }
+
+        return res.json({ ok: true, logoUrl: url, key });
+    } catch (err) {
+        console.error("nfc/logo upload error:", err);
+        return res.status(500).json({ error: "Failed to upload logo" });
+    }
+});
+
+// ----------------------------------------------------
+// ✅ NEW: Create NFC checkout session (one-time payment)
+// POST /api/checkout/nfc/session
+// Body: { productKey, quantity, profileId, logoUrl?, preview? }
+// ----------------------------------------------------
+router.post("/nfc/session", requireAuth, async (req, res) => {
+    try {
+        const userId = req.user?._id;
+        if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+        const user = await User.findById(userId);
+        if (!user) return res.status(401).json({ error: "Unauthorized" });
+
+        const productKey = normalizeProductKey(req.body?.productKey);
+        const priceId = NFC_PRICE_MAP[productKey];
+
+        if (!priceId) {
+            return res.status(500).json({
+                error: `Missing Stripe price env for product: ${productKey}`,
+                code: "MISSING_NFC_PRICE_ID",
+            });
+        }
+
+        const quantity = Math.max(1, Math.min(50, Number(req.body?.quantity || 1)));
+
+        const profileId = String(req.body?.profileId || "").trim();
+        if (!profileId) {
+            return res.status(400).json({ error: "profileId is required", code: "PROFILE_REQUIRED" });
+        }
+
+        // Must own the profile
+        const profile = await BusinessCard.findOne({ _id: profileId, user: user._id }).select("_id");
+        if (!profile) {
+            return res.status(403).json({ error: "Invalid profile selection", code: "INVALID_PROFILE" });
+        }
+
+        const logoUrl = String(req.body?.logoUrl || "").trim();
+        const preview = req.body?.preview && typeof req.body.preview === "object" ? req.body.preview : {};
+
+        const stripeCustomerId = await ensureStripeCustomer(user);
+
+        // Create pending order record (source of truth)
+        const order = await NfcOrder.create({
+            user: user._id,
+            profile: profile._id,
+            productKey,
+            quantity,
+            logoUrl,
+            preview,
+            currency: "gbp",
+            status: "pending",
+            stripeCustomerId,
+        });
+
+        const successUrl =
+            `${FRONTEND_URL}/products/${productKey}?checkout=success` +
+            `&order=${encodeURIComponent(String(order._id))}` +
+            `&session_id={CHECKOUT_SESSION_ID}`;
+
+        const cancelUrl =
+            `${FRONTEND_URL}/products/${productKey}?checkout=cancel` +
+            `&order=${encodeURIComponent(String(order._id))}`;
+
+        const session = await stripe.checkout.sessions.create({
+            mode: "payment",
+            customer: stripeCustomerId,
+            payment_method_types: ["card"],
+            allow_promotion_codes: true,
+
+            line_items: [{ price: priceId, quantity }],
+
+            client_reference_id: String(user._id),
+
+            metadata: {
+                checkoutType: "nfc_order",
+                userId: String(user._id),
+                orderId: String(order._id),
+                productKey,
+                quantity: String(quantity),
+                profileId: String(profile._id),
+                logoUrl: logoUrl || "",
+            },
+
+            success_url: successUrl,
+            cancel_url: cancelUrl,
+        });
+
+        // Save session id for tracking
+        order.stripeCheckoutSessionId = session.id;
+        await order.save();
+
+        return res.json({ url: session.url, orderId: String(order._id) });
+    } catch (err) {
+        console.error("nfc/session error:", err);
+        return res.status(500).json({ error: "Failed to start NFC checkout" });
     }
 });
 
