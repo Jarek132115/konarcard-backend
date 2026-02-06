@@ -113,10 +113,20 @@ async function invoiceAndPayNow({ customerId, subscriptionId }) {
 // STRIPE_PRICE_METAL_CARD
 // STRIPE_PRICE_KONARTAG
 const NFC_PRICE_MAP = {
-    "plastic-card": process.env.STRIPE_PRICE_PLASTIC_CARD,
-    "metal-card": process.env.STRIPE_PRICE_METAL_CARD,
-    konartag: process.env.STRIPE_PRICE_KONARTAG,
+    "plastic-card": {
+        white: process.env.STRIPE_PRICE_PLASTIC_WHITE,
+        black: process.env.STRIPE_PRICE_PLASTIC_BLACK,
+    },
+    "metal-card": {
+        black: process.env.STRIPE_PRICE_METAL_BLACK,
+        gold: process.env.STRIPE_PRICE_METAL_GOLD,
+    },
+    "konartag": {
+        black: process.env.STRIPE_PRICE_KONARTAG_BLACK,
+        white: process.env.STRIPE_PRICE_KONARTAG_WHITE,
+    },
 };
+
 
 function normalizeProductKey(v) {
     const s = String(v || "").trim().toLowerCase();
@@ -376,12 +386,46 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
         const productKey = normalizeProductKey(req.body?.productKey);
-        const priceId = NFC_PRICE_MAP[productKey];
 
+        const variantsMap = NFC_PRICE_MAP?.[productKey] || null;
+        if (!variantsMap) {
+            return res.status(400).json({
+                error: "Invalid product",
+                code: "INVALID_NFC_PRODUCT",
+                productKey,
+            });
+        }
+
+        // ✅ allow frontend to omit variant for now (default per product)
+        const defaultVariant =
+            productKey === "plastic-card"
+                ? "white"
+                : productKey === "metal-card"
+                    ? "black"
+                    : productKey === "konartag"
+                        ? "black"
+                        : "";
+
+        const variant = String(req.body?.variant || defaultVariant).trim().toLowerCase();
+
+        const allowedVariants = Object.keys(variantsMap);
+        if (!allowedVariants.includes(variant)) {
+            return res.status(400).json({
+                error: "Invalid variant",
+                code: "INVALID_NFC_VARIANT",
+                productKey,
+                variant,
+                allowedVariants,
+            });
+        }
+
+        const priceId = variantsMap?.[variant];
         if (!priceId) {
             return res.status(500).json({
-                error: `Missing Stripe price env for product: ${productKey}`,
+                error: "Stripe price ID missing in env for this product/variant",
                 code: "MISSING_NFC_PRICE_ID",
+                productKey,
+                variant,
             });
         }
 
@@ -410,7 +454,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             productKey,
             quantity,
             logoUrl,
-            preview,
+            preview: { ...preview, variant }, // ✅ store variant too
             currency: "gbp",
             status: "pending",
             stripeCustomerId,
@@ -440,6 +484,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
                 userId: String(user._id),
                 orderId: String(order._id),
                 productKey,
+                variant,
                 quantity: String(quantity),
                 profileId: String(profile._id),
                 logoUrl: logoUrl || "",
@@ -449,15 +494,18 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             cancel_url: cancelUrl,
         });
 
-        // Save session id for tracking
         order.stripeCheckoutSessionId = session.id;
         await order.save();
 
         return res.json({ url: session.url, orderId: String(order._id) });
     } catch (err) {
         console.error("nfc/session error:", err);
-        return res.status(500).json({ error: "Failed to start NFC checkout" });
+        return res.status(500).json({
+            error: "Failed to start NFC checkout",
+            details: err?.message || String(err),
+        });
     }
 });
+
 
 module.exports = router;
