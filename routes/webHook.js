@@ -1,4 +1,15 @@
 // backend/routes/webHook.js
+// IMPORTANT: Stripe webhooks REQUIRE the raw body.
+// In your main server file you must mount like:
+//
+//   app.post(
+//     "/api/webhook",
+//     express.raw({ type: "application/json" }),
+//     require("./routes/webHook")
+//   );
+//
+// And DO NOT run express.json() on that route.
+
 const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -15,8 +26,7 @@ const { orderConfirmationTemplate } = require("../utils/emailTemplates");
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-const PUBLIC_PROFILE_DOMAIN =
-  process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
+const PUBLIC_PROFILE_DOMAIN = process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
 
 /**
  * Price mapping (base subscription)
@@ -123,9 +133,7 @@ function extractEntitlementsFromSubscription(sub) {
     }
   }
 
-  // Teams total allowed profiles
-  const teamsProfilesQty =
-    plan === "teams" ? Math.max(1, 1 + Math.max(0, extraProfilesQty)) : 1;
+  const teamsProfilesQty = plan === "teams" ? Math.max(1, 1 + Math.max(0, extraProfilesQty)) : 1;
 
   return {
     plan,
@@ -174,6 +182,78 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
   return { created: true, id: created?._id, slug, qrUrl };
 }
 
+/**
+ * NFC order updater (idempotent)
+ * Marks order paid/failed/cancelled based on webhook event.
+ */
+async function updateNfcOrderFromSession(session, statusOverride) {
+  const checkoutType = session?.metadata?.checkoutType;
+  if (checkoutType !== "nfc_order") return;
+
+  const orderId = session?.metadata?.orderId ? String(session.metadata.orderId) : "";
+  if (!orderId) return;
+
+  const paymentStatus = String(session.payment_status || "").toLowerCase(); // "paid" | "unpaid" | "no_payment_required"
+  const nextStatus =
+    statusOverride ||
+    (paymentStatus === "paid" || paymentStatus === "no_payment_required" ? "paid" : "pending");
+
+  const amountTotal = Number(session.amount_total || 0);
+  const currency = String(session.currency || "gbp").toLowerCase();
+  const paymentIntentId = session.payment_intent ? String(session.payment_intent) : "";
+
+  // IMPORTANT: keep these so later you can render the exact purchased design
+  const productKey = session?.metadata?.productKey ? String(session.metadata.productKey) : "";
+  const variant = session?.metadata?.variant ? String(session.metadata.variant) : "";
+  const logoUrl = session?.metadata?.logoUrl ? String(session.metadata.logoUrl) : "";
+  const quantityMeta = session?.metadata?.quantity ? Number(session.metadata.quantity) : null;
+
+  const existing = await NfcOrder.findById(orderId).select("_id status preview");
+  if (!existing) return;
+
+  // If already paid/fulfilled, don’t overwrite.
+  if (existing.status === "paid" || existing.status === "fulfilled") {
+    // still ensure we at least store missing stripe IDs if they were blank
+    await NfcOrder.findByIdAndUpdate(orderId, {
+      $set: {
+        stripeCheckoutSessionId: String(session.id || ""),
+        ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
+      },
+    });
+    return;
+  }
+
+  const prevPreview = existing.preview && typeof existing.preview === "object" ? existing.preview : {};
+  const mergedPreview = {
+    ...prevPreview,
+    ...(variant ? { variant } : {}),
+    // placeholders for later:
+    // productImageUrl: "...",  // you will set this when we generate the final mock image
+  };
+
+  // If frontend didn’t pass qty in metadata, keep your DB quantity as-is.
+  // (We do not trust metadata more than DB, but it helps sanity-checking.)
+  const safeQtyMeta = Number.isFinite(quantityMeta) ? quantityMeta : undefined;
+
+  await NfcOrder.findByIdAndUpdate(
+    orderId,
+    {
+      $set: {
+        status: nextStatus,
+        amountTotal: Number.isFinite(amountTotal) ? amountTotal : 0,
+        currency: currency || "gbp",
+        stripeCheckoutSessionId: String(session.id || ""),
+        ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
+        ...(logoUrl ? { logoUrl } : {}),
+        ...(productKey ? { productKey } : {}),
+        preview: mergedPreview,
+        ...(safeQtyMeta ? { quantity: safeQtyMeta } : {}),
+      },
+    },
+    { new: true }
+  );
+}
+
 module.exports = async function stripeWebhookHandler(req, res) {
   if (!endpointSecret) {
     console.error("⚠️ Missing STRIPE_WEBHOOK_SECRET");
@@ -211,9 +291,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
         });
 
         const status = sub.status;
-        const currentPeriodEnd = sub.current_period_end
-          ? new Date(sub.current_period_end * 1000)
-          : undefined;
+        const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
 
         const extracted = extractEntitlementsFromSubscription(sub);
 
@@ -225,9 +303,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
           isSubscribed: isActiveStatus(status),
           extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
           teamsProfilesQty:
-            extracted.plan === "teams"
-              ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
-              : 1,
+            extracted.plan === "teams" ? Math.max(1, Number(extracted.teamsProfilesQty || 1)) : 1,
         };
 
         if (extracted.plan) set.plan = extracted.plan;
@@ -257,10 +333,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
           }
 
           if (resolved.userId) {
-            await ensureClaimedProfile({
-              userId: resolved.userId,
-              claimedSlug,
-            });
+            await ensureClaimedProfile({ userId: resolved.userId, claimedSlug });
           } else {
             console.warn("⚠️ Could not resolve userId for claimed profile creation");
           }
@@ -269,79 +342,69 @@ module.exports = async function stripeWebhookHandler(req, res) {
 
       // One-time payment (NFC)
       if (session.mode === "payment") {
-        const checkoutType = session.metadata?.checkoutType;
-        const orderId = session.metadata?.orderId ? String(session.metadata.orderId) : "";
-        const productKey = session.metadata?.productKey ? String(session.metadata.productKey) : "";
-        const qtyMeta = session.metadata?.quantity ? Number(session.metadata.quantity) : null;
+        // ✅ mark order paid (idempotent)
+        await updateNfcOrderFromSession(session);
 
-        const amountTotal = Number(session.amount_total || 0); // pennies
-        const currency = String(session.currency || "gbp").toLowerCase();
-        const paymentIntentId = session.payment_intent ? String(session.payment_intent) : "";
+        // ✅ optional emails (do NOT let email failure break webhook)
+        try {
+          const customerEmail = session.customer_details?.email;
+          const productKey = session.metadata?.productKey ? String(session.metadata.productKey) : "";
+          const variant = session.metadata?.variant ? String(session.metadata.variant) : "";
+          const qtyMeta = session.metadata?.quantity ? Number(session.metadata.quantity) : null;
 
-        // ✅ If this is our NFC order checkout: mark paid
-        if (checkoutType === "nfc_order" && orderId) {
-          try {
-            const nextStatus = session.payment_status === "paid" ? "paid" : "pending";
+          const amountTotal = Number(session.amount_total || 0);
+          const amountPaid = amountTotal ? (amountTotal / 100).toFixed(2) : null;
 
-            await NfcOrder.findByIdAndUpdate(
-              orderId,
-              {
-                $set: {
-                  status: nextStatus,
-                  amountTotal: Number.isFinite(amountTotal) ? amountTotal : 0,
-                  currency: currency || "gbp",
-                  stripeCheckoutSessionId: String(session.id || ""),
-                  stripePaymentIntentId: paymentIntentId,
-                },
-              },
-              { new: true }
+          const productLine =
+            productKey || qtyMeta
+              ? `<p>Product: ${productKey || "nfc"}${variant ? ` • ${variant}` : ""}${qtyMeta ? ` • Qty: ${qtyMeta}` : ""}</p>`
+              : "";
+
+          if (process.env.EMAIL_USER) {
+            await sendEmail(
+              process.env.EMAIL_USER,
+              amountPaid ? `New Konar Order - £${amountPaid}` : `New Konar Order`,
+              `<p>New order from: ${customerEmail || "Unknown email"}</p>${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
+              }`
             );
-          } catch (e) {
-            console.error("⚠️ Failed to update NfcOrder:", e?.message || e);
           }
-        }
 
-        // ✅ Keep your existing email notifications
-        const customerEmail = session.customer_details?.email;
-        const amountPaid = amountTotal ? (amountTotal / 100).toFixed(2) : null;
-
-        const productLine =
-          productKey || qtyMeta
-            ? `<p>Product: ${productKey || "nfc"}${qtyMeta ? ` • Qty: ${qtyMeta}` : ""}</p>`
-            : "";
-
-        await sendEmail(
-          process.env.EMAIL_USER,
-          amountPaid ? `New Konar Card Order - £${amountPaid}` : `New Konar Card Order`,
-          `<p>New order from: ${customerEmail || "Unknown email"}</p>${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
-          }`
-        );
-
-        if (customerEmail && amountPaid) {
-          await sendEmail(
-            customerEmail,
-            "Your Konar Card Order Confirmation",
-            orderConfirmationTemplate(customerEmail, amountPaid)
-          );
+          if (customerEmail && amountPaid) {
+            await sendEmail(
+              customerEmail,
+              "Your Konar Order Confirmation",
+              orderConfirmationTemplate(customerEmail, amountPaid)
+            );
+          }
+        } catch (e) {
+          console.warn("Email send failed (ignored):", e?.message || e);
         }
       }
     }
 
     // ---------------------------------------
+    // checkout.session.async_payment_failed / expired (NFC fail/cancel)
+    // ---------------------------------------
+    if (event.type === "checkout.session.async_payment_failed") {
+      const session = event.data.object;
+      await updateNfcOrderFromSession(session, "failed");
+    }
+
+    if (event.type === "checkout.session.expired") {
+      const session = event.data.object;
+      await updateNfcOrderFromSession(session, "cancelled");
+    }
+
+    // ---------------------------------------
     // subscription created / updated
     // ---------------------------------------
-    if (
-      event.type === "customer.subscription.created" ||
-      event.type === "customer.subscription.updated"
-    ) {
+    if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
       const subObj = event.data.object;
 
       const customerId = subObj.customer;
       const subscriptionId = subObj.id;
       const status = subObj.status;
-      const currentPeriodEnd = subObj.current_period_end
-        ? new Date(subObj.current_period_end * 1000)
-        : undefined;
+      const currentPeriodEnd = subObj.current_period_end ? new Date(subObj.current_period_end * 1000) : undefined;
 
       const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
         expand: ["items.data.price"],
@@ -356,9 +419,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
         isSubscribed: isActiveStatus(status),
         extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
         teamsProfilesQty:
-          extracted.plan === "teams"
-            ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
-            : 1,
+          extracted.plan === "teams" ? Math.max(1, Number(extracted.teamsProfilesQty || 1)) : 1,
       };
 
       if (extracted.plan) set.plan = extracted.plan;
@@ -380,7 +441,6 @@ module.exports = async function stripeWebhookHandler(req, res) {
 
     // ---------------------------------------
     // invoice.paid
-    // ✅ FIX: also set currentPeriodEnd from subscription
     // ---------------------------------------
     if (event.type === "invoice.paid") {
       const invoice = event.data.object;
@@ -397,9 +457,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
           });
           extracted = extractEntitlementsFromSubscription(fullSub);
 
-          currentPeriodEnd = fullSub.current_period_end
-            ? new Date(fullSub.current_period_end * 1000)
-            : undefined;
+          currentPeriodEnd = fullSub.current_period_end ? new Date(fullSub.current_period_end * 1000) : undefined;
         } catch { }
       }
 
@@ -410,9 +468,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
         currentPeriodEnd,
         extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
         teamsProfilesQty:
-          extracted.plan === "teams"
-            ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
-            : 1,
+          extracted.plan === "teams" ? Math.max(1, Number(extracted.teamsProfilesQty || 1)) : 1,
       };
 
       if (extracted.plan) set.plan = extracted.plan;

@@ -1,3 +1,4 @@
+// backend/routes/checkout.js
 const express = require("express");
 const router = express.Router();
 
@@ -106,12 +107,15 @@ async function invoiceAndPayNow({ customerId, subscriptionId }) {
 }
 
 // -------------------------
-// NEW: NFC product price mapping
+// NFC product price mapping
 // -------------------------
 // Set these in env:
-// STRIPE_PRICE_PLASTIC_CARD
-// STRIPE_PRICE_METAL_CARD
-// STRIPE_PRICE_KONARTAG
+// STRIPE_PRICE_PLASTIC_WHITE
+// STRIPE_PRICE_PLASTIC_BLACK
+// STRIPE_PRICE_METAL_BLACK
+// STRIPE_PRICE_METAL_GOLD
+// STRIPE_PRICE_KONARTAG_BLACK
+// STRIPE_PRICE_KONARTAG_WHITE
 const NFC_PRICE_MAP = {
     "plastic-card": {
         white: process.env.STRIPE_PRICE_PLASTIC_WHITE,
@@ -121,12 +125,11 @@ const NFC_PRICE_MAP = {
         black: process.env.STRIPE_PRICE_METAL_BLACK,
         gold: process.env.STRIPE_PRICE_METAL_GOLD,
     },
-    "konartag": {
+    konartag: {
         black: process.env.STRIPE_PRICE_KONARTAG_BLACK,
         white: process.env.STRIPE_PRICE_KONARTAG_WHITE,
     },
 };
-
 
 function normalizeProductKey(v) {
     const s = String(v || "").trim().toLowerCase();
@@ -144,7 +147,6 @@ function decodeDataUrlToBuffer(dataUrl) {
 
     const mime = String(m[1] || "").trim().toLowerCase();
     const b64 = String(m[2] || "").trim();
-
     if (!mime || !b64) return null;
 
     let buf;
@@ -157,6 +159,15 @@ function decodeDataUrlToBuffer(dataUrl) {
     if (!buf || !buf.length) return null;
 
     return { mime, buf };
+}
+
+// small helper: upload to S3 supporting both signatures
+async function uploadBufferToS3({ buffer, key, mime }) {
+    try {
+        return await uploadToS3(buffer, key, mime);
+    } catch {
+        return await uploadToS3(buffer, key);
+    }
 }
 
 // ----------------------------------------------------
@@ -315,9 +326,9 @@ router.post("/teams", requireAuth, async (req, res) => {
 });
 
 // ----------------------------------------------------
-// ✅ NEW: Upload logo (base64 data URL -> S3)
+// ✅ Upload logo (base64 data URL -> S3)
 // POST /api/checkout/nfc/logo
-// Body: { dataUrl: "data:image/png;base64,...", filename?: "logo.png" }
+// Body: { dataUrl, filename? }
 // ----------------------------------------------------
 router.post("/nfc/logo", requireAuth, async (req, res) => {
     try {
@@ -335,7 +346,6 @@ router.post("/nfc/logo", requireAuth, async (req, res) => {
             return res.status(400).json({ error: "Only image uploads allowed", code: "INVALID_MIME" });
         }
 
-        // Size guard (~3MB)
         if (decoded.buf.length > 3 * 1024 * 1024) {
             return res.status(400).json({ error: "Logo too large (max 3MB)", code: "LOGO_TOO_LARGE" });
         }
@@ -355,15 +365,7 @@ router.post("/nfc/logo", requireAuth, async (req, res) => {
             .slice(0, 80);
 
         const key = `nfc-logos/${String(userId)}/${Date.now()}-${safeName || `logo.${ext}`}`;
-
-        // ✅ compatible with both signatures:
-        // uploadToS3(buffer, key) OR uploadToS3(buffer, key, mime)
-        let url;
-        try {
-            url = await uploadToS3(decoded.buf, key, decoded.mime);
-        } catch {
-            url = await uploadToS3(decoded.buf, key);
-        }
+        const url = await uploadBufferToS3({ buffer: decoded.buf, key, mime: decoded.mime });
 
         return res.json({ ok: true, logoUrl: url, key });
     } catch (err) {
@@ -373,9 +375,62 @@ router.post("/nfc/logo", requireAuth, async (req, res) => {
 });
 
 // ----------------------------------------------------
-// ✅ NEW: Create NFC checkout session (one-time payment)
+// ✅ NEW: Upload preview image (product + logo) (base64 data URL -> S3)
+// POST /api/checkout/nfc/preview
+// Body: { dataUrl, filename?, productKey?, variant? }
+// ----------------------------------------------------
+router.post("/nfc/preview", requireAuth, async (req, res) => {
+    try {
+        const userId = req.user?._id;
+        if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+        const { dataUrl, filename, productKey, variant } = req.body || {};
+        const decoded = decodeDataUrlToBuffer(dataUrl);
+
+        if (!decoded?.buf || !decoded?.mime) {
+            return res.status(400).json({ error: "Invalid dataUrl", code: "INVALID_DATA_URL" });
+        }
+
+        if (!decoded.mime.startsWith("image/")) {
+            return res.status(400).json({ error: "Only image uploads allowed", code: "INVALID_MIME" });
+        }
+
+        // preview can be a bit larger, but still cap it
+        if (decoded.buf.length > 6 * 1024 * 1024) {
+            return res.status(400).json({ error: "Preview too large (max 6MB)", code: "PREVIEW_TOO_LARGE" });
+        }
+
+        const ext =
+            decoded.mime === "image/png"
+                ? "png"
+                : decoded.mime === "image/jpeg"
+                    ? "jpg"
+                    : decoded.mime === "image/webp"
+                        ? "webp"
+                        : "png";
+
+        const safeFile = String(filename || `preview.${ext}`)
+            .trim()
+            .replace(/[^a-zA-Z0-9._-]/g, "")
+            .slice(0, 80);
+
+        const pk = normalizeProductKey(productKey);
+        const v = String(variant || "").trim().toLowerCase();
+
+        const key = `nfc-previews/${String(userId)}/${pk || "product"}/${v || "variant"}/${Date.now()}-${safeFile || `preview.${ext}`}`;
+        const url = await uploadBufferToS3({ buffer: decoded.buf, key, mime: decoded.mime });
+
+        return res.json({ ok: true, previewImageUrl: url, key });
+    } catch (err) {
+        console.error("nfc/preview upload error:", err);
+        return res.status(500).json({ error: "Failed to upload preview image" });
+    }
+});
+
+// ----------------------------------------------------
+// ✅ Create NFC checkout session (one-time payment)
 // POST /api/checkout/nfc/session
-// Body: { productKey, quantity, profileId, logoUrl?, preview? }
+// Body: { productKey, variant?, quantity, profileId, logoUrl?, previewImageUrl?, preview? }
 // ----------------------------------------------------
 router.post("/nfc/session", requireAuth, async (req, res) => {
     try {
@@ -396,7 +451,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             });
         }
 
-        // ✅ allow frontend to omit variant for now (default per product)
+        // allow frontend to omit variant (default per product)
         const defaultVariant =
             productKey === "plastic-card"
                 ? "white"
@@ -436,13 +491,13 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             return res.status(400).json({ error: "profileId is required", code: "PROFILE_REQUIRED" });
         }
 
-        // Must own the profile
         const profile = await BusinessCard.findOne({ _id: profileId, user: user._id }).select("_id");
         if (!profile) {
             return res.status(403).json({ error: "Invalid profile selection", code: "INVALID_PROFILE" });
         }
 
         const logoUrl = String(req.body?.logoUrl || "").trim();
+        const previewImageUrl = String(req.body?.previewImageUrl || "").trim();
         const preview = req.body?.preview && typeof req.body.preview === "object" ? req.body.preview : {};
 
         const stripeCustomerId = await ensureStripeCustomer(user);
@@ -452,9 +507,11 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             user: user._id,
             profile: profile._id,
             productKey,
+            variant, // ✅ expects you added it in the model
             quantity,
             logoUrl,
-            preview: { ...preview, variant }, // ✅ store variant too
+            previewImageUrl, // ✅ expects you added it in the model
+            preview: { ...preview, variant },
             currency: "gbp",
             status: "pending",
             stripeCustomerId,
@@ -488,6 +545,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
                 quantity: String(quantity),
                 profileId: String(profile._id),
                 logoUrl: logoUrl || "",
+                previewImageUrl: previewImageUrl || "",
             },
 
             success_url: successUrl,
@@ -506,6 +564,5 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         });
     }
 });
-
 
 module.exports = router;

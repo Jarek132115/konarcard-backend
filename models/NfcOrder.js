@@ -9,10 +9,16 @@ const nfcOrderSchema = new mongoose.Schema(
         // "plastic-card" | "metal-card" | "konartag"
         productKey: { type: String, required: true, index: true },
 
+        // "white" | "black" | "gold" (depends on product)
+        variant: { type: String, default: "", index: true },
+
         quantity: { type: Number, required: true, min: 1, max: 50, default: 1 },
 
-        // If user uploads custom logo, we store the S3 URL here
+        // Uploaded logo (S3 url)
         logoUrl: { type: String, default: "" },
+
+        // ✅ IMPORTANT: store the final preview image (product + logo) for “My Cards”
+        previewImageUrl: { type: String, default: "" },
 
         // Whatever they configured on the preview (keep flexible JSON)
         preview: { type: mongoose.Schema.Types.Mixed, default: {} },

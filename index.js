@@ -14,6 +14,7 @@ const checkoutRoutes = require("./routes/checkout");
 const contactRoutes = require("./routes/contactRoutes");
 const businessCardRoutes = require("./routes/businessCardRoutes");
 const authRoutes = require("./routes/authRoutes");
+const nfcOrdersRoutes = require("./routes/nfcOrders"); // ✅ NEW: NFC Orders route
 
 // ✅ Stripe webhook handler (exports a FUNCTION, not a router)
 const stripeWebhookHandler = require("./routes/webHook");
@@ -42,7 +43,12 @@ const corsOptions = {
   },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-no-auth", "stripe-signature"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "x-no-auth",
+    "stripe-signature",
+  ],
   optionsSuccessStatus: 204,
 };
 
@@ -102,6 +108,9 @@ app.use("/api/checkout", checkoutRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/business-card", businessCardRoutes);
 
+// ✅ NEW: NFC Orders API
+app.use("/api/nfc-orders", nfcOrdersRoutes);
+
 /* -------------------- Health -------------------- */
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
 
@@ -110,5 +119,5 @@ const port = Number(process.env.PORT || 8080);
 
 // ✅ Cloud Run: listen on 0.0.0.0
 app.listen(port, "0.0.0.0", () => {
-  console.log(`🚀 Server running on port ${port}`);
+  console.log(`Server running on port ${port}`);
 });
