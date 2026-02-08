@@ -330,13 +330,13 @@ const deleteMyProfile = async (req, res) => {
 // - Teams supports multiple profiles
 // - Free/Plus should not be able to create 2nd profile via SAVE:
 //   if they already have 1 profile and try to save another slug, we update their only profile instead.
+// POST /api/business-card (upsert save, supports profile_slug)
 const saveBusinessCard = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
     const userId = req.user._id;
 
-    // ✅ Fresh user
     const freshUser = await User.findById(userId).select(
       "plan teamsProfilesQty extraProfilesQty username slug profileUrl qrCodeUrl"
     );
@@ -349,7 +349,7 @@ const saveBusinessCard = async (req, res) => {
       });
     }
 
-    // GLOBAL slug protection (never allow two different owners)
+    // GLOBAL slug protection
     const otherOwner = await BusinessCard.findOne({
       profile_slug: requestedSlug,
       user: { $ne: userId },
@@ -358,11 +358,11 @@ const saveBusinessCard = async (req, res) => {
       return res.status(409).json({ error: "Profile slug already exists" });
     }
 
-    // Try to find the exact profile by slug
+    // find exact profile
     let existingCard = await BusinessCard.findOne({
       user: userId,
       profile_slug: requestedSlug,
-    }).select("_id profile_slug template_id works services reviews qr_code_url");
+    });
 
     // If not found and plan only allows 1 profile, fall back to the user's only profile
     let targetQuery = { user: userId, profile_slug: requestedSlug };
@@ -370,12 +370,8 @@ const saveBusinessCard = async (req, res) => {
 
     if (!existingCard && plan !== "teams") {
       const count = await BusinessCard.countDocuments({ user: userId });
-
       if (count >= 1) {
-        const onlyCard = await BusinessCard.findOne({ user: userId })
-          .sort({ createdAt: 1 })
-          .select("_id profile_slug template_id works services reviews qr_code_url");
-
+        const onlyCard = await BusinessCard.findOne({ user: userId }).sort({ createdAt: 1 });
         if (onlyCard?._id) {
           existingCard = onlyCard;
           targetQuery = { _id: onlyCard._id };
@@ -384,7 +380,7 @@ const saveBusinessCard = async (req, res) => {
       }
     }
 
-    // Arrays from FormData
+    // Parse arrays
     let services = parseJsonArray(req.body.services, []);
     let reviews = parseJsonArray(req.body.reviews, []);
 
@@ -393,6 +389,10 @@ const saveBusinessCard = async (req, res) => {
       .concat(req.body.existing_works || [])
       .flat()
       .filter(Boolean);
+
+    // --- STRICT removed parsing (FormData always sends "0" or "1") ---
+    const coverRemoved = String(req.body.cover_photo_removed || "0") === "1";
+    const avatarRemoved = String(req.body.avatar_removed || "0") === "1";
 
     // Upload cover/avatar if provided
     let cover_photo_url = null;
@@ -421,6 +421,7 @@ const saveBusinessCard = async (req, res) => {
       0,
       maxWorks === Infinity ? workFiles.length : maxWorks - works.length
     );
+
     const filesToUpload =
       plan === "free" ? workFiles.slice(0, remainingSlots) : workFiles;
 
@@ -442,17 +443,15 @@ const saveBusinessCard = async (req, res) => {
       reviews,
     }));
 
-    // Template normalize (free => template-1)
+    // Template normalize
     const requestedTemplate =
       req.body.template_id || existingCard?.template_id || "template-1";
     const effectiveTemplate = normalizeTemplateForPlan(plan, requestedTemplate);
 
+    // Build update object (DO NOT wipe cover/avatar unless removed or new file)
     const update = {
       user: userId,
-
-      // ✅ If free/plus user tried to save to a new slug, we "rename" their single profile
-      profile_slug: willRenameSlug ? requestedSlug : requestedSlug,
-
+      profile_slug: requestedSlug,
       template_id: effectiveTemplate,
 
       business_card_name: req.body.business_card_name || "",
@@ -505,18 +504,18 @@ const saveBusinessCard = async (req, res) => {
       works,
     };
 
-    // Handle removals
-    const coverRemoved = asBool(req.body.cover_photo_removed, false);
-    const avatarRemoved = asBool(req.body.avatar_removed, false);
-
+    // ✅ Only modify cover_photo/avatar if explicitly removed OR a new file was uploaded
     if (coverRemoved) update.cover_photo = "";
     if (avatarRemoved) update.avatar = "";
 
     if (cover_photo_url) update.cover_photo = cover_photo_url;
     if (avatar_url) update.avatar = avatar_url;
 
-    // ✅ Upsert only if teams (or user has no card yet)
-    // For free/plus we prefer updating the only card (handled above).
+    // Free/plus rename logic: if using onlyCard, we must change its slug
+    if (willRenameSlug) {
+      update.profile_slug = requestedSlug;
+    }
+
     const allowUpsert = plan === "teams" || !existingCard;
 
     const saved = await BusinessCard.findOneAndUpdate(
@@ -525,8 +524,7 @@ const saveBusinessCard = async (req, res) => {
       { new: true, upsert: allowUpsert }
     );
 
-    // ✅ Ensure QR exists for this profile.
-    // Also: if free/plus "renamed" their single profile slug, generate a new QR for the new URL.
+    // Ensure QR exists
     try {
       const needsQr =
         !saved?.qr_code_url || (willRenameSlug && safeSlug(saved.profile_slug) === requestedSlug);
@@ -537,7 +535,6 @@ const saveBusinessCard = async (req, res) => {
           saved.qr_code_url = qrUrl;
           await saved.save();
 
-          // If free/plus renames their only profile, sync legacy user fields too
           if (plan !== "teams" && willRenameSlug) {
             await User.findByIdAndUpdate(userId, {
               $set: {
@@ -568,6 +565,7 @@ const saveBusinessCard = async (req, res) => {
     return res.status(500).json({ error: "Failed to save business card" });
   }
 };
+
 
 /**
  * ---------------------------------------------------------
