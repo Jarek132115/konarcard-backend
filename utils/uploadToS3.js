@@ -1,28 +1,55 @@
-const AWS = require('aws-sdk'); // Assuming you are using AWS SDK v2
+const AWS = require("aws-sdk");
 
-const uploadToS3 = async (buffer, key, contentType = 'image/png') => {
-    // It's better to initialize the S3 client directly within the function
-    // or at least with the specific region for this upload.
-    // Using AWS_QR_BUCKET_REGION for this utility as it's used for QR codes.
-    const s3Client = new AWS.S3({
+const guessContentType = (key, fallback = "application/octet-stream") => {
+    const k = String(key || "").toLowerCase();
+    if (k.endsWith(".png")) return "image/png";
+    if (k.endsWith(".jpg") || k.endsWith(".jpeg")) return "image/jpeg";
+    if (k.endsWith(".webp")) return "image/webp";
+    if (k.endsWith(".gif")) return "image/gif";
+    return fallback;
+};
+
+const uploadToS3 = async (buffer, key, contentType) => {
+    if (!buffer) throw new Error("uploadToS3: buffer missing");
+    if (!key) throw new Error("uploadToS3: key missing");
+
+    const Bucket = process.env.AWS_QR_BUCKET_NAME;
+    const region = process.env.AWS_QR_BUCKET_REGION;
+
+    if (!Bucket) throw new Error("AWS_QR_BUCKET_NAME missing");
+    if (!region) throw new Error("AWS_QR_BUCKET_REGION missing");
+
+    const s3 = new AWS.S3({
         accessKeyId: process.env.AWS_ACCESS_KEY_ID,
         secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-        region: process.env.AWS_QR_BUCKET_REGION, // <<<<< CORRECTED: Use QR specific region
+        region,
+        signatureVersion: "v4",
     });
 
+    const ContentType = contentType || guessContentType(key, "image/png");
+
     const params = {
-        Bucket: process.env.AWS_QR_BUCKET_NAME, // <<<<< CORRECTED: Use QR specific bucket name
+        Bucket,
         Key: key,
         Body: buffer,
-        ContentType: contentType,
+        ContentType,
+
+        // ✅ THIS is the key fix for your “AccessDenied”
+        ACL: "public-read",
+
+        // ✅ helps browser caching behave nicely
+        CacheControl: "public, max-age=31536000, immutable",
     };
 
     try {
-        const upload = await s3Client.upload(params).promise();
-        return upload.Location; // This is the public URL of the uploaded file
-    } catch (error) {
-        console.error("Error uploading to S3 (QR Codes):", error);
-        throw new Error("Failed to upload QR code to S3."); // Re-throw to be caught by calling function
+        const out = await s3.upload(params).promise();
+
+        // out.Location is fine, but we also ensure correct format:
+        const publicUrl = out.Location || `https://${Bucket}.s3.${region}.amazonaws.com/${encodeURIComponent(key)}`;
+        return publicUrl;
+    } catch (err) {
+        console.error("Error uploading to S3:", err);
+        throw new Error("Failed to upload to S3.");
     }
 };
 
