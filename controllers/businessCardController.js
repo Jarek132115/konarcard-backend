@@ -330,7 +330,6 @@ const deleteMyProfile = async (req, res) => {
 // - Teams supports multiple profiles
 // - Free/Plus should not be able to create 2nd profile via SAVE:
 //   if they already have 1 profile and try to save another slug, we update their only profile instead.
-// POST /api/business-card (upsert save, supports profile_slug)
 const saveBusinessCard = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
@@ -358,13 +357,13 @@ const saveBusinessCard = async (req, res) => {
       return res.status(409).json({ error: "Profile slug already exists" });
     }
 
-    // find exact profile
+    // Find exact profile
     let existingCard = await BusinessCard.findOne({
       user: userId,
       profile_slug: requestedSlug,
     });
 
-    // If not found and plan only allows 1 profile, fall back to the user's only profile
+    // If not found and plan allows only 1 profile, fall back to user's only profile
     let targetQuery = { user: userId, profile_slug: requestedSlug };
     let willRenameSlug = false;
 
@@ -380,17 +379,28 @@ const saveBusinessCard = async (req, res) => {
       }
     }
 
-    // Parse arrays
+    // ----------------------------
+    // Debug: confirm files arrive
+    // ----------------------------
+    const debugFiles = {
+      cover_photo: req.files?.cover_photo?.length || 0,
+      avatar: req.files?.avatar?.length || 0,
+      works: req.files?.works?.length || 0,
+      hasFilesObject: !!req.files,
+    };
+
+    // Arrays from FormData
     let services = parseJsonArray(req.body.services, []);
     let reviews = parseJsonArray(req.body.reviews, []);
 
-    // existing_works can come as repeated fields
+    // existing_works (strip blob urls ALWAYS)
     const existing_works = []
       .concat(req.body.existing_works || [])
       .flat()
-      .filter(Boolean);
+      .filter(Boolean)
+      .filter((u) => typeof u === "string" && !u.startsWith("blob:"));
 
-    // --- STRICT removed parsing (FormData always sends "0" or "1") ---
+    // STRICT removed flags
     const coverRemoved = String(req.body.cover_photo_removed || "0") === "1";
     const avatarRemoved = String(req.body.avatar_removed || "0") === "1";
 
@@ -410,18 +420,19 @@ const saveBusinessCard = async (req, res) => {
       avatar_url = await uploadToS3(f.buffer, key);
     }
 
-    // Upload new work images (respect free limit BEFORE uploading)
+    // Upload new work images
     const uploadedWorkUrls = [];
     const workFiles = req.files?.works || [];
 
     const maxWorks = plan === "free" ? FREE_LIMIT : Infinity;
 
-    let works = [...existing_works].filter(Boolean);
+    // Start from existing_works only (already sanitized)
+    let works = [...existing_works];
+
     const remainingSlots = Math.max(
       0,
       maxWorks === Infinity ? workFiles.length : maxWorks - works.length
     );
-
     const filesToUpload =
       plan === "free" ? workFiles.slice(0, remainingSlots) : workFiles;
 
@@ -435,20 +446,25 @@ const saveBusinessCard = async (req, res) => {
 
     works = [...works, ...uploadedWorkUrls];
 
-    // Clamp free plan content instead of blocking
-    ({ works, services, reviews } = clampFreeContent({
-      plan,
-      works,
-      services,
-      reviews,
-    }));
+    // Clamp free plan content
+    ({ works, services, reviews } = clampFreeContent({ plan, works, services, reviews }));
 
     // Template normalize
     const requestedTemplate =
       req.body.template_id || existingCard?.template_id || "template-1";
     const effectiveTemplate = normalizeTemplateForPlan(plan, requestedTemplate);
 
-    // Build update object (DO NOT wipe cover/avatar unless removed or new file)
+    // ----------------------------
+    // IMPORTANT: sanitize old blob data
+    // ----------------------------
+    const existingCover = existingCard?.cover_photo || "";
+    const existingAvatar = existingCard?.avatar || "";
+    const existingWorks = Array.isArray(existingCard?.works) ? existingCard.works : [];
+
+    const existingCoverIsBlob = typeof existingCover === "string" && existingCover.startsWith("blob:");
+    const existingAvatarIsBlob = typeof existingAvatar === "string" && existingAvatar.startsWith("blob:");
+    const existingWorksClean = existingWorks.filter((u) => typeof u === "string" && !u.startsWith("blob:"));
+
     const update = {
       user: userId,
       profile_slug: requestedSlug,
@@ -501,17 +517,24 @@ const saveBusinessCard = async (req, res) => {
         "contact",
       ]),
 
-      works,
+      // If client sent no existing works AND uploaded none,
+      // preserve cleaned old works instead of wiping by accident.
+      works: (works.length > 0 || uploadedWorkUrls.length > 0) ? works : existingWorksClean,
     };
 
-    // ✅ Only modify cover_photo/avatar if explicitly removed OR a new file was uploaded
+    // Cover/avatar updates:
+    // - if removed -> wipe
+    // - else if new upload -> set url
+    // - else preserve old (but if old was blob -> wipe it)
     if (coverRemoved) update.cover_photo = "";
+    else if (cover_photo_url) update.cover_photo = cover_photo_url;
+    else if (existingCoverIsBlob) update.cover_photo = ""; // sanitize
+    // else do not set cover_photo at all (preserves DB)
+
     if (avatarRemoved) update.avatar = "";
+    else if (avatar_url) update.avatar = avatar_url;
+    else if (existingAvatarIsBlob) update.avatar = ""; // sanitize
 
-    if (cover_photo_url) update.cover_photo = cover_photo_url;
-    if (avatar_url) update.avatar = avatar_url;
-
-    // Free/plus rename logic: if using onlyCard, we must change its slug
     if (willRenameSlug) {
       update.profile_slug = requestedSlug;
     }
@@ -534,17 +557,6 @@ const saveBusinessCard = async (req, res) => {
         if (qrUrl) {
           saved.qr_code_url = qrUrl;
           await saved.save();
-
-          if (plan !== "teams" && willRenameSlug) {
-            await User.findByIdAndUpdate(userId, {
-              $set: {
-                username: requestedSlug,
-                slug: requestedSlug,
-                profileUrl: buildPublicProfileUrl(requestedSlug),
-                qrCodeUrl: qrUrl,
-              },
-            });
-          }
         }
       }
     } catch (e) {
@@ -553,6 +565,12 @@ const saveBusinessCard = async (req, res) => {
 
     return res.json({
       data: saved,
+      debug: {
+        filesReceived: debugFiles,
+        cover_photo_saved: saved?.cover_photo || "",
+        avatar_saved: saved?.avatar || "",
+        works_count: Array.isArray(saved?.works) ? saved.works.length : 0,
+      },
       normalized: {
         plan,
         template_id: effectiveTemplate,
