@@ -34,19 +34,20 @@ const uploadToS3 = async (buffer, key, contentType) => {
         Body: buffer,
         ContentType,
 
-        // ✅ THIS is the key fix for your “AccessDenied”
-        ACL: "public-read",
+        // ✅ NO ACL (bucket has ACLs disabled / bucket-owner-enforced)
+        // ACL: "public-read",  <-- REMOVE
 
-        // ✅ helps browser caching behave nicely
         CacheControl: "public, max-age=31536000, immutable",
     };
 
     try {
-        const out = await s3.upload(params).promise();
+        await s3.upload(params).promise();
 
-        // out.Location is fine, but we also ensure correct format:
-        const publicUrl = out.Location || `https://${Bucket}.s3.${region}.amazonaws.com/${encodeURIComponent(key)}`;
-        return publicUrl;
+        // Use virtual-hosted style url
+        return `https://${Bucket}.s3.${region}.amazonaws.com/${key
+            .split("/")
+            .map(encodeURIComponent)
+            .join("/")}`;
     } catch (err) {
         console.error("Error uploading to S3:", err);
         throw new Error("Failed to upload to S3.");
