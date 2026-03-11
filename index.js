@@ -14,9 +14,9 @@ const checkoutRoutes = require("./routes/checkout");
 const contactRoutes = require("./routes/contactRoutes");
 const businessCardRoutes = require("./routes/businessCardRoutes");
 const authRoutes = require("./routes/authRoutes");
-const nfcOrdersRoutes = require("./routes/nfcOrders"); // ✅ NEW: NFC Orders route
+const nfcOrdersRoutes = require("./routes/nfcOrders");
 
-// ✅ Stripe webhook handler (exports a FUNCTION, not a router)
+// Stripe webhook handler (exports a FUNCTION, not a router)
 const stripeWebhookHandler = require("./routes/webHook");
 
 const app = express();
@@ -56,7 +56,7 @@ app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
 /* ---------------------------------------------------------
-   ✅ STRIPE WEBHOOK MUST COME BEFORE express.json()
+   STRIPE WEBHOOK MUST COME BEFORE express.json()
    Stripe calls: POST /api/checkout/webhook
    We must use express.raw() for signature verification.
 --------------------------------------------------------- */
@@ -67,8 +67,8 @@ app.post(
 );
 
 /* -------------------- Parsers -------------------- */
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cookieParser());
 
 /* -------------------- Sessions -------------------- */
@@ -91,13 +91,12 @@ app.use(passport.initialize());
 
 /* -------------------- Routes -------------------- */
 /**
- * ✅ IMPORTANT:
- * authRoutes now contains:
+ * authRoutes contains:
  * - /exchange-contact (PUBLIC)
  * - /contact-exchanges (PROTECTED)
- * plus login/register/etc
+ * - login/register/profile/etc
  *
- * So we mount it twice to support:
+ * Mounted twice to support:
  * - /register
  * - /api/register
  */
@@ -107,17 +106,25 @@ app.use("/api", authRoutes);
 app.use("/api/checkout", checkoutRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/business-card", businessCardRoutes);
-
-// ✅ NEW: NFC Orders API
 app.use("/api/nfc-orders", nfcOrdersRoutes);
 
 /* -------------------- Health -------------------- */
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
 
+/* -------------------- Error handler -------------------- */
+app.use((err, req, res, next) => {
+  if (err?.message?.startsWith("CORS blocked")) {
+    console.error(err.message);
+    return res.status(403).json({ error: "CORS blocked for this origin" });
+  }
+
+  console.error("Unhandled server error:", err);
+  return res.status(500).json({ error: "Internal server error" });
+});
+
 /* -------------------- Start -------------------- */
 const port = Number(process.env.PORT || 8080);
 
-// ✅ Cloud Run: listen on 0.0.0.0
 app.listen(port, "0.0.0.0", () => {
   console.log(`Server running on port ${port}`);
 });

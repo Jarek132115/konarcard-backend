@@ -5,6 +5,8 @@ const router = express.Router();
 const Stripe = require("stripe");
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
+const QRCode = require("qrcode");
+
 const { requireAuth } = require("../helpers/auth");
 const User = require("../models/user");
 const BusinessCard = require("../models/BusinessCard");
@@ -13,6 +15,8 @@ const NfcOrder = require("../models/NfcOrder");
 const uploadToS3 = require("../utils/uploadToS3");
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+const PUBLIC_PROFILE_DOMAIN =
+    process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
 
 const safeSlug = (v) =>
     String(v || "")
@@ -20,8 +24,14 @@ const safeSlug = (v) =>
         .toLowerCase()
         .replace(/[^a-z0-9-]/g, "");
 
+const buildPublicProfileUrl = (profileSlug) => {
+    const s = safeSlug(profileSlug);
+    if (!s) return "";
+    return `${PUBLIC_PROFILE_DOMAIN}/u/${s}`;
+};
+
 // -------------------------
-// Subscription helpers (EXISTING)
+// Subscription helpers
 // -------------------------
 function getTeamsPriceId(interval = "monthly") {
     const i = String(interval || "monthly").toLowerCase();
@@ -103,19 +113,96 @@ async function invoiceAndPayNow({ customerId, subscriptionId }) {
     }
 
     const paid = await stripe.invoices.pay(finalized.id);
-    return { paid: paid?.paid === true, invoiceId: paid?.id, amount_due: paid?.amount_due || 0 };
+    return {
+        paid: paid?.paid === true,
+        invoiceId: paid?.id,
+        amount_due: paid?.amount_due || 0,
+    };
+}
+
+async function generateAndUploadProfileQr(userId, profileSlug) {
+    const url = buildPublicProfileUrl(profileSlug);
+    if (!url) return "";
+
+    const qrBuffer = await QRCode.toBuffer(url, {
+        width: 900,
+        margin: 2,
+        errorCorrectionLevel: "M",
+        color: { dark: "#000000", light: "#ffffff" },
+    });
+
+    const safe = safeSlug(profileSlug) || "profile";
+    const fileKey = `qr-codes/${userId}/${safe}-${Date.now()}.png`;
+    const qrCodeUrl = await uploadToS3(qrBuffer, fileKey);
+    return qrCodeUrl;
+}
+
+async function createClaimedProfileForUser({
+    user,
+    claimedSlug,
+    templateId = "template-1",
+}) {
+    const slug = safeSlug(claimedSlug);
+
+    if (!slug || slug.length < 3) {
+        const err = new Error("claimedSlug is required and must be at least 3 chars");
+        err.statusCode = 400;
+        err.code = "CLAIMED_SLUG_REQUIRED";
+        throw err;
+    }
+
+    const existing = await BusinessCard.findOne({ profile_slug: slug });
+    if (existing) {
+        const err = new Error("Profile slug already exists");
+        err.statusCode = 409;
+        err.code = "SLUG_TAKEN";
+        throw err;
+    }
+
+    const created = await BusinessCard.create({
+        user: user._id,
+        profile_slug: slug,
+        template_id: templateId,
+        business_card_name: "",
+        business_name: "",
+        trade_title: "",
+        location: "",
+        full_name: user.name || "",
+        theme_mode: "light",
+        page_theme: "light",
+    });
+
+    try {
+        const qrUrl = await generateAndUploadProfileQr(user._id, slug);
+        if (qrUrl) {
+            created.qr_code_url = qrUrl;
+            await created.save();
+
+            if (!user.qrCodeUrl) {
+                user.qrCodeUrl = qrUrl;
+            }
+            if (!user.profileUrl) {
+                user.profileUrl = buildPublicProfileUrl(slug);
+            }
+            if (!user.slug) {
+                user.slug = slug;
+            }
+            if (!user.username) {
+                user.username = slug;
+            }
+
+            await user.save();
+        }
+    } catch (e) {
+        console.error("QR generation failed (createClaimedProfileForUser):", e);
+    }
+
+    return created;
 }
 
 // -------------------------
 // NFC product price mapping
 // -------------------------
-// Set these in env:
-// STRIPE_PRICE_PLASTIC_WHITE
-// STRIPE_PRICE_PLASTIC_BLACK
-// STRIPE_PRICE_METAL_BLACK
-// STRIPE_PRICE_METAL_GOLD
-// STRIPE_PRICE_KONARTAG_BLACK
-// STRIPE_PRICE_KONARTAG_WHITE
 const NFC_PRICE_MAP = {
     "plastic-card": {
         white: process.env.STRIPE_PRICE_PLASTIC_WHITE,
@@ -140,7 +227,6 @@ function normalizeProductKey(v) {
 }
 
 function decodeDataUrlToBuffer(dataUrl) {
-    // data:image/png;base64,AAAA
     const str = String(dataUrl || "");
     const m = str.match(/^data:([^;]+);base64,(.+)$/);
     if (!m) return null;
@@ -161,7 +247,6 @@ function decodeDataUrlToBuffer(dataUrl) {
     return { mime, buf };
 }
 
-// small helper: upload to S3 supporting both signatures
 async function uploadBufferToS3({ buffer, key, mime }) {
     try {
         return await uploadToS3(buffer, key, mime);
@@ -171,7 +256,7 @@ async function uploadBufferToS3({ buffer, key, mime }) {
 }
 
 // ----------------------------------------------------
-// ✅ EXISTING: /api/checkout/teams (UNCHANGED)
+// POST /api/checkout/teams
 // ----------------------------------------------------
 router.post("/teams", requireAuth, async (req, res) => {
     try {
@@ -227,7 +312,9 @@ router.post("/teams", requireAuth, async (req, res) => {
 
         const stripeCustomerId = await ensureStripeCustomer(user);
 
-        if (user.plan === "teams" && user.stripeSubscriptionId) {
+        // Existing Teams user with active subscription:
+        // update quantity immediately, charge proration now, then create profile now.
+        if (String(user.plan || "").toLowerCase() === "teams" && user.stripeSubscriptionId) {
             const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId, {
                 expand: ["items.data.price"],
             });
@@ -263,16 +350,31 @@ router.post("/teams", requireAuth, async (req, res) => {
                     prorationResult = { paid: false, error: "proration_charge_failed" };
                 }
 
+                const createdProfile = await createClaimedProfileForUser({
+                    user,
+                    claimedSlug,
+                    templateId: "template-1",
+                });
+
+                user.plan = "teams";
+                user.subscriptionStatus = sub.status || user.subscriptionStatus || "active";
+                user.extraProfilesQty = extraProfilesQty;
+                user.teamsProfilesQty = 1 + extraProfilesQty;
+                await user.save();
+
                 return res.json({
                     updated: true,
+                    created: true,
                     mode: "subscription_update",
                     desiredProfiles,
                     extraProfilesQty,
+                    profile: createdProfile,
                     proration: prorationResult,
                 });
             }
         }
 
+        // New Teams checkout flow
         const successUrl =
             `${FRONTEND_URL}/profiles?checkout=success` +
             `&slug=${encodeURIComponent(claimedSlug)}` +
@@ -321,12 +423,20 @@ router.post("/teams", requireAuth, async (req, res) => {
         return res.json({ url: session.url, id: session.id });
     } catch (err) {
         console.error("Teams checkout error:", err);
-        return res.status(500).json({ error: "Stripe checkout session failed" });
+
+        const statusCode = Number(err?.statusCode || 500);
+        const code = err?.code || undefined;
+        const message = err?.message || "Stripe checkout session failed";
+
+        return res.status(statusCode).json({
+            error: message,
+            ...(code ? { code } : {}),
+        });
     }
 });
 
 // ----------------------------------------------------
-// ✅ Upload logo (base64 data URL -> S3)
+// Upload logo (base64 data URL -> S3)
 // POST /api/checkout/nfc/logo
 // Body: { dataUrl, filename? }
 // ----------------------------------------------------
@@ -375,7 +485,7 @@ router.post("/nfc/logo", requireAuth, async (req, res) => {
 });
 
 // ----------------------------------------------------
-// ✅ NEW: Upload preview image (product + logo) (base64 data URL -> S3)
+// Upload preview image (product + logo) (base64 data URL -> S3)
 // POST /api/checkout/nfc/preview
 // Body: { dataUrl, filename?, productKey?, variant? }
 // ----------------------------------------------------
@@ -395,7 +505,6 @@ router.post("/nfc/preview", requireAuth, async (req, res) => {
             return res.status(400).json({ error: "Only image uploads allowed", code: "INVALID_MIME" });
         }
 
-        // preview can be a bit larger, but still cap it
         if (decoded.buf.length > 6 * 1024 * 1024) {
             return res.status(400).json({ error: "Preview too large (max 6MB)", code: "PREVIEW_TOO_LARGE" });
         }
@@ -428,7 +537,7 @@ router.post("/nfc/preview", requireAuth, async (req, res) => {
 });
 
 // ----------------------------------------------------
-// ✅ Create NFC checkout session (one-time payment)
+// Create NFC checkout session (one-time payment)
 // POST /api/checkout/nfc/session
 // Body: { productKey, variant?, quantity, profileId, logoUrl?, previewImageUrl?, preview? }
 // ----------------------------------------------------
@@ -451,7 +560,6 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             });
         }
 
-        // allow frontend to omit variant (default per product)
         const defaultVariant =
             productKey === "plastic-card"
                 ? "white"
@@ -502,15 +610,14 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
 
         const stripeCustomerId = await ensureStripeCustomer(user);
 
-        // Create pending order record (source of truth)
         const order = await NfcOrder.create({
             user: user._id,
             profile: profile._id,
             productKey,
-            variant, // ✅ expects you added it in the model
+            variant,
             quantity,
             logoUrl,
-            previewImageUrl, // ✅ expects you added it in the model
+            previewImageUrl,
             preview: { ...preview, variant },
             currency: "gbp",
             status: "pending",

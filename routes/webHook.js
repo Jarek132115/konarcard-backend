@@ -3,7 +3,7 @@
 // In your main server file you must mount like:
 //
 //   app.post(
-//     "/api/webhook",
+//     "/api/checkout/webhook",
 //     express.raw({ type: "application/json" }),
 //     require("./routes/webHook")
 //   );
@@ -26,7 +26,8 @@ const { orderConfirmationTemplate } = require("../utils/emailTemplates");
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-const PUBLIC_PROFILE_DOMAIN = process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
+const PUBLIC_PROFILE_DOMAIN =
+  process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
 
 /**
  * Price mapping (base subscription)
@@ -61,25 +62,27 @@ function safeProfileSlug(v) {
 }
 
 async function updateUserByCustomer(customerId, { set = {}, unset = {} }) {
-  if (!customerId) return;
+  if (!customerId) return null;
 
   const update = {};
   if (Object.keys(set).length) update.$set = set;
   if (Object.keys(unset).length) update.$unset = unset;
-  if (!Object.keys(update).length) return;
+  if (!Object.keys(update).length) return null;
 
-  await User.findOneAndUpdate({ stripeCustomerId: customerId }, update, { new: true });
+  return User.findOneAndUpdate({ stripeCustomerId: customerId }, update, {
+    new: true,
+  });
 }
 
 async function updateUserById(userId, { set = {}, unset = {} }) {
-  if (!userId) return;
+  if (!userId) return null;
 
   const update = {};
   if (Object.keys(set).length) update.$set = set;
   if (Object.keys(unset).length) update.$unset = unset;
-  if (!Object.keys(update).length) return;
+  if (!Object.keys(update).length) return null;
 
-  await User.findByIdAndUpdate(userId, update, { new: true });
+  return User.findByIdAndUpdate(userId, update, { new: true });
 }
 
 async function findUserIdByCustomer(customerId) {
@@ -103,7 +106,6 @@ function buildPublicUrlBySlug(profileSlug) {
 function extractEntitlementsFromSubscription(sub) {
   const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
 
-  // Base plan
   let plan = null;
   let interval = null;
 
@@ -124,7 +126,6 @@ function extractEntitlementsFromSubscription(sub) {
     }
   }
 
-  // Extra profiles add-on quantity (sum)
   let extraProfilesQty = 0;
   for (const it of items) {
     const priceId = it?.price?.id;
@@ -133,7 +134,8 @@ function extractEntitlementsFromSubscription(sub) {
     }
   }
 
-  const teamsProfilesQty = plan === "teams" ? Math.max(1, 1 + Math.max(0, extraProfilesQty)) : 1;
+  const teamsProfilesQty =
+    plan === "teams" ? Math.max(1, 1 + Math.max(0, extraProfilesQty)) : 1;
 
   return {
     plan,
@@ -150,7 +152,9 @@ function extractEntitlementsFromSubscription(sub) {
  */
 async function ensureClaimedProfile({ userId, claimedSlug }) {
   const slug = safeProfileSlug(claimedSlug);
-  if (!slug || slug.length < 3) return { created: false, reason: "invalid_slug" };
+  if (!slug || slug.length < 3) {
+    return { created: false, reason: "invalid_slug" };
+  }
 
   const existing = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
   if (existing) return { created: false, reason: "already_exists" };
@@ -176,8 +180,29 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
     profile_slug: slug,
     template_id: "template-1",
     business_card_name: "",
+    business_name: "",
+    trade_title: "",
+    location: "",
+    full_name: "",
     qr_code_url: qrUrl,
   });
+
+  try {
+    const user = await User.findById(userId).select("qrCodeUrl profileUrl slug username");
+    if (user) {
+      const patch = {};
+      if (!user.qrCodeUrl && qrUrl) patch.qrCodeUrl = qrUrl;
+      if (!user.profileUrl) patch.profileUrl = publicUrl;
+      if (!user.slug) patch.slug = slug;
+      if (!user.username) patch.username = slug;
+
+      if (Object.keys(patch).length) {
+        await User.findByIdAndUpdate(userId, { $set: patch }, { new: true });
+      }
+    }
+  } catch (e) {
+    console.warn("ensureClaimedProfile user patch failed:", e?.message || e);
+  }
 
   return { created: true, id: created?._id, slug, qrUrl };
 }
@@ -193,7 +218,7 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   const orderId = session?.metadata?.orderId ? String(session.metadata.orderId) : "";
   if (!orderId) return;
 
-  const paymentStatus = String(session.payment_status || "").toLowerCase(); // "paid" | "unpaid" | "no_payment_required"
+  const paymentStatus = String(session.payment_status || "").toLowerCase();
   const nextStatus =
     statusOverride ||
     (paymentStatus === "paid" || paymentStatus === "no_payment_required" ? "paid" : "pending");
@@ -202,7 +227,6 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   const currency = String(session.currency || "gbp").toLowerCase();
   const paymentIntentId = session.payment_intent ? String(session.payment_intent) : "";
 
-  // IMPORTANT: keep these so later you can render the exact purchased design
   const productKey = session?.metadata?.productKey ? String(session.metadata.productKey) : "";
   const variant = session?.metadata?.variant ? String(session.metadata.variant) : "";
   const logoUrl = session?.metadata?.logoUrl ? String(session.metadata.logoUrl) : "";
@@ -211,9 +235,7 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   const existing = await NfcOrder.findById(orderId).select("_id status preview");
   if (!existing) return;
 
-  // If already paid/fulfilled, don’t overwrite.
   if (existing.status === "paid" || existing.status === "fulfilled") {
-    // still ensure we at least store missing stripe IDs if they were blank
     await NfcOrder.findByIdAndUpdate(orderId, {
       $set: {
         stripeCheckoutSessionId: String(session.id || ""),
@@ -223,16 +245,13 @@ async function updateNfcOrderFromSession(session, statusOverride) {
     return;
   }
 
-  const prevPreview = existing.preview && typeof existing.preview === "object" ? existing.preview : {};
+  const prevPreview =
+    existing.preview && typeof existing.preview === "object" ? existing.preview : {};
   const mergedPreview = {
     ...prevPreview,
     ...(variant ? { variant } : {}),
-    // placeholders for later:
-    // productImageUrl: "...",  // you will set this when we generate the final mock image
   };
 
-  // If frontend didn’t pass qty in metadata, keep your DB quantity as-is.
-  // (We do not trust metadata more than DB, but it helps sanity-checking.)
   const safeQtyMeta = Number.isFinite(quantityMeta) ? quantityMeta : undefined;
 
   await NfcOrder.findByIdAndUpdate(
@@ -271,13 +290,9 @@ module.exports = async function stripeWebhookHandler(req, res) {
   }
 
   try {
-    // ---------------------------------------
-    // checkout.session.completed
-    // ---------------------------------------
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
 
-      // Subscription
       if (session.mode === "subscription") {
         const customerId = session.customer;
         const subscriptionId = session.subscription;
@@ -291,7 +306,9 @@ module.exports = async function stripeWebhookHandler(req, res) {
         });
 
         const status = sub.status;
-        const currentPeriodEnd = sub.current_period_end ? new Date(sub.current_period_end * 1000) : undefined;
+        const currentPeriodEnd = sub.current_period_end
+          ? new Date(sub.current_period_end * 1000)
+          : undefined;
 
         const extracted = extractEntitlementsFromSubscription(sub);
 
@@ -301,9 +318,13 @@ module.exports = async function stripeWebhookHandler(req, res) {
           subscriptionStatus: status || "active",
           currentPeriodEnd,
           isSubscribed: isActiveStatus(status),
-          extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
+          extraProfilesQty: Number.isFinite(extracted.extraProfilesQty)
+            ? extracted.extraProfilesQty
+            : 0,
           teamsProfilesQty:
-            extracted.plan === "teams" ? Math.max(1, Number(extracted.teamsProfilesQty || 1)) : 1,
+            extracted.plan === "teams"
+              ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+              : 1,
         };
 
         if (extracted.plan) set.plan = extracted.plan;
@@ -323,7 +344,6 @@ module.exports = async function stripeWebhookHandler(req, res) {
         if (metaUserId) await updateUserById(metaUserId, { set, unset });
         else await updateUserByCustomer(customerId, { set, unset });
 
-        // Create claimed profile on Teams add flow
         if (checkoutType === "teams_add_profile" && claimedSlug) {
           let resolved = { userId: metaUserId };
 
@@ -340,17 +360,18 @@ module.exports = async function stripeWebhookHandler(req, res) {
         }
       }
 
-      // One-time payment (NFC)
       if (session.mode === "payment") {
-        // ✅ mark order paid (idempotent)
         await updateNfcOrderFromSession(session);
 
-        // ✅ optional emails (do NOT let email failure break webhook)
         try {
           const customerEmail = session.customer_details?.email;
-          const productKey = session.metadata?.productKey ? String(session.metadata.productKey) : "";
+          const productKey = session.metadata?.productKey
+            ? String(session.metadata.productKey)
+            : "";
           const variant = session.metadata?.variant ? String(session.metadata.variant) : "";
-          const qtyMeta = session.metadata?.quantity ? Number(session.metadata.quantity) : null;
+          const qtyMeta = session.metadata?.quantity
+            ? Number(session.metadata.quantity)
+            : null;
 
           const amountTotal = Number(session.amount_total || 0);
           const amountPaid = amountTotal ? (amountTotal / 100).toFixed(2) : null;
@@ -382,9 +403,6 @@ module.exports = async function stripeWebhookHandler(req, res) {
       }
     }
 
-    // ---------------------------------------
-    // checkout.session.async_payment_failed / expired (NFC fail/cancel)
-    // ---------------------------------------
     if (event.type === "checkout.session.async_payment_failed") {
       const session = event.data.object;
       await updateNfcOrderFromSession(session, "failed");
@@ -395,16 +413,18 @@ module.exports = async function stripeWebhookHandler(req, res) {
       await updateNfcOrderFromSession(session, "cancelled");
     }
 
-    // ---------------------------------------
-    // subscription created / updated
-    // ---------------------------------------
-    if (event.type === "customer.subscription.created" || event.type === "customer.subscription.updated") {
+    if (
+      event.type === "customer.subscription.created" ||
+      event.type === "customer.subscription.updated"
+    ) {
       const subObj = event.data.object;
 
       const customerId = subObj.customer;
       const subscriptionId = subObj.id;
       const status = subObj.status;
-      const currentPeriodEnd = subObj.current_period_end ? new Date(subObj.current_period_end * 1000) : undefined;
+      const currentPeriodEnd = subObj.current_period_end
+        ? new Date(subObj.current_period_end * 1000)
+        : undefined;
 
       const fullSub = await stripe.subscriptions.retrieve(subscriptionId, {
         expand: ["items.data.price"],
@@ -417,9 +437,13 @@ module.exports = async function stripeWebhookHandler(req, res) {
         subscriptionStatus: status || "active",
         currentPeriodEnd,
         isSubscribed: isActiveStatus(status),
-        extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
+        extraProfilesQty: Number.isFinite(extracted.extraProfilesQty)
+          ? extracted.extraProfilesQty
+          : 0,
         teamsProfilesQty:
-          extracted.plan === "teams" ? Math.max(1, Number(extracted.teamsProfilesQty || 1)) : 1,
+          extracted.plan === "teams"
+            ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+            : 1,
       };
 
       if (extracted.plan) set.plan = extracted.plan;
@@ -439,15 +463,17 @@ module.exports = async function stripeWebhookHandler(req, res) {
       await updateUserByCustomer(customerId, { set, unset });
     }
 
-    // ---------------------------------------
-    // invoice.paid
-    // ---------------------------------------
     if (event.type === "invoice.paid") {
       const invoice = event.data.object;
       const customerId = invoice.customer;
       const subscriptionId = invoice.subscription;
 
-      let extracted = { plan: null, interval: null, extraProfilesQty: 0, teamsProfilesQty: 1 };
+      let extracted = {
+        plan: null,
+        interval: null,
+        extraProfilesQty: 0,
+        teamsProfilesQty: 1,
+      };
       let currentPeriodEnd;
 
       if (subscriptionId) {
@@ -457,8 +483,12 @@ module.exports = async function stripeWebhookHandler(req, res) {
           });
           extracted = extractEntitlementsFromSubscription(fullSub);
 
-          currentPeriodEnd = fullSub.current_period_end ? new Date(fullSub.current_period_end * 1000) : undefined;
-        } catch { }
+          currentPeriodEnd = fullSub.current_period_end
+            ? new Date(fullSub.current_period_end * 1000)
+            : undefined;
+        } catch {
+          // ignore
+        }
       }
 
       const set = {
@@ -466,20 +496,24 @@ module.exports = async function stripeWebhookHandler(req, res) {
         subscriptionStatus: "active",
         isSubscribed: true,
         currentPeriodEnd,
-        extraProfilesQty: Number.isFinite(extracted.extraProfilesQty) ? extracted.extraProfilesQty : 0,
+        extraProfilesQty: Number.isFinite(extracted.extraProfilesQty)
+          ? extracted.extraProfilesQty
+          : 0,
         teamsProfilesQty:
-          extracted.plan === "teams" ? Math.max(1, Number(extracted.teamsProfilesQty || 1)) : 1,
+          extracted.plan === "teams"
+            ? Math.max(1, Number(extracted.teamsProfilesQty || 1))
+            : 1,
       };
 
       if (extracted.plan) set.plan = extracted.plan;
       if (extracted.interval) set.planInterval = extracted.interval;
 
-      await updateUserByCustomer(customerId, { set, unset: { trialExpires: "" } });
+      await updateUserByCustomer(customerId, {
+        set,
+        unset: { trialExpires: "" },
+      });
     }
 
-    // ---------------------------------------
-    // invoice.payment_failed
-    // ---------------------------------------
     if (event.type === "invoice.payment_failed") {
       const invoice = event.data.object;
       const customerId = invoice.customer;
@@ -494,9 +528,6 @@ module.exports = async function stripeWebhookHandler(req, res) {
       });
     }
 
-    // ---------------------------------------
-    // customer.subscription.deleted
-    // ---------------------------------------
     if (event.type === "customer.subscription.deleted") {
       const subObj = event.data.object;
       const customerId = subObj.customer;

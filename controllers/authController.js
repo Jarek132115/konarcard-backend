@@ -96,24 +96,19 @@ const claimLink = async (req, res) => {
             return res.status(400).json({ error: "Link name must be at least 3 characters" });
         }
 
-        // Global availability check (BusinessCard + User, to be safe)
         const takenCard = await BusinessCard.findOne({ profile_slug: profileSlug }).select("_id");
         const takenUser = await User.findOne({ username: profileSlug }).select("_id");
 
         if (takenCard || takenUser) {
-            // keep consistent with frontend expectations
             return res.status(409).json({ error: "Username already taken" });
         }
 
         const token = getTokenFromReq(req);
 
-        // No auth => just availability
         if (!token) {
             return res.json({ success: true, available: true, username: profileSlug });
         }
 
-        // If auth exists but is invalid/stale => DO NOT fail claim step.
-        // Just behave like public availability check.
         let decoded = null;
         try {
             decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -123,16 +118,13 @@ const claimLink = async (req, res) => {
 
         const user = decoded?.id ? await User.findById(decoded.id) : null;
         if (!user) {
-            // Stale token — treat as public check
             return res.json({ success: true, available: true, username: profileSlug });
         }
 
-        // Logged-in: persist claim onto user
         user.username = profileSlug;
         user.slug = profileSlug;
         user.profileUrl = buildPublicProfileUrl(profileSlug);
 
-        // Create FIRST profile if none
         const existingCount = await BusinessCard.countDocuments({ user: user._id });
 
         if (existingCount === 0) {
@@ -144,14 +136,13 @@ const claimLink = async (req, res) => {
             });
         }
 
-        // Ensure QR exists for this slug/profile
         const target = await BusinessCard.findOne({ profile_slug: profileSlug, user: user._id });
         if (target) {
             const qrUrl = await generateAndUploadProfileQr(user._id, profileSlug);
             if (qrUrl) {
                 target.qr_code_url = qrUrl;
                 await target.save();
-                user.qrCodeUrl = qrUrl; // legacy “main QR”
+                user.qrCodeUrl = qrUrl;
             }
         }
 
@@ -177,7 +168,6 @@ const registerUser = async (req, res) => {
 
         const cleanEmail = String(email || "").trim().toLowerCase();
 
-        // Username input is first profile slug
         const desiredSlug = safeProfileSlug(username);
         if (!desiredSlug || desiredSlug.length < 3) {
             return res.status(400).json({ error: "Username must be at least 3 characters." });
@@ -185,11 +175,9 @@ const registerUser = async (req, res) => {
 
         const existingEmail = await User.findOne({ email: cleanEmail });
         if (existingEmail) {
-            // keep legacy style: 200 with error so frontend can toast
             return res.json({ error: "This email is already registered. Please log in." });
         }
 
-        // Global slug uniqueness
         const slugTaken = await BusinessCard.findOne({ profile_slug: desiredSlug }).select("_id");
         const userSlugTaken = await User.findOne({ username: desiredSlug }).select("_id");
         if (slugTaken || userSlugTaken) {
@@ -242,7 +230,6 @@ const registerUser = async (req, res) => {
             });
         } catch (e) {
             console.error("[registerUser] verification email failed:", e?.message || e);
-            // user exists - allow resend in UI
             return res.json({
                 success: true,
                 message: "Account created, but verification email failed. Please resend the code.",
@@ -265,14 +252,12 @@ const verifyEmailCode = async (req, res) => {
 
         const user = await User.findOne({ email });
 
-        // keep legacy style: 200 with error (frontend checks res.data.error)
         if (!user) return res.json({ error: "User not found" });
         if (user.isVerified) return res.json({ error: "Email already verified" });
 
         const stored = String(user.verificationCode || "").trim();
         if (!stored) return res.json({ error: "No verification code found. Please resend." });
 
-        // IMPORTANT: Date in DB -> compare safely
         const expMs = user.verificationCodeExpires ? new Date(user.verificationCodeExpires).getTime() : 0;
         if (expMs && expMs < Date.now()) return res.json({ error: "Code has expired" });
 
@@ -351,11 +336,9 @@ const loginUser = async (req, res) => {
         const match = await comparePassword(password, user.password);
         if (!match) return res.json({ error: "Passwords don’t match" });
 
-        // ✅ DO NOT return 401 here — frontend expects 200 and uses res.data.resend
         if (!user.isVerified) {
             const now = Date.now();
 
-            // reuse existing valid code (prevents overwriting -> “invalid code” confusion)
             const stored = String(user.verificationCode || "").trim();
             const expMs = user.verificationCodeExpires ? new Date(user.verificationCodeExpires).getTime() : 0;
             const hasValidExisting = stored && expMs > now;
@@ -466,8 +449,14 @@ const resetPassword = async (req, res) => {
 // PROFILE (PROTECTED BY requireAuth)
 const getProfile = async (req, res) => {
     try {
-        if (!req.user) return res.status(401).json({ error: "Unauthorized" });
-        return res.json({ data: toSafeUser(req.user) });
+        if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
+
+        // Always fetch fresh user so plan / teamsProfilesQty / subscription fields
+        // are current immediately after Stripe webhook updates.
+        const freshUser = await User.findById(req.user._id);
+        if (!freshUser) return res.status(401).json({ error: "Unauthorized" });
+
+        return res.json({ data: toSafeUser(freshUser) });
     } catch (err) {
         console.error("getProfile error:", err);
         return res.status(500).json({ error: "Failed to load profile" });
@@ -516,10 +505,7 @@ const logoutUser = (req, res) => {
     res.json({ message: "Logged out successfully" });
 };
 
-// -------------------------
-// TRIAL: Start 14-day trial
-// (PROTECTED BY requireAuth)
-// -------------------------
+// TRIAL
 const startTrial = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });

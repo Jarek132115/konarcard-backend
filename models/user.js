@@ -1,10 +1,13 @@
-// Backend/models/user.js
+// backend/models/user.js
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
 const userSchema = new Schema(
     {
-        name: String,
+        name: {
+            type: String,
+            trim: true,
+        },
 
         email: {
             type: String,
@@ -18,24 +21,25 @@ const userSchema = new Schema(
         password: { type: String, default: undefined },
 
         // social auth
-        googleId: { type: String, default: undefined },
-        facebookId: { type: String, default: undefined },
+        googleId: { type: String, default: undefined, trim: true },
+        facebookId: { type: String, default: undefined, trim: true },
 
         authProvider: {
             type: String,
             default: "local",
+            trim: true,
         },
 
         // public profile fields (optional until link claimed)
-        profileUrl: { type: String, default: undefined },
+        profileUrl: { type: String, default: undefined, trim: true },
         slug: { type: String, default: undefined, trim: true, lowercase: true },
         username: { type: String, default: undefined, trim: true, lowercase: true },
 
-        qrCodeUrl: { type: String, default: "" },
+        qrCodeUrl: { type: String, default: "", trim: true },
 
         // Stripe IDs
-        stripeCustomerId: { type: String, default: undefined },
-        stripeSubscriptionId: { type: String, default: undefined },
+        stripeCustomerId: { type: String, default: undefined, trim: true },
+        stripeSubscriptionId: { type: String, default: undefined, trim: true },
 
         /**
          * Subscription / Plan state (source of truth)
@@ -45,17 +49,23 @@ const userSchema = new Schema(
             type: String,
             enum: ["free", "plus", "teams"],
             default: "free",
+            lowercase: true,
+            trim: true,
         },
 
         planInterval: {
             type: String,
             enum: ["monthly", "quarterly", "yearly"],
             default: "monthly",
+            lowercase: true,
+            trim: true,
         },
 
         subscriptionStatus: {
             type: String,
             default: "free",
+            lowercase: true,
+            trim: true,
         },
 
         currentPeriodEnd: {
@@ -72,9 +82,7 @@ const userSchema = new Schema(
         isSubscribed: { type: Boolean, default: false },
 
         /**
-         * ✅ PLUS ADD-ON ENTITLEMENT
-         * extraProfilesQty = number of EXTRA profiles paid for on Plus.
-         * (Allowed = 1 + extraProfilesQty)
+         * extraProfilesQty = number of paid extra profiles.
          */
         extraProfilesQty: {
             type: Number,
@@ -84,19 +92,19 @@ const userSchema = new Schema(
         extraProfilesStripePriceId: {
             type: String,
             default: undefined,
+            trim: true,
         },
         extraProfilesStripeItemId: {
             type: String,
             default: undefined,
+            trim: true,
         },
 
         /**
-         * ✅ TEAMS ENTITLEMENT (THIS IS WHAT YOU NEED NOW)
-         * We store the Stripe subscription item quantity here.
-         * This is the number of profiles/seats they paid for.
-         *
+         * teamsProfilesQty = total allowed profiles on Teams.
          * Example:
-         *  - teamsProfilesQty = 3  => allow 3 profiles
+         *  - 1 => base Teams only
+         *  - 3 => base Teams + 2 extras
          */
         teamsProfilesQty: {
             type: Number,
@@ -106,10 +114,12 @@ const userSchema = new Schema(
         teamsStripePriceId: {
             type: String,
             default: undefined,
+            trim: true,
         },
         teamsStripeItemId: {
             type: String,
             default: undefined,
+            trim: true,
         },
 
         isVerified: { type: Boolean, default: false },
@@ -124,7 +134,7 @@ const userSchema = new Schema(
 );
 
 /**
- * ✅ Partial unique indexes
+ * Partial unique indexes
  */
 userSchema.index(
     { profileUrl: 1 },
