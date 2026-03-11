@@ -1,8 +1,14 @@
+// backend/models/BusinessCard.js
 const mongoose = require("mongoose");
 
 const serviceSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
+
+    // ✅ new preferred field
+    description: { type: String, default: "" },
+
+    // ✅ legacy compatibility
     price: { type: String, default: "" },
   },
   { _id: false }
@@ -32,19 +38,17 @@ const businessCardSchema = new mongoose.Schema(
     },
 
     /* -------------------------------------------------
-       Ownership (MULTI-PROFILE = many cards per user)
-       IMPORTANT: user is NOT unique
+       Ownership
     ------------------------------------------------- */
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
-      index: true, // non-unique (this will create user_1 but NOT unique)
+      index: true,
     },
 
     /* -------------------------------------------------
-       Default profile flag (optional but useful)
-       Ensures only one default profile per user
+       Optional default profile flag
     ------------------------------------------------- */
     is_default: {
       type: Boolean,
@@ -53,7 +57,7 @@ const businessCardSchema = new mongoose.Schema(
     },
 
     /* -------------------------------------------------
-       Templates (5 total)
+       Templates
     ------------------------------------------------- */
     template_id: {
       type: String,
@@ -73,6 +77,12 @@ const businessCardSchema = new mongoose.Schema(
        Core identity
     ------------------------------------------------- */
     business_card_name: { type: String, default: "" },
+
+    // ✅ new preferred business fields
+    business_name: { type: String, default: "" },
+    trade_title: { type: String, default: "" },
+    location: { type: String, default: "" },
+
     full_name: { type: String, default: "" },
     job_title: { type: String, default: "" },
     bio: { type: String, default: "" },
@@ -80,12 +90,20 @@ const businessCardSchema = new mongoose.Schema(
     /* -------------------------------------------------
        Theme & typography
     ------------------------------------------------- */
+    // ✅ new preferred key
+    theme_mode: {
+      type: String,
+      enum: ["light", "dark"],
+      default: "light",
+    },
+
+    // ✅ legacy compatibility
     page_theme: { type: String, default: "light" },
     page_theme_variant: { type: String, default: "subtle-light" },
     style: { type: String, default: "Inter" },
 
     /* -------------------------------------------------
-       Headings
+       Headings (legacy compatibility)
     ------------------------------------------------- */
     main_heading: { type: String, default: "" },
     sub_heading: { type: String, default: "" },
@@ -93,7 +111,12 @@ const businessCardSchema = new mongoose.Schema(
     /* -------------------------------------------------
        Media
     ------------------------------------------------- */
+    // ✅ new preferred logo field
+    logo: { type: String, default: "" },
+
+    // ✅ legacy compatibility
     avatar: { type: String, default: "" },
+
     cover_photo: { type: String, default: "" },
 
     works: {
@@ -193,14 +216,13 @@ const businessCardSchema = new mongoose.Schema(
 );
 
 /**
- * ✅ GLOBAL uniqueness:
+ * GLOBAL uniqueness:
  * profile_slug must be unique across the entire platform
  */
 businessCardSchema.index({ profile_slug: 1 }, { unique: true });
 
 /**
- * ✅ ONE default profile per user (partial unique)
- * Only enforces uniqueness when is_default = true
+ * One default profile per user (partial unique)
  */
 businessCardSchema.index(
   { user: 1, is_default: 1 },

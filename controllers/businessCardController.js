@@ -10,7 +10,6 @@ const QRCode = require("qrcode");
  * ---------------------------------------------------------
  */
 
-// ✅ IMPORTANT: must match BusinessCard model validation:
 // profile_slug allows ONLY a-z 0-9 and hyphens
 const safeSlug = (v) =>
   String(v || "")
@@ -43,8 +42,6 @@ const getPlan = (userDoc) => {
   return "free";
 };
 
-// ✅ Free limits exist, but saving must NEVER 403 because of them.
-// We clamp content to the free limits instead.
 const FREE_LIMIT = 6;
 
 const upgradeRequired = (res, payload = {}) => {
@@ -54,9 +51,6 @@ const upgradeRequired = (res, payload = {}) => {
   });
 };
 
-/**
- * Clamp free plan content to limits (never block saving).
- */
 const clampFreeContent = ({ plan, works, services, reviews }) => {
   if (plan !== "free") return { works, services, reviews };
 
@@ -69,10 +63,6 @@ const clampFreeContent = ({ plan, works, services, reviews }) => {
   };
 };
 
-/**
- * Force free plan template to template-1 (never block saving).
- * Plus + Teams can use all 5 templates.
- */
 const normalizeTemplateForPlan = (plan, requestedTemplate) => {
   const allowed = new Set([
     "template-1",
@@ -81,26 +71,13 @@ const normalizeTemplateForPlan = (plan, requestedTemplate) => {
     "template-4",
     "template-5",
   ]);
+
   const t = String(requestedTemplate || "template-1");
   if (!allowed.has(t)) return "template-1";
   if (plan === "free") return "template-1";
-  return t; // plus/teams
+  return t;
 };
 
-/**
- * ✅ Profile limits (YOUR REQUIREMENT):
- * - free: 1 profile
- * - plus: 1 profile (but all 5 templates)
- * - teams: multiple profiles (based on Stripe quantity)
- *
- * We support BOTH fields, because your DB shows both:
- * - teamsProfilesQty (your current source of truth)
- * - extraProfilesQty (in case you switch to "base+extra" later)
- *
- * Current behavior:
- * - If teamsProfilesQty is set => use it as total allowed profiles
- * - Else fallback to (1 + extraProfilesQty)
- */
 const getMaxProfilesForUser = (userDoc) => {
   const plan = getPlan(userDoc);
 
@@ -116,7 +93,7 @@ const getMaxProfilesForUser = (userDoc) => {
 
 /**
  * ---------------------------------------------------------
- * ✅ QR helpers (each BusinessCard gets its own QR)
+ * QR helpers
  * Public URL is ALWAYS: /u/:profile_slug
  * ---------------------------------------------------------
  */
@@ -142,7 +119,7 @@ const generateAndUploadProfileQr = async (userId, profileSlug) => {
   });
 
   const safe = safeSlug(profileSlug) || "profile";
-  const fileKey = `qr-codes/${userId}/${safe}-${Date.now()}.png`; // unique to avoid caching
+  const fileKey = `qr-codes/${userId}/${safe}-${Date.now()}.png`;
   const qrCodeUrl = await uploadToS3(qrBuffer, fileKey);
   return qrCodeUrl;
 };
@@ -153,7 +130,6 @@ const generateAndUploadProfileQr = async (userId, profileSlug) => {
  * ---------------------------------------------------------
  */
 
-// Legacy stub
 const getMyBusinessCard = async (req, res) => {
   return res.status(400).json({
     error:
@@ -198,14 +174,13 @@ const getMyProfileBySlug = async (req, res) => {
   }
 };
 
-// POST /api/business-card/profiles (create profile)
+// POST /api/business-card/profiles
 const createMyProfile = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
     const userId = req.user._id;
 
-    // ✅ Always read fresh user from DB (webhook may have just updated plan)
     const freshUser = await User.findById(userId).select(
       "plan planInterval subscriptionStatus isSubscribed trialExpires extraProfilesQty teamsProfilesQty username slug profileUrl qrCodeUrl"
     );
@@ -220,7 +195,6 @@ const createMyProfile = async (req, res) => {
         .json({ error: "profile_slug must be at least 3 characters" });
     }
 
-    // ✅ Profile cap enforced ONLY here
     const count = await BusinessCard.countDocuments({ user: userId });
     if (count >= maxAllowed) {
       return upgradeRequired(res, {
@@ -233,41 +207,40 @@ const createMyProfile = async (req, res) => {
       });
     }
 
-    // ✅ GLOBAL slug uniqueness
     const slugTaken = await BusinessCard.findOne({ profile_slug: slug }).select(
       "_id"
     );
-    if (slugTaken)
+    if (slugTaken) {
       return res.status(409).json({ error: "Profile slug already exists" });
+    }
 
-    // ✅ Never 403 for template. Normalize instead.
     const effectiveTemplate = normalizeTemplateForPlan(
       plan,
       req.body.template_id || "template-1"
     );
 
-    // ✅ Create profile
     const created = await BusinessCard.create({
       user: userId,
       profile_slug: slug,
       template_id: effectiveTemplate,
       business_card_name: req.body.business_card_name || "",
+      business_name: req.body.business_name || req.body.business_card_name || "",
+      theme_mode: req.body.theme_mode || req.body.page_theme || "light",
+      page_theme: req.body.page_theme || req.body.theme_mode || "light",
+      trade_title: req.body.trade_title || req.body.sub_heading || "",
+      location: req.body.location || "",
     });
 
-    // ✅ Generate QR + save to this BusinessCard (ALWAYS for any created profile)
     try {
       const qrUrl = await generateAndUploadProfileQr(userId, slug);
       if (qrUrl) {
         created.qr_code_url = qrUrl;
         await created.save();
 
-        // If this is the user's first profile OR user has no "main qr", store legacy "main qr" too
-        // (helps older UI pieces that still read user.qrCodeUrl)
         if (!freshUser?.qrCodeUrl) {
           await User.findByIdAndUpdate(userId, {
             $set: {
               qrCodeUrl: qrUrl,
-              // Keep legacy url field in sync (optional)
               profileUrl: buildPublicProfileUrl(slug),
               slug: slug,
               username: freshUser?.username || slug,
@@ -276,12 +249,8 @@ const createMyProfile = async (req, res) => {
         }
       }
     } catch (e) {
-      // Do not fail creation if QR generation fails
       console.error("QR generation failed (createMyProfile):", e);
     }
-
-    // ✅ We DO NOT sync Stripe quantity from profile count here.
-    // Stripe quantity (teamsProfilesQty) is the source of truth for Teams.
 
     return res.status(201).json({ data: created });
   } catch (err) {
@@ -290,7 +259,6 @@ const createMyProfile = async (req, res) => {
   }
 };
 
-// Legacy stub
 const setDefaultProfile = async (req, res) => {
   return res.status(400).json({
     error:
@@ -314,8 +282,6 @@ const deleteMyProfile = async (req, res) => {
 
     await BusinessCard.deleteOne({ _id: card._id });
 
-    // ✅ We DO NOT sync Stripe quantity from profile count here.
-
     return res.json({ success: true });
   } catch (err) {
     console.error("deleteMyProfile:", err);
@@ -323,13 +289,7 @@ const deleteMyProfile = async (req, res) => {
   }
 };
 
-// POST /api/business-card (upsert save, supports profile_slug)
-// RULES:
-// - Saving edits must ALWAYS work for ALL plans (free/plus/teams)
-// - Free plan limits still apply (clamp + normalize), but never 403
-// - Teams supports multiple profiles
-// - Free/Plus should not be able to create 2nd profile via SAVE:
-//   if they already have 1 profile and try to save another slug, we update their only profile instead.
+// POST /api/business-card
 const saveBusinessCard = async (req, res) => {
   try {
     if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
@@ -348,7 +308,6 @@ const saveBusinessCard = async (req, res) => {
       });
     }
 
-    // GLOBAL slug protection
     const otherOwner = await BusinessCard.findOne({
       profile_slug: requestedSlug,
       user: { $ne: userId },
@@ -357,20 +316,20 @@ const saveBusinessCard = async (req, res) => {
       return res.status(409).json({ error: "Profile slug already exists" });
     }
 
-    // Find exact profile
     let existingCard = await BusinessCard.findOne({
       user: userId,
       profile_slug: requestedSlug,
     });
 
-    // If not found and plan allows only 1 profile, fall back to user's only profile
     let targetQuery = { user: userId, profile_slug: requestedSlug };
     let willRenameSlug = false;
 
     if (!existingCard && plan !== "teams") {
       const count = await BusinessCard.countDocuments({ user: userId });
       if (count >= 1) {
-        const onlyCard = await BusinessCard.findOne({ user: userId }).sort({ createdAt: 1 });
+        const onlyCard = await BusinessCard.findOne({ user: userId }).sort({
+          createdAt: 1,
+        });
         if (onlyCard?._id) {
           existingCard = onlyCard;
           targetQuery = { _id: onlyCard._id };
@@ -379,39 +338,42 @@ const saveBusinessCard = async (req, res) => {
       }
     }
 
-    // ----------------------------
-    // Debug: confirm files arrive
-    // ----------------------------
     const debugFiles = {
       cover_photo: req.files?.cover_photo?.length || 0,
+      logo: req.files?.logo?.length || 0,
       avatar: req.files?.avatar?.length || 0,
       works: req.files?.works?.length || 0,
       hasFilesObject: !!req.files,
     };
 
-    // Arrays from FormData
     let services = parseJsonArray(req.body.services, []);
     let reviews = parseJsonArray(req.body.reviews, []);
 
-    // existing_works (strip blob urls ALWAYS)
     const existing_works = []
       .concat(req.body.existing_works || [])
       .flat()
       .filter(Boolean)
       .filter((u) => typeof u === "string" && !u.startsWith("blob:"));
 
-    // STRICT removed flags
     const coverRemoved = String(req.body.cover_photo_removed || "0") === "1";
     const avatarRemoved = String(req.body.avatar_removed || "0") === "1";
+    const logoRemoved =
+      String(req.body.logo_removed || "0") === "1" || avatarRemoved;
 
-    // Upload cover/avatar if provided
     let cover_photo_url = null;
     let avatar_url = null;
+    let logo_url = null;
 
     if (req.files?.cover_photo?.[0]) {
       const f = req.files.cover_photo[0];
       const key = `cover_photos/${userId}/${Date.now()}-${f.originalname}`;
       cover_photo_url = await uploadToS3(f.buffer, key);
+    }
+
+    if (req.files?.logo?.[0]) {
+      const f = req.files.logo[0];
+      const key = `logos/${userId}/${Date.now()}-${f.originalname}`;
+      logo_url = await uploadToS3(f.buffer, key);
     }
 
     if (req.files?.avatar?.[0]) {
@@ -420,13 +382,11 @@ const saveBusinessCard = async (req, res) => {
       avatar_url = await uploadToS3(f.buffer, key);
     }
 
-    // Upload new work images
     const uploadedWorkUrls = [];
     const workFiles = req.files?.works || [];
 
     const maxWorks = plan === "free" ? FREE_LIMIT : Infinity;
 
-    // Start from existing_works only (already sanitized)
     let works = [...existing_works];
 
     const remainingSlots = Math.max(
@@ -446,36 +406,53 @@ const saveBusinessCard = async (req, res) => {
 
     works = [...works, ...uploadedWorkUrls];
 
-    // Clamp free plan content
-    ({ works, services, reviews } = clampFreeContent({ plan, works, services, reviews }));
+    ({ works, services, reviews } = clampFreeContent({
+      plan,
+      works,
+      services,
+      reviews,
+    }));
 
-    // Template normalize
     const requestedTemplate =
       req.body.template_id || existingCard?.template_id || "template-1";
     const effectiveTemplate = normalizeTemplateForPlan(plan, requestedTemplate);
 
-    // ----------------------------
-    // IMPORTANT: sanitize old blob data
-    // ----------------------------
     const existingCover = existingCard?.cover_photo || "";
     const existingAvatar = existingCard?.avatar || "";
-    const existingWorks = Array.isArray(existingCard?.works) ? existingCard.works : [];
+    const existingLogo = existingCard?.logo || "";
+    const existingWorks = Array.isArray(existingCard?.works)
+      ? existingCard.works
+      : [];
 
-    const existingCoverIsBlob = typeof existingCover === "string" && existingCover.startsWith("blob:");
-    const existingAvatarIsBlob = typeof existingAvatar === "string" && existingAvatar.startsWith("blob:");
-    const existingWorksClean = existingWorks.filter((u) => typeof u === "string" && !u.startsWith("blob:"));
+    const existingCoverIsBlob =
+      typeof existingCover === "string" && existingCover.startsWith("blob:");
+    const existingAvatarIsBlob =
+      typeof existingAvatar === "string" && existingAvatar.startsWith("blob:");
+    const existingLogoIsBlob =
+      typeof existingLogo === "string" && existingLogo.startsWith("blob:");
+    const existingWorksClean = existingWorks.filter(
+      (u) => typeof u === "string" && !u.startsWith("blob:")
+    );
 
     const update = {
       user: userId,
       profile_slug: requestedSlug,
       template_id: effectiveTemplate,
 
-      business_card_name: req.body.business_card_name || "",
-      page_theme: req.body.page_theme || "light",
-      page_theme_variant: req.body.page_theme_variant || "subtle-light",
-      style: req.body.style || "Inter",
-      main_heading: req.body.main_heading || "",
-      sub_heading: req.body.sub_heading || "",
+      business_card_name:
+        req.body.business_card_name || req.body.business_name || "",
+      business_name:
+        req.body.business_name ||
+        req.body.business_card_name ||
+        req.body.main_heading ||
+        "",
+
+      trade_title: req.body.trade_title || req.body.sub_heading || "",
+      location: req.body.location || "",
+
+      main_heading: req.body.main_heading || req.body.business_name || "",
+      sub_heading: req.body.sub_heading || req.body.trade_title || "",
+
       full_name: req.body.full_name || "",
       bio: req.body.bio || "",
       job_title: req.body.job_title || "",
@@ -485,6 +462,12 @@ const saveBusinessCard = async (req, res) => {
 
       services,
       reviews,
+
+      theme_mode: req.body.theme_mode || req.body.page_theme || "light",
+      page_theme: req.body.page_theme || req.body.theme_mode || "light",
+      page_theme_variant: req.body.page_theme_variant || "subtle-light",
+
+      style: req.body.style || "Inter",
 
       work_display_mode: req.body.work_display_mode || "list",
       services_display_mode: req.body.services_display_mode || "list",
@@ -517,23 +500,29 @@ const saveBusinessCard = async (req, res) => {
         "contact",
       ]),
 
-      // If client sent no existing works AND uploaded none,
-      // preserve cleaned old works instead of wiping by accident.
-      works: (works.length > 0 || uploadedWorkUrls.length > 0) ? works : existingWorksClean,
+      works:
+        works.length > 0 || uploadedWorkUrls.length > 0
+          ? works
+          : existingWorksClean,
     };
 
-    // Cover/avatar updates:
-    // - if removed -> wipe
-    // - else if new upload -> set url
-    // - else preserve old (but if old was blob -> wipe it)
     if (coverRemoved) update.cover_photo = "";
     else if (cover_photo_url) update.cover_photo = cover_photo_url;
-    else if (existingCoverIsBlob) update.cover_photo = ""; // sanitize
-    // else do not set cover_photo at all (preserves DB)
+    else if (existingCoverIsBlob) update.cover_photo = "";
 
-    if (avatarRemoved) update.avatar = "";
-    else if (avatar_url) update.avatar = avatar_url;
-    else if (existingAvatarIsBlob) update.avatar = ""; // sanitize
+    if (logoRemoved) {
+      update.logo = "";
+      update.avatar = "";
+    } else if (logo_url) {
+      update.logo = logo_url;
+      update.avatar = logo_url;
+    } else if (avatar_url) {
+      update.avatar = avatar_url;
+      update.logo = avatar_url;
+    } else {
+      if (existingAvatarIsBlob) update.avatar = "";
+      if (existingLogoIsBlob) update.logo = "";
+    }
 
     if (willRenameSlug) {
       update.profile_slug = requestedSlug;
@@ -547,13 +536,16 @@ const saveBusinessCard = async (req, res) => {
       { new: true, upsert: allowUpsert }
     );
 
-    // Ensure QR exists
     try {
       const needsQr =
-        !saved?.qr_code_url || (willRenameSlug && safeSlug(saved.profile_slug) === requestedSlug);
+        !saved?.qr_code_url ||
+        (willRenameSlug && safeSlug(saved.profile_slug) === requestedSlug);
 
       if (needsQr) {
-        const qrUrl = await generateAndUploadProfileQr(userId, saved.profile_slug);
+        const qrUrl = await generateAndUploadProfileQr(
+          userId,
+          saved.profile_slug
+        );
         if (qrUrl) {
           saved.qr_code_url = qrUrl;
           await saved.save();
@@ -569,6 +561,9 @@ const saveBusinessCard = async (req, res) => {
         filesReceived: debugFiles,
         cover_photo_saved: saved?.cover_photo || "",
         avatar_saved: saved?.avatar || "",
+        logo_saved: saved?.logo || "",
+        theme_mode_saved: saved?.theme_mode || "",
+        trade_title_saved: saved?.trade_title || "",
         works_count: Array.isArray(saved?.works) ? saved.works.length : 0,
       },
       normalized: {
@@ -584,15 +579,12 @@ const saveBusinessCard = async (req, res) => {
   }
 };
 
-
 /**
  * ---------------------------------------------------------
  * PUBLIC
  * ---------------------------------------------------------
  */
 
-// ✅ Public profile by GLOBAL slug
-// This is the canonical public lookup for /u/:profile_slug
 const getPublicBySlug = async (req, res) => {
   try {
     const slug = safeSlug(req.params.slug);
@@ -608,8 +600,6 @@ const getPublicBySlug = async (req, res) => {
   }
 };
 
-// Legacy support (old route): GET /api/business-card/by_username/:username
-// Returns "main" if exists, otherwise newest.
 const getPublicByUsername = async (req, res) => {
   try {
     const username = String(req.params.username || "").trim();
@@ -639,7 +629,6 @@ const getPublicByUsername = async (req, res) => {
   }
 };
 
-// Legacy support (old route): GET /api/business-card/by_username/:username/:slug
 const getPublicByUsernameAndSlug = async (req, res) => {
   try {
     const username = String(req.params.username || "").trim();
@@ -668,17 +657,13 @@ const getPublicByUsernameAndSlug = async (req, res) => {
 };
 
 module.exports = {
-  // protected
   getMyBusinessCard,
   saveBusinessCard,
-
   getMyProfiles,
   getMyProfileBySlug,
   createMyProfile,
   setDefaultProfile,
   deleteMyProfile,
-
-  // public
   getPublicBySlug,
   getPublicByUsername,
   getPublicByUsernameAndSlug,
