@@ -1,4 +1,3 @@
-// backend/routes/businessCardRoutes.js
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
@@ -21,7 +20,7 @@ const {
   getPublicByUsernameAndSlug,
 } = require("../controllers/businessCardController");
 
-// ✅ Model needed for slug availability check
+// Model needed for slug availability check
 const BusinessCard = require("../models/BusinessCard");
 
 /**
@@ -61,11 +60,12 @@ const upload = multer({
   storage,
   fileFilter,
   limits: {
-    files: 1 + 1 + 20,
+    files: 1 + 1 + 1 + 20,
     fileSize: 10 * 1024 * 1024,
   },
 }).fields([
   { name: "cover_photo", maxCount: 1 },
+  { name: "logo", maxCount: 1 },
   { name: "avatar", maxCount: 1 },
   { name: "works", maxCount: 20 },
 ]);
@@ -95,7 +95,7 @@ router.patch("/profiles/:slug/default", requireAuth, setDefaultProfile);
 router.post("/", requireAuth, upload, saveBusinessCard);
 
 /* =========================================================
-   ✅ SLUG AVAILABILITY CHECK (PUBLIC)
+   SLUG AVAILABILITY CHECK (PUBLIC)
    GET /api/business-card/slug-available/:slug
    ========================================================= */
 router.get("/slug-available/:slug", async (req, res) => {
