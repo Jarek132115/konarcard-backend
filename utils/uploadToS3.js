@@ -6,7 +6,18 @@ const guessContentType = (key, fallback = "application/octet-stream") => {
     if (k.endsWith(".jpg") || k.endsWith(".jpeg")) return "image/jpeg";
     if (k.endsWith(".webp")) return "image/webp";
     if (k.endsWith(".gif")) return "image/gif";
+    if (k.endsWith(".svg")) return "image/svg+xml";
     return fallback;
+};
+
+const buildPublicS3Url = ({ bucket, region, key }) => {
+    const safeKey = String(key || "")
+        .split("/")
+        .map((part) => encodeURIComponent(part))
+        .join("/");
+
+    // Safer for browser access than virtual-hosted style in some bucket setups
+    return `https://s3.${region}.amazonaws.com/${bucket}/${safeKey}`;
 };
 
 const uploadToS3 = async (buffer, key, contentType) => {
@@ -33,21 +44,22 @@ const uploadToS3 = async (buffer, key, contentType) => {
         Key: key,
         Body: buffer,
         ContentType,
-
-        // ✅ NO ACL (bucket has ACLs disabled / bucket-owner-enforced)
-        // ACL: "public-read",  <-- REMOVE
-
         CacheControl: "public, max-age=31536000, immutable",
     };
 
     try {
-        await s3.upload(params).promise();
+        const result = await s3.upload(params).promise();
 
-        // Use virtual-hosted style url
-        return `https://${Bucket}.s3.${region}.amazonaws.com/${key
-            .split("/")
-            .map(encodeURIComponent)
-            .join("/")}`;
+        // Prefer AWS-returned location when available
+        if (result?.Location) {
+            return result.Location;
+        }
+
+        return buildPublicS3Url({
+            bucket: Bucket,
+            region,
+            key,
+        });
     } catch (err) {
         console.error("Error uploading to S3:", err);
         throw new Error("Failed to upload to S3.");
