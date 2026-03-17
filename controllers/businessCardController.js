@@ -36,6 +36,33 @@ const asBool = (v, defaultVal = true) => {
   return defaultVal;
 };
 
+const norm = (v) => String(v || "").trim();
+
+const cleanStringArray = (arr) =>
+  (Array.isArray(arr) ? arr : [])
+    .map((x) => (typeof x === "string" ? x.trim() : ""))
+    .filter(Boolean)
+    .filter((u) => !u.startsWith("blob:"));
+
+const normalizeServices = (raw) =>
+  parseJsonArray(raw, [])
+    .map((item) => ({
+      name: norm(item?.name),
+      description: norm(item?.description || item?.price),
+      // legacy compatibility
+      price: norm(item?.price || item?.description),
+    }))
+    .filter((item) => item.name || item.description);
+
+const normalizeReviews = (raw) =>
+  parseJsonArray(raw, [])
+    .map((item) => ({
+      name: norm(item?.name),
+      text: norm(item?.text),
+      rating: Math.min(5, Math.max(0, Number(item?.rating) || 0)),
+    }))
+    .filter((item) => item.name || item.text || item.rating > 0);
+
 const getPlan = (userDoc) => {
   const plan = String(userDoc?.plan || "free").toLowerCase();
   if (plan === "plus" || plan === "teams") return plan;
@@ -89,6 +116,52 @@ const getMaxProfilesForUser = (userDoc) => {
   const extra = Number(userDoc?.extraProfilesQty);
   const extraSafe = Number.isFinite(extra) ? Math.max(0, extra) : 0;
   return 1 + extraSafe;
+};
+
+const hasMeaningfulProfileContent = (cardLike = {}) => {
+  const textFields = [
+    cardLike.business_name,
+    cardLike.business_card_name,
+    cardLike.main_heading,
+    cardLike.trade_title,
+    cardLike.sub_heading,
+    cardLike.location,
+    cardLike.full_name,
+    cardLike.job_title,
+    cardLike.bio,
+    cardLike.contact_email,
+    cardLike.phone_number,
+    cardLike.facebook_url,
+    cardLike.instagram_url,
+    cardLike.linkedin_url,
+    cardLike.x_url,
+    cardLike.tiktok_url,
+  ];
+
+  const hasText = textFields.some((v) => norm(v).length > 0);
+
+  const hasImages = [
+    cardLike.cover_photo,
+    cardLike.logo,
+    cardLike.avatar,
+  ].some((v) => norm(v).length > 0);
+
+  const hasWorks =
+    Array.isArray(cardLike.works) && cardLike.works.some((v) => norm(v).length > 0);
+
+  const hasServices =
+    Array.isArray(cardLike.services) &&
+    cardLike.services.some(
+      (s) => norm(s?.name) || norm(s?.description) || norm(s?.price)
+    );
+
+  const hasReviews =
+    Array.isArray(cardLike.reviews) &&
+    cardLike.reviews.some(
+      (r) => norm(r?.name) || norm(r?.text) || Number(r?.rating) > 0
+    );
+
+  return hasText || hasImages || hasWorks || hasServices || hasReviews;
 };
 
 /**
@@ -229,6 +302,12 @@ const createMyProfile = async (req, res) => {
       page_theme: req.body.page_theme || req.body.theme_mode || "light",
       trade_title: req.body.trade_title || req.body.sub_heading || "",
       location: req.body.location || "",
+      services: [],
+      reviews: [],
+      works: [],
+      logo: "",
+      avatar: "",
+      cover_photo: "",
     });
 
     try {
@@ -346,40 +425,40 @@ const saveBusinessCard = async (req, res) => {
       hasFilesObject: !!req.files,
     };
 
-    let services = parseJsonArray(req.body.services, []);
-    let reviews = parseJsonArray(req.body.reviews, []);
+    let services = normalizeServices(req.body.services);
+    let reviews = normalizeReviews(req.body.reviews);
 
-    const existing_works = []
-      .concat(req.body.existing_works || [])
-      .flat()
-      .filter(Boolean)
-      .filter((u) => typeof u === "string" && !u.startsWith("blob:"));
+    const existingWorksFromRequest = cleanStringArray(
+      []
+        .concat(req.body.existing_works || [])
+        .flat()
+    );
 
     const coverRemoved = String(req.body.cover_photo_removed || "0") === "1";
     const avatarRemoved = String(req.body.avatar_removed || "0") === "1";
     const logoRemoved =
       String(req.body.logo_removed || "0") === "1" || avatarRemoved;
 
-    let cover_photo_url = null;
-    let avatar_url = null;
-    let logo_url = null;
+    let coverPhotoUrl = "";
+    let avatarUrl = "";
+    let logoUrl = "";
 
     if (req.files?.cover_photo?.[0]) {
       const f = req.files.cover_photo[0];
       const key = `cover_photos/${userId}/${Date.now()}-${f.originalname}`;
-      cover_photo_url = await uploadToS3(f.buffer, key);
+      coverPhotoUrl = await uploadToS3(f.buffer, key);
     }
 
     if (req.files?.logo?.[0]) {
       const f = req.files.logo[0];
       const key = `logos/${userId}/${Date.now()}-${f.originalname}`;
-      logo_url = await uploadToS3(f.buffer, key);
+      logoUrl = await uploadToS3(f.buffer, key);
     }
 
     if (req.files?.avatar?.[0]) {
       const f = req.files.avatar[0];
       const key = `avatars/${userId}/${Date.now()}-${f.originalname}`;
-      avatar_url = await uploadToS3(f.buffer, key);
+      avatarUrl = await uploadToS3(f.buffer, key);
     }
 
     const uploadedWorkUrls = [];
@@ -387,12 +466,13 @@ const saveBusinessCard = async (req, res) => {
 
     const maxWorks = plan === "free" ? FREE_LIMIT : Infinity;
 
-    let works = [...existing_works];
-
     const remainingSlots = Math.max(
       0,
-      maxWorks === Infinity ? workFiles.length : maxWorks - works.length
+      maxWorks === Infinity
+        ? workFiles.length
+        : maxWorks - existingWorksFromRequest.length
     );
+
     const filesToUpload =
       plan === "free" ? workFiles.slice(0, remainingSlots) : workFiles;
 
@@ -404,7 +484,7 @@ const saveBusinessCard = async (req, res) => {
       if (url) uploadedWorkUrls.push(url);
     }
 
-    works = [...works, ...uploadedWorkUrls];
+    let works = [...existingWorksFromRequest, ...uploadedWorkUrls];
 
     ({ works, services, reviews } = clampFreeContent({
       plan,
@@ -417,22 +497,9 @@ const saveBusinessCard = async (req, res) => {
       req.body.template_id || existingCard?.template_id || "template-1";
     const effectiveTemplate = normalizeTemplateForPlan(plan, requestedTemplate);
 
-    const existingCover = existingCard?.cover_photo || "";
-    const existingAvatar = existingCard?.avatar || "";
-    const existingLogo = existingCard?.logo || "";
-    const existingWorks = Array.isArray(existingCard?.works)
-      ? existingCard.works
-      : [];
-
-    const existingCoverIsBlob =
-      typeof existingCover === "string" && existingCover.startsWith("blob:");
-    const existingAvatarIsBlob =
-      typeof existingAvatar === "string" && existingAvatar.startsWith("blob:");
-    const existingLogoIsBlob =
-      typeof existingLogo === "string" && existingLogo.startsWith("blob:");
-    const existingWorksClean = existingWorks.filter(
-      (u) => typeof u === "string" && !u.startsWith("blob:")
-    );
+    const existingCover = norm(existingCard?.cover_photo);
+    const existingAvatar = norm(existingCard?.avatar);
+    const existingLogo = norm(existingCard?.logo);
 
     const update = {
       user: userId,
@@ -462,6 +529,7 @@ const saveBusinessCard = async (req, res) => {
 
       services,
       reviews,
+      works,
 
       theme_mode: req.body.theme_mode || req.body.page_theme || "light",
       page_theme: req.body.page_theme || req.body.theme_mode || "light",
@@ -499,29 +567,34 @@ const saveBusinessCard = async (req, res) => {
         "reviews",
         "contact",
       ]),
-
-      works:
-        works.length > 0 || uploadedWorkUrls.length > 0
-          ? works
-          : existingWorksClean,
     };
 
-    if (coverRemoved) update.cover_photo = "";
-    else if (cover_photo_url) update.cover_photo = cover_photo_url;
-    else if (existingCoverIsBlob) update.cover_photo = "";
+    // Cover photo: explicit remove > new upload > keep existing > empty
+    if (coverRemoved) {
+      update.cover_photo = "";
+    } else if (coverPhotoUrl) {
+      update.cover_photo = coverPhotoUrl;
+    } else {
+      update.cover_photo = existingCover;
+    }
 
+    // Logo/avatar:
+    // - explicit remove clears both
+    // - new logo upload becomes both logo + avatar for compatibility
+    // - avatar upload without logo also becomes both
+    // - otherwise preserve what existed
     if (logoRemoved) {
       update.logo = "";
       update.avatar = "";
-    } else if (logo_url) {
-      update.logo = logo_url;
-      update.avatar = logo_url;
-    } else if (avatar_url) {
-      update.avatar = avatar_url;
-      update.logo = avatar_url;
+    } else if (logoUrl) {
+      update.logo = logoUrl;
+      update.avatar = logoUrl;
+    } else if (avatarUrl) {
+      update.avatar = avatarUrl;
+      update.logo = avatarUrl;
     } else {
-      if (existingAvatarIsBlob) update.avatar = "";
-      if (existingLogoIsBlob) update.logo = "";
+      update.logo = existingLogo;
+      update.avatar = existingAvatar || existingLogo;
     }
 
     if (willRenameSlug) {
@@ -555,8 +628,13 @@ const saveBusinessCard = async (req, res) => {
       console.error("QR ensure failed (saveBusinessCard):", e);
     }
 
+    const setupComplete = hasMeaningfulProfileContent(saved);
+
     return res.json({
       data: saved,
+      meta: {
+        setup_complete: setupComplete,
+      },
       debug: {
         filesReceived: debugFiles,
         cover_photo_saved: saved?.cover_photo || "",
