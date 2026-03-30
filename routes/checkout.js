@@ -30,6 +30,36 @@ const buildPublicProfileUrl = (profileSlug) => {
     return `${PUBLIC_PROFILE_DOMAIN}/u/${s}`;
 };
 
+function buildFrontendReturnUrl(rawReturnUrl, fallbackPath = "/cards") {
+    const fallback = `${FRONTEND_URL}${fallbackPath.startsWith("/") ? fallbackPath : `/${fallbackPath}`}`;
+
+    if (!rawReturnUrl || typeof rawReturnUrl !== "string") {
+        return fallback;
+    }
+
+    const trimmed = rawReturnUrl.trim();
+    if (!trimmed) return fallback;
+
+    try {
+        if (/^https?:\/\//i.test(trimmed)) {
+            const u = new URL(trimmed);
+
+            const frontendOrigin = new URL(FRONTEND_URL).origin;
+            if (u.origin !== frontendOrigin) return fallback;
+
+            return u.toString();
+        }
+
+        if (trimmed.startsWith("/")) {
+            return `${FRONTEND_URL}${trimmed}`;
+        }
+
+        return fallback;
+    } catch {
+        return fallback;
+    }
+}
+
 // -------------------------
 // Subscription helpers
 // -------------------------
@@ -312,8 +342,6 @@ router.post("/teams", requireAuth, async (req, res) => {
 
         const stripeCustomerId = await ensureStripeCustomer(user);
 
-        // Existing Teams user with active subscription:
-        // update quantity immediately, charge proration now, then create profile now.
         if (String(user.plan || "").toLowerCase() === "teams" && user.stripeSubscriptionId) {
             const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId, {
                 expand: ["items.data.price"],
@@ -374,7 +402,6 @@ router.post("/teams", requireAuth, async (req, res) => {
             }
         }
 
-        // New Teams checkout flow
         const successUrl =
             `${FRONTEND_URL}/profiles?checkout=success` +
             `&slug=${encodeURIComponent(claimedSlug)}` +
@@ -539,7 +566,7 @@ router.post("/nfc/preview", requireAuth, async (req, res) => {
 // ----------------------------------------------------
 // Create NFC checkout session (one-time payment)
 // POST /api/checkout/nfc/session
-// Body: { productKey, variant?, quantity, profileId, logoUrl?, previewImageUrl?, preview? }
+// Body: { productKey, variant?, quantity, profileId, logoUrl?, previewImageUrl?, preview?, returnUrl? }
 // ----------------------------------------------------
 router.post("/nfc/session", requireAuth, async (req, res) => {
     try {
@@ -607,6 +634,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         const logoUrl = String(req.body?.logoUrl || "").trim();
         const previewImageUrl = String(req.body?.previewImageUrl || "").trim();
         const preview = req.body?.preview && typeof req.body.preview === "object" ? req.body.preview : {};
+        const returnBaseUrl = buildFrontendReturnUrl(req.body?.returnUrl, "/cards");
 
         const stripeCustomerId = await ensureStripeCustomer(user);
 
@@ -625,13 +653,17 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         });
 
         const successUrl =
-            `${FRONTEND_URL}/products/${productKey}?checkout=success` +
+            `${returnBaseUrl}${returnBaseUrl.includes("?") ? "&" : "?"}` +
+            `checkout=success` +
             `&order=${encodeURIComponent(String(order._id))}` +
+            `&product=${encodeURIComponent(productKey)}` +
             `&session_id={CHECKOUT_SESSION_ID}`;
 
         const cancelUrl =
-            `${FRONTEND_URL}/products/${productKey}?checkout=cancel` +
-            `&order=${encodeURIComponent(String(order._id))}`;
+            `${returnBaseUrl}${returnBaseUrl.includes("?") ? "&" : "?"}` +
+            `checkout=cancel` +
+            `&order=${encodeURIComponent(String(order._id))}` +
+            `&product=${encodeURIComponent(productKey)}`;
 
         const session = await stripe.checkout.sessions.create({
             mode: "payment",
@@ -653,6 +685,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
                 profileId: String(profile._id),
                 logoUrl: logoUrl || "",
                 previewImageUrl: previewImageUrl || "",
+                returnUrl: returnBaseUrl,
             },
 
             success_url: successUrl,
