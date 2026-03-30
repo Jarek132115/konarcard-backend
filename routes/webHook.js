@@ -33,12 +33,10 @@ const PUBLIC_PROFILE_DOMAIN =
  * Price mapping (base subscription)
  */
 const PRICE_TO_PLAN = {
-  // PLUS
   [process.env.STRIPE_PRICE_PLUS_MONTHLY]: { plan: "plus", interval: "monthly" },
   [process.env.STRIPE_PRICE_PLUS_QUARTERLY]: { plan: "plus", interval: "quarterly" },
   [process.env.STRIPE_PRICE_PLUS_YEARLY]: { plan: "plus", interval: "yearly" },
 
-  // TEAMS (base item)
   [process.env.STRIPE_PRICE_TEAMS_MONTHLY]: { plan: "teams", interval: "monthly" },
   [process.env.STRIPE_PRICE_TEAMS_QUARTERLY]: { plan: "teams", interval: "quarterly" },
   [process.env.STRIPE_PRICE_TEAMS_YEARLY]: { plan: "teams", interval: "yearly" },
@@ -100,8 +98,7 @@ function buildPublicUrlBySlug(profileSlug) {
 
 /**
  * Extract entitlements from subscription (expanded with items.data.price)
- *
- * Teams allowed profiles = 1 (included) + extraProfilesQty
+ * Teams allowed profiles = 1 + extraProfilesQty
  */
 function extractEntitlementsFromSubscription(sub) {
   const items = Array.isArray(sub?.items?.data) ? sub.items.data : [];
@@ -208,8 +205,13 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
 }
 
 /**
- * NFC order updater (idempotent)
- * Marks order paid/failed/cancelled based on webhook event.
+ * NFC order updater
+ * Status model:
+ * - pending: created but not yet confirmed paid
+ * - paid: Stripe successfully paid
+ * - failed: payment failed
+ * - cancelled: checkout expired / manually cancelled in app flow
+ * - fulfilled: later physical fulfilment step
  */
 async function updateNfcOrderFromSession(session, statusOverride) {
   const checkoutType = session?.metadata?.checkoutType;
@@ -219,9 +221,13 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   if (!orderId) return;
 
   const paymentStatus = String(session.payment_status || "").toLowerCase();
-  const nextStatus =
-    statusOverride ||
-    (paymentStatus === "paid" || paymentStatus === "no_payment_required" ? "paid" : "pending");
+
+  let nextStatus = "pending";
+  if (statusOverride) {
+    nextStatus = statusOverride;
+  } else if (paymentStatus === "paid" || paymentStatus === "no_payment_required") {
+    nextStatus = "paid";
+  }
 
   const amountTotal = Number(session.amount_total || 0);
   const currency = String(session.currency || "gbp").toLowerCase();
@@ -235,7 +241,7 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   const existing = await NfcOrder.findById(orderId).select("_id status preview");
   if (!existing) return;
 
-  if (existing.status === "paid" || existing.status === "fulfilled") {
+  if (existing.status === "fulfilled") {
     await NfcOrder.findByIdAndUpdate(orderId, {
       $set: {
         stripeCheckoutSessionId: String(session.id || ""),
@@ -385,8 +391,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
             await sendEmail(
               process.env.EMAIL_USER,
               amountPaid ? `New Konar Order - £${amountPaid}` : `New Konar Order`,
-              `<p>New order from: ${customerEmail || "Unknown email"}</p>${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
-              }`
+              `<p>New order from: ${customerEmail || "Unknown email"}</p>${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""}`
             );
           }
 
