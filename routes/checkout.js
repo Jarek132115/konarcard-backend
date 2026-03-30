@@ -244,7 +244,7 @@ const NFC_PRICE_MAP = {
     },
     konartag: {
         black: process.env.STRIPE_PRICE_KONARTAG_BLACK,
-        white: process.env.STRIPE_PRICE_KONARTAG_WHITE,
+        gold: process.env.STRIPE_PRICE_KONARTAG_GOLD,
     },
 };
 
@@ -254,6 +254,26 @@ function normalizeProductKey(v) {
     if (s === "metal" || s === "metal-card" || s === "konarcard-metal") return "metal-card";
     if (s === "konartag" || s === "tag") return "konartag";
     return s;
+}
+
+function normalizeVariantForProduct(productKey, rawVariant) {
+    let variant = String(rawVariant || "").trim().toLowerCase();
+
+    if (!variant) {
+        if (productKey === "plastic-card") return "white";
+        if (productKey === "metal-card") return "black";
+        if (productKey === "konartag") return "black";
+        return "";
+    }
+
+    // Backward compatibility:
+    // older konartag implementations sometimes used "white".
+    // current frontend uses "gold", so normalize old white -> gold.
+    if (productKey === "konartag" && variant === "white") {
+        return "gold";
+    }
+
+    return variant;
 }
 
 function decodeDataUrlToBuffer(dataUrl) {
@@ -551,7 +571,7 @@ router.post("/nfc/preview", requireAuth, async (req, res) => {
             .slice(0, 80);
 
         const pk = normalizeProductKey(productKey);
-        const v = String(variant || "").trim().toLowerCase();
+        const v = normalizeVariantForProduct(pk, variant);
 
         const key = `nfc-previews/${String(userId)}/${pk || "product"}/${v || "variant"}/${Date.now()}-${safeFile || `preview.${ext}`}`;
         const url = await uploadBufferToS3({ buffer: decoded.buf, key, mime: decoded.mime });
@@ -587,16 +607,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             });
         }
 
-        const defaultVariant =
-            productKey === "plastic-card"
-                ? "white"
-                : productKey === "metal-card"
-                    ? "black"
-                    : productKey === "konartag"
-                        ? "black"
-                        : "";
-
-        const variant = String(req.body?.variant || defaultVariant).trim().toLowerCase();
+        const variant = normalizeVariantForProduct(productKey, req.body?.variant);
 
         const allowedVariants = Object.keys(variantsMap);
         if (!allowedVariants.includes(variant)) {
