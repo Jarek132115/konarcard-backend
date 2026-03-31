@@ -30,6 +30,19 @@ const buildPublicProfileUrl = (profileSlug) => {
     return `${PUBLIC_PROFILE_DOMAIN}/u/${s}`;
 };
 
+const buildTrackedProfileUrl = (profileSlug, via = "") => {
+    const base = buildPublicProfileUrl(profileSlug);
+    const cleanVia = String(via || "").trim().toLowerCase();
+
+    if (!base) return "";
+    if (!cleanVia) return base;
+
+    const allowedVia = new Set(["qr", "nfc"]);
+    if (!allowedVia.has(cleanVia)) return base;
+
+    return `${base}?via=${encodeURIComponent(cleanVia)}`;
+};
+
 function buildFrontendReturnUrl(rawReturnUrl, fallbackPath = "/cards") {
     const fallback = `${FRONTEND_URL}${fallbackPath.startsWith("/") ? fallbackPath : `/${fallbackPath}`}`;
 
@@ -151,7 +164,7 @@ async function invoiceAndPayNow({ customerId, subscriptionId }) {
 }
 
 async function generateAndUploadProfileQr(userId, profileSlug) {
-    const url = buildPublicProfileUrl(profileSlug);
+    const url = buildTrackedProfileUrl(profileSlug, "qr");
     if (!url) return "";
 
     const qrBuffer = await QRCode.toBuffer(url, {
@@ -266,9 +279,6 @@ function normalizeVariantForProduct(productKey, rawVariant) {
         return "";
     }
 
-    // Backward compatibility:
-    // older konartag implementations sometimes used "white".
-    // current frontend uses "gold", so normalize old white -> gold.
     if (productKey === "konartag" && variant === "white") {
         return "gold";
     }
@@ -637,10 +647,17 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             return res.status(400).json({ error: "profileId is required", code: "PROFILE_REQUIRED" });
         }
 
-        const profile = await BusinessCard.findOne({ _id: profileId, user: user._id }).select("_id");
+        const profile = await BusinessCard.findOne({ _id: profileId, user: user._id })
+            .select("_id profile_slug")
+            .lean();
+
         if (!profile) {
             return res.status(403).json({ error: "Invalid profile selection", code: "INVALID_PROFILE" });
         }
+
+        const profileSlug = safeSlug(profile.profile_slug);
+        const publicProfileUrl = buildPublicProfileUrl(profileSlug);
+        const nfcProfileUrl = buildTrackedProfileUrl(profileSlug, "nfc");
 
         const logoUrl = String(req.body?.logoUrl || "").trim();
         const previewImageUrl = String(req.body?.previewImageUrl || "").trim();
@@ -657,7 +674,13 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             quantity,
             logoUrl,
             previewImageUrl,
-            preview: { ...preview, variant },
+            preview: {
+                ...preview,
+                variant,
+                profileSlug,
+                publicProfileUrl,
+                nfcProfileUrl,
+            },
             currency: "gbp",
             status: "pending",
             stripeCustomerId,
@@ -694,6 +717,9 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
                 variant,
                 quantity: String(quantity),
                 profileId: String(profile._id),
+                profileSlug,
+                publicProfileUrl: publicProfileUrl || "",
+                nfcProfileUrl: nfcProfileUrl || "",
                 logoUrl: logoUrl || "",
                 previewImageUrl: previewImageUrl || "",
                 returnUrl: returnBaseUrl,
@@ -706,7 +732,13 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         order.stripeCheckoutSessionId = session.id;
         await order.save();
 
-        return res.json({ url: session.url, orderId: String(order._id) });
+        return res.json({
+            url: session.url,
+            orderId: String(order._id),
+            profileSlug,
+            publicProfileUrl,
+            nfcProfileUrl,
+        });
     } catch (err) {
         console.error("nfc/session error:", err);
         return res.status(500).json({

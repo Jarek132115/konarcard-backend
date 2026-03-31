@@ -325,6 +325,11 @@ router.get("/summary", requireAuth, async (req, res) => {
                                 $cond: [{ $eq: ["$event_type", "link_open"] }, 1, 0],
                             },
                         },
+                        totalVisitEvents: {
+                            $sum: {
+                                $cond: [{ $in: ["$event_type", VIEW_EVENT_TYPES] }, 1, 0],
+                            },
+                        },
                         contactsSaved: {
                             $sum: {
                                 $cond: [{ $eq: ["$event_type", "contact_save"] }, 1, 0],
@@ -366,7 +371,7 @@ router.get("/summary", requireAuth, async (req, res) => {
                 {
                     $match: {
                         ...match,
-                        event_type: "profile_view",
+                        event_type: { $in: VIEW_EVENT_TYPES },
                     },
                 },
                 {
@@ -419,6 +424,16 @@ router.get("/summary", requireAuth, async (req, res) => {
                                 $cond: [{ $eq: ["$event_type", "nfc_tap"] }, 1, 0],
                             },
                         },
+                        linkOpens: {
+                            $sum: {
+                                $cond: [{ $eq: ["$event_type", "link_open"] }, 1, 0],
+                            },
+                        },
+                        totalVisitEvents: {
+                            $sum: {
+                                $cond: [{ $in: ["$event_type", VIEW_EVENT_TYPES] }, 1, 0],
+                            },
+                        },
                         contactsSaved: {
                             $sum: {
                                 $cond: [{ $eq: ["$event_type", "contact_save"] }, 1, 0],
@@ -435,6 +450,7 @@ router.get("/summary", requireAuth, async (req, res) => {
             qrScans: 0,
             cardTaps: 0,
             linkOpens: 0,
+            totalVisitEvents: 0,
             contactsSaved: 0,
             contactExchangeOpens: 0,
             contactExchangeSubmits: 0,
@@ -450,6 +466,8 @@ router.get("/summary", requireAuth, async (req, res) => {
                     profileViews: row.profileViews || 0,
                     qrScans: row.qrScans || 0,
                     cardTaps: row.cardTaps || 0,
+                    linkOpens: row.linkOpens || 0,
+                    totalVisitEvents: row.totalVisitEvents || 0,
                     contactsSaved: row.contactsSaved || 0,
                 },
             ])
@@ -463,6 +481,8 @@ router.get("/summary", requireAuth, async (req, res) => {
                 profileViews: 0,
                 qrScans: 0,
                 cardTaps: 0,
+                linkOpens: 0,
+                totalVisitEvents: 0,
                 contactsSaved: 0,
             };
 
@@ -475,6 +495,8 @@ router.get("/summary", requireAuth, async (req, res) => {
                 profileViews: row.profileViews,
                 qrScans: row.qrScans,
                 cardTaps: row.cardTaps,
+                linkOpens: row.linkOpens,
+                totalVisitEvents: row.totalVisitEvents,
                 contactsSaved: row.contactsSaved,
             });
         }
@@ -513,9 +535,10 @@ router.get("/summary", requireAuth, async (req, res) => {
             (metrics.emailClicks || 0) +
             (metrics.phoneClicks || 0);
 
+        const conversionBase = metrics.totalVisitEvents || 0;
         const conversionRate =
-            (metrics.profileViews || 0) > 0
-                ? Number(((totalConversions / metrics.profileViews) * 100).toFixed(1))
+            conversionBase > 0
+                ? Number(((totalConversions / conversionBase) * 100).toFixed(1))
                 : 0;
 
         return res.json({

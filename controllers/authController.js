@@ -9,13 +9,18 @@ const { verificationEmailTemplate, passwordResetTemplate } = require("../utils/e
 const crypto = require("crypto");
 const uploadToS3 = require("../utils/uploadToS3");
 
-const FRONTEND_PROFILE_DOMAIN = process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
+const FRONTEND_PROFILE_DOMAIN =
+    process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
 const signToken = (user) => {
-    return jwt.sign({ email: user.email, id: user._id, name: user.name }, process.env.JWT_SECRET, {
-        expiresIn: "30d",
-    });
+    return jwt.sign(
+        { email: user.email, id: user._id, name: user.name },
+        process.env.JWT_SECRET,
+        {
+            expiresIn: "30d",
+        }
+    );
 };
 
 const toSafeUser = (userDoc) => {
@@ -51,12 +56,28 @@ const buildPublicProfileUrl = (profileSlug) => {
     return `${FRONTEND_PROFILE_DOMAIN}/u/${s}`;
 };
 
+const buildTrackedProfileUrl = (profileSlug, via = "") => {
+    const base = buildPublicProfileUrl(profileSlug);
+    const cleanVia = String(via || "").trim().toLowerCase();
+
+    if (!base) return "";
+    if (!cleanVia) return base;
+
+    const allowedVia = new Set(["qr", "nfc"]);
+    if (!allowedVia.has(cleanVia)) return base;
+
+    return `${base}?via=${encodeURIComponent(cleanVia)}`;
+};
+
 /**
  * Generate QR -> upload to S3 -> return URL
  * Each BusinessCard has its own QR, keyed by its profile_slug.
+ *
+ * IMPORTANT:
+ * QR codes must point to the tracked QR URL so analytics can record qr_scan.
  */
 const generateAndUploadProfileQr = async (userId, profileSlug) => {
-    const url = buildPublicProfileUrl(profileSlug);
+    const url = buildTrackedProfileUrl(profileSlug, "qr");
     if (!url) return "";
 
     const qrBuffer = await QRCode.toBuffer(url, {
@@ -93,10 +114,14 @@ const claimLink = async (req, res) => {
 
         const profileSlug = safeProfileSlug(raw);
         if (!profileSlug || profileSlug.length < 3) {
-            return res.status(400).json({ error: "Link name must be at least 3 characters" });
+            return res
+                .status(400)
+                .json({ error: "Link name must be at least 3 characters" });
         }
 
-        const takenCard = await BusinessCard.findOne({ profile_slug: profileSlug }).select("_id");
+        const takenCard = await BusinessCard.findOne({ profile_slug: profileSlug }).select(
+            "_id"
+        );
         const takenUser = await User.findOne({ username: profileSlug }).select("_id");
 
         if (takenCard || takenUser) {
@@ -136,7 +161,11 @@ const claimLink = async (req, res) => {
             });
         }
 
-        const target = await BusinessCard.findOne({ profile_slug: profileSlug, user: user._id });
+        const target = await BusinessCard.findOne({
+            profile_slug: profileSlug,
+            user: user._id,
+        });
+
         if (target) {
             const qrUrl = await generateAndUploadProfileQr(user._id, profileSlug);
             if (qrUrl) {
@@ -170,18 +199,26 @@ const registerUser = async (req, res) => {
 
         const desiredSlug = safeProfileSlug(username);
         if (!desiredSlug || desiredSlug.length < 3) {
-            return res.status(400).json({ error: "Username must be at least 3 characters." });
+            return res
+                .status(400)
+                .json({ error: "Username must be at least 3 characters." });
         }
 
         const existingEmail = await User.findOne({ email: cleanEmail });
         if (existingEmail) {
-            return res.json({ error: "This email is already registered. Please log in." });
+            return res.json({
+                error: "This email is already registered. Please log in.",
+            });
         }
 
-        const slugTaken = await BusinessCard.findOne({ profile_slug: desiredSlug }).select("_id");
+        const slugTaken = await BusinessCard.findOne({ profile_slug: desiredSlug }).select(
+            "_id"
+        );
         const userSlugTaken = await User.findOne({ username: desiredSlug }).select("_id");
         if (slugTaken || userSlugTaken) {
-            return res.status(400).json({ error: "Username already taken. Please choose another." });
+            return res
+                .status(400)
+                .json({ error: "Username already taken. Please choose another." });
         }
 
         const hashedPassword = await hashPassword(password);
@@ -232,12 +269,17 @@ const registerUser = async (req, res) => {
             console.error("[registerUser] verification email failed:", e?.message || e);
             return res.json({
                 success: true,
-                message: "Account created, but verification email failed. Please resend the code.",
+                message:
+                    "Account created, but verification email failed. Please resend the code.",
                 emailSent: false,
             });
         }
 
-        return res.json({ success: true, message: "Verification email sent", emailSent: true });
+        return res.json({
+            success: true,
+            message: "Verification email sent",
+            emailSent: true,
+        });
     } catch (err) {
         console.error("registerUser error:", err);
         return res.status(500).json({ error: "Registration failed. Try again." });
@@ -247,7 +289,9 @@ const registerUser = async (req, res) => {
 // VERIFY EMAIL
 const verifyEmailCode = async (req, res) => {
     try {
-        const email = String(req.body.email || "").trim().toLowerCase();
+        const email = String(req.body.email || "")
+            .trim()
+            .toLowerCase();
         const code = String(req.body.code || "").trim();
 
         const user = await User.findOne({ email });
@@ -258,7 +302,9 @@ const verifyEmailCode = async (req, res) => {
         const stored = String(user.verificationCode || "").trim();
         if (!stored) return res.json({ error: "No verification code found. Please resend." });
 
-        const expMs = user.verificationCodeExpires ? new Date(user.verificationCodeExpires).getTime() : 0;
+        const expMs = user.verificationCodeExpires
+            ? new Date(user.verificationCodeExpires).getTime()
+            : 0;
         if (expMs && expMs < Date.now()) return res.json({ error: "Code has expired" });
 
         if (stored !== code) {
@@ -288,7 +334,9 @@ const verifyEmailCode = async (req, res) => {
 // RESEND VERIFICATION CODE
 const resendVerificationCode = async (req, res) => {
     try {
-        const email = String(req.body.email || "").trim().toLowerCase();
+        const email = String(req.body.email || "")
+            .trim()
+            .toLowerCase();
         const user = await User.findOne({ email });
 
         if (!user) return res.json({ error: "User not found" });
@@ -327,7 +375,9 @@ const resendVerificationCode = async (req, res) => {
 // LOGIN
 const loginUser = async (req, res) => {
     try {
-        const email = String(req.body.email || "").trim().toLowerCase();
+        const email = String(req.body.email || "")
+            .trim()
+            .toLowerCase();
         const password = String(req.body.password || "");
 
         const user = await User.findOne({ email });
@@ -340,7 +390,9 @@ const loginUser = async (req, res) => {
             const now = Date.now();
 
             const stored = String(user.verificationCode || "").trim();
-            const expMs = user.verificationCodeExpires ? new Date(user.verificationCodeExpires).getTime() : 0;
+            const expMs = user.verificationCodeExpires
+                ? new Date(user.verificationCodeExpires).getTime()
+                : 0;
             const hasValidExisting = stored && expMs > now;
 
             let codeToSend = stored;
@@ -386,7 +438,9 @@ const loginUser = async (req, res) => {
 // FORGOT PASSWORD
 const forgotPassword = async (req, res) => {
     try {
-        const cleanEmail = String(req.body.email || "").trim().toLowerCase();
+        const cleanEmail = String(req.body.email || "")
+            .trim()
+            .toLowerCase();
 
         const user = await User.findOne({ email: cleanEmail });
         if (!user) return res.json({ error: "User not found" });
@@ -451,8 +505,6 @@ const getProfile = async (req, res) => {
     try {
         if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-        // Always fetch fresh user so plan / teamsProfilesQty / subscription fields
-        // are current immediately after Stripe webhook updates.
         const freshUser = await User.findById(req.user._id);
         if (!freshUser) return res.status(401).json({ error: "Unauthorized" });
 
@@ -523,7 +575,11 @@ const startTrial = async (req, res) => {
         const now = Date.now();
 
         if (user.trialExpires && new Date(user.trialExpires).getTime() > now) {
-            return res.json({ success: true, message: "Trial already active", trialExpires: user.trialExpires });
+            return res.json({
+                success: true,
+                message: "Trial already active",
+                trialExpires: user.trialExpires,
+            });
         }
 
         if (user.trialExpires && new Date(user.trialExpires).getTime() <= now) {
