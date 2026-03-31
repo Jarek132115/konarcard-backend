@@ -39,6 +39,7 @@ const ALLOWED_PLATFORMS = new Set([
 ]);
 
 const VIEW_EVENT_TYPES = ["profile_view", "qr_scan", "nfc_tap", "link_open"];
+const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
 
 function cleanString(v) {
     return String(v || "").trim();
@@ -116,7 +117,9 @@ function detectPlatformFromReferrer(referrer = "", fallback = "") {
 
 function pickTrackPayload(req) {
     const rawMeta =
-        req.body?.meta && typeof req.body.meta === "object" && !Array.isArray(req.body.meta)
+        req.body?.meta &&
+            typeof req.body.meta === "object" &&
+            !Array.isArray(req.body.meta)
             ? req.body.meta
             : {};
 
@@ -185,6 +188,49 @@ function getValidRangeDays(raw) {
     return 7;
 }
 
+function isViewEventType(eventType) {
+    return VIEW_EVENT_TYPES.includes(eventType);
+}
+
+function buildRecentDuplicateQuery({
+    businessCard,
+    eventType,
+    sourceType,
+    payload,
+    ip,
+    userAgent,
+    since,
+}) {
+    const base = {
+        owner_user: businessCard.user,
+        business_card: businessCard._id,
+        profile_slug: businessCard.profile_slug,
+        event_type: eventType,
+        source_type: sourceType,
+        createdAt: { $gte: since },
+    };
+
+    if (payload.session_id) {
+        return {
+            ...base,
+            session_id: payload.session_id,
+        };
+    }
+
+    if (payload.visitor_id) {
+        return {
+            ...base,
+            visitor_id: payload.visitor_id,
+        };
+    }
+
+    return {
+        ...base,
+        ip,
+        user_agent: userAgent,
+    };
+}
+
 /**
  * POST /api/analytics/track
  * Public endpoint
@@ -225,6 +271,31 @@ router.post("/track", async (req, res) => {
 
         const userAgent = cleanString(req.headers["user-agent"]).slice(0, 500);
         const ip = getClientIp(req);
+
+        if (isViewEventType(eventType)) {
+            const since = new Date(Date.now() - DEDUPE_WINDOW_MS);
+
+            const duplicateQuery = buildRecentDuplicateQuery({
+                businessCard,
+                eventType,
+                sourceType,
+                payload,
+                ip,
+                userAgent,
+                since,
+            });
+
+            const existingRecentEvent = await ProfileAnalyticsEvent.findOne(duplicateQuery)
+                .select("_id createdAt")
+                .lean();
+
+            if (existingRecentEvent?._id) {
+                return res.json({
+                    ok: true,
+                    deduped: true,
+                });
+            }
+        }
 
         await ProfileAnalyticsEvent.create({
             owner_user: businessCard.user,
@@ -325,11 +396,6 @@ router.get("/summary", requireAuth, async (req, res) => {
                                 $cond: [{ $eq: ["$event_type", "link_open"] }, 1, 0],
                             },
                         },
-                        totalVisitEvents: {
-                            $sum: {
-                                $cond: [{ $in: ["$event_type", VIEW_EVENT_TYPES] }, 1, 0],
-                            },
-                        },
                         contactsSaved: {
                             $sum: {
                                 $cond: [{ $eq: ["$event_type", "contact_save"] }, 1, 0],
@@ -371,7 +437,7 @@ router.get("/summary", requireAuth, async (req, res) => {
                 {
                     $match: {
                         ...match,
-                        event_type: { $in: VIEW_EVENT_TYPES },
+                        event_type: "profile_view",
                     },
                 },
                 {
@@ -424,16 +490,6 @@ router.get("/summary", requireAuth, async (req, res) => {
                                 $cond: [{ $eq: ["$event_type", "nfc_tap"] }, 1, 0],
                             },
                         },
-                        linkOpens: {
-                            $sum: {
-                                $cond: [{ $eq: ["$event_type", "link_open"] }, 1, 0],
-                            },
-                        },
-                        totalVisitEvents: {
-                            $sum: {
-                                $cond: [{ $in: ["$event_type", VIEW_EVENT_TYPES] }, 1, 0],
-                            },
-                        },
                         contactsSaved: {
                             $sum: {
                                 $cond: [{ $eq: ["$event_type", "contact_save"] }, 1, 0],
@@ -450,7 +506,6 @@ router.get("/summary", requireAuth, async (req, res) => {
             qrScans: 0,
             cardTaps: 0,
             linkOpens: 0,
-            totalVisitEvents: 0,
             contactsSaved: 0,
             contactExchangeOpens: 0,
             contactExchangeSubmits: 0,
@@ -466,8 +521,6 @@ router.get("/summary", requireAuth, async (req, res) => {
                     profileViews: row.profileViews || 0,
                     qrScans: row.qrScans || 0,
                     cardTaps: row.cardTaps || 0,
-                    linkOpens: row.linkOpens || 0,
-                    totalVisitEvents: row.totalVisitEvents || 0,
                     contactsSaved: row.contactsSaved || 0,
                 },
             ])
@@ -481,8 +534,6 @@ router.get("/summary", requireAuth, async (req, res) => {
                 profileViews: 0,
                 qrScans: 0,
                 cardTaps: 0,
-                linkOpens: 0,
-                totalVisitEvents: 0,
                 contactsSaved: 0,
             };
 
@@ -495,8 +546,6 @@ router.get("/summary", requireAuth, async (req, res) => {
                 profileViews: row.profileViews,
                 qrScans: row.qrScans,
                 cardTaps: row.cardTaps,
-                linkOpens: row.linkOpens,
-                totalVisitEvents: row.totalVisitEvents,
                 contactsSaved: row.contactsSaved,
             });
         }
@@ -535,10 +584,9 @@ router.get("/summary", requireAuth, async (req, res) => {
             (metrics.emailClicks || 0) +
             (metrics.phoneClicks || 0);
 
-        const conversionBase = metrics.totalVisitEvents || 0;
         const conversionRate =
-            conversionBase > 0
-                ? Number(((totalConversions / conversionBase) * 100).toFixed(1))
+            (metrics.profileViews || 0) > 0
+                ? Number(((totalConversions / metrics.profileViews) * 100).toFixed(1))
                 : 0;
 
         return res.json({
