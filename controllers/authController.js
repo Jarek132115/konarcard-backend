@@ -5,7 +5,10 @@ const BusinessCard = require("../models/BusinessCard");
 const jwt = require("jsonwebtoken");
 const QRCode = require("qrcode");
 const sendEmail = require("../utils/SendEmail");
-const { verificationEmailTemplate, passwordResetTemplate } = require("../utils/emailTemplates");
+const {
+    verificationEmailTemplate,
+    passwordResetTemplate,
+} = require("../utils/emailTemplates");
 const crypto = require("crypto");
 const uploadToS3 = require("../utils/uploadToS3");
 
@@ -63,7 +66,7 @@ const buildTrackedProfileUrl = (profileSlug, via = "") => {
     if (!base) return "";
     if (!cleanVia) return base;
 
-    const allowedVia = new Set(["qr", "nfc"]);
+    const allowedVia = new Set(["qr", "nfc", "link"]);
     if (!allowedVia.has(cleanVia)) return base;
 
     return `${base}?via=${encodeURIComponent(cleanVia)}`;
@@ -638,4 +641,6 @@ module.exports = {
     deleteAccount,
     startTrial,
     submitContactForm,
+    buildPublicProfileUrl,
+    buildTrackedProfileUrl,
 };
