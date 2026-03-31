@@ -1,4 +1,3 @@
-// backend/index.js
 const express = require("express");
 require("dotenv").config();
 
@@ -15,6 +14,7 @@ const contactRoutes = require("./routes/contactRoutes");
 const businessCardRoutes = require("./routes/businessCardRoutes");
 const authRoutes = require("./routes/authRoutes");
 const nfcOrdersRoutes = require("./routes/nfcOrders");
+const analyticsRoutes = require("./routes/analytics");
 
 // Stripe webhook handler (exports a FUNCTION, not a router)
 const stripeWebhookHandler = require("./routes/webHook");
@@ -107,6 +107,7 @@ app.use("/api/checkout", checkoutRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/business-card", businessCardRoutes);
 app.use("/api/nfc-orders", nfcOrdersRoutes);
+app.use("/api/analytics", analyticsRoutes);
 
 /* -------------------- Health -------------------- */
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
