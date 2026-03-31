@@ -1,11 +1,15 @@
-const passport = require('passport');
-const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const FacebookStrategy = require('passport-facebook').Strategy;
-const User = require('../models/user');
+const passport = require("passport");
+const GoogleStrategy = require("passport-google-oauth20").Strategy;
+const FacebookStrategy = require("passport-facebook").Strategy;
+const User = require("../models/user");
 
 module.exports = function configurePassport() {
     // ---------- GOOGLE ----------
-    if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_CALLBACK_URL) {
+    if (
+        process.env.GOOGLE_CLIENT_ID &&
+        process.env.GOOGLE_CLIENT_SECRET &&
+        process.env.GOOGLE_CALLBACK_URL
+    ) {
         passport.use(
             new GoogleStrategy(
                 {
@@ -16,11 +20,13 @@ module.exports = function configurePassport() {
                 async (accessToken, refreshToken, profile, done) => {
                     try {
                         const email = profile?.emails?.[0]?.value?.toLowerCase() || null;
-                        const name = profile?.displayName || '';
+                        const name = profile?.displayName || "";
                         const googleId = profile?.id || null;
 
                         if (!email || !googleId) {
-                            return done(null, false, { message: 'Google account missing email or id.' });
+                            return done(null, false, {
+                                message: "Google account missing email or id.",
+                            });
                         }
 
                         let user = await User.findOne({ googleId });
@@ -33,13 +39,26 @@ module.exports = function configurePassport() {
                                 password: undefined,
                                 isVerified: true,
                                 googleId,
-                                authProvider: 'google',
+                                authProvider: "google",
                             });
                         } else {
                             let changed = false;
-                            if (!user.googleId) { user.googleId = googleId; changed = true; }
-                            if (!user.isVerified) { user.isVerified = true; changed = true; }
-                            if (!user.authProvider || user.authProvider === 'local') { user.authProvider = 'google'; changed = true; }
+
+                            if (!user.googleId) {
+                                user.googleId = googleId;
+                                changed = true;
+                            }
+
+                            if (!user.isVerified) {
+                                user.isVerified = true;
+                                changed = true;
+                            }
+
+                            if (!user.authProvider || user.authProvider === "local") {
+                                user.authProvider = "google";
+                                changed = true;
+                            }
+
                             if (changed) await user.save();
                         }
 
@@ -51,31 +70,39 @@ module.exports = function configurePassport() {
             )
         );
     } else {
-        console.warn('⚠️ Google OAuth env vars missing. Google login will not work.');
+        console.warn("⚠️ Google OAuth env vars missing. Google login will not work.");
     }
 
     // ---------- FACEBOOK ----------
-    if (process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET && process.env.FACEBOOK_CALLBACK_URL) {
+    if (
+        process.env.FACEBOOK_APP_ID &&
+        process.env.FACEBOOK_APP_SECRET &&
+        process.env.FACEBOOK_CALLBACK_URL
+    ) {
         passport.use(
             new FacebookStrategy(
                 {
                     clientID: process.env.FACEBOOK_APP_ID,
                     clientSecret: process.env.FACEBOOK_APP_SECRET,
                     callbackURL: process.env.FACEBOOK_CALLBACK_URL,
-                    profileFields: ['id', 'displayName', 'emails'], // ✅ request email
+                    profileFields: ["id", "displayName", "emails"],
                 },
                 async (accessToken, refreshToken, profile, done) => {
                     try {
                         const facebookId = profile?.id || null;
-                        const name = profile?.displayName || '';
+                        const name = profile?.displayName || "";
                         const email = profile?.emails?.[0]?.value?.toLowerCase() || null;
 
-                        // Facebook may not return email if it's not available/verified or permissions not granted.
                         if (!facebookId) {
-                            return done(null, false, { message: 'Facebook account missing id.' });
+                            return done(null, false, {
+                                message: "Facebook account missing id.",
+                            });
                         }
+
                         if (!email) {
-                            return done(null, false, { message: 'Facebook account did not provide an email address.' });
+                            return done(null, false, {
+                                message: "Facebook account did not provide an email address.",
+                            });
                         }
 
                         let user = await User.findOne({ facebookId });
@@ -88,14 +115,26 @@ module.exports = function configurePassport() {
                                 password: undefined,
                                 isVerified: true,
                                 facebookId,
-                                authProvider: 'facebook',
-                                // DO NOT set username/slug/profileUrl here (claim later)
+                                authProvider: "facebook",
                             });
                         } else {
                             let changed = false;
-                            if (!user.facebookId) { user.facebookId = facebookId; changed = true; }
-                            if (!user.isVerified) { user.isVerified = true; changed = true; }
-                            if (!user.authProvider || user.authProvider === 'local') { user.authProvider = 'facebook'; changed = true; }
+
+                            if (!user.facebookId) {
+                                user.facebookId = facebookId;
+                                changed = true;
+                            }
+
+                            if (!user.isVerified) {
+                                user.isVerified = true;
+                                changed = true;
+                            }
+
+                            if (!user.authProvider || user.authProvider === "local") {
+                                user.authProvider = "facebook";
+                                changed = true;
+                            }
+
                             if (changed) await user.save();
                         }
 
@@ -107,6 +146,6 @@ module.exports = function configurePassport() {
             )
         );
     } else {
-        console.warn('⚠️ Facebook OAuth env vars missing. Facebook login will not work.');
+        console.warn("⚠️ Facebook OAuth env vars missing. Facebook login will not work.");
     }
 };
