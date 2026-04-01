@@ -199,8 +199,12 @@ function formatDayKey(date) {
 
 function getValidRangeDays(raw) {
     const value = Number(raw);
+    if (value === 1) return 1;
+    if (value === 7) return 7;
     if (value === 30) return 30;
+    if (value === 60) return 60;
     if (value === 90) return 90;
+    if (value === 365) return 365;
     return 7;
 }
 
