@@ -38,7 +38,9 @@ const ALLOWED_PLATFORMS = new Set([
     "",
 ]);
 
-const VIEW_EVENT_TYPES = ["profile_view", "qr_scan", "nfc_tap", "link_open"];
+const VIEW_EVENT_TYPES = ["qr_scan", "nfc_tap", "link_open"];
+const CONVERSION_EVENT_TYPES = ["contact_save", "contact_exchange"];
+
 const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
 
 function cleanString(v) {
@@ -251,11 +253,13 @@ function buildTrafficSourcePipeline(match) {
         },
         {
             $project: {
-                source_type: 1,
-                event_type: 1,
                 canonical_source: {
                     $switch: {
                         branches: [
+                            {
+                                case: { $eq: ["$event_type", "link_open"] },
+                                then: "link",
+                            },
                             {
                                 case: { $eq: ["$event_type", "qr_scan"] },
                                 then: "qr",
@@ -264,33 +268,10 @@ function buildTrafficSourcePipeline(match) {
                                 case: { $eq: ["$event_type", "nfc_tap"] },
                                 then: "nfc",
                             },
-                            {
-                                case: { $eq: ["$event_type", "link_open"] },
-                                then: "link",
-                            },
-                            {
-                                case: {
-                                    $and: [
-                                        { $eq: ["$event_type", "profile_view"] },
-                                        {
-                                            $in: [
-                                                "$source_type",
-                                                ["direct", "unknown"],
-                                            ],
-                                        },
-                                    ],
-                                },
-                                then: "$source_type",
-                            },
                         ],
-                        default: null,
+                        default: "unknown",
                     },
                 },
-            },
-        },
-        {
-            $match: {
-                canonical_source: { $in: ["direct", "link", "qr", "nfc", "unknown"] },
             },
         },
         {
@@ -300,6 +281,175 @@ function buildTrafficSourcePipeline(match) {
             },
         },
         { $sort: { count: -1 } },
+    ];
+}
+
+function buildIdentityExpr() {
+    return {
+        $switch: {
+            branches: [
+                {
+                    case: {
+                        $gt: [{ $strLenCP: { $ifNull: ["$visit_id", ""] } }, 0],
+                    },
+                    then: { $concat: ["visit:", "$visit_id"] },
+                },
+                {
+                    case: {
+                        $gt: [{ $strLenCP: { $ifNull: ["$session_id", ""] } }, 0],
+                    },
+                    then: { $concat: ["session:", "$session_id"] },
+                },
+                {
+                    case: {
+                        $gt: [{ $strLenCP: { $ifNull: ["$visitor_id", ""] } }, 0],
+                    },
+                    then: { $concat: ["visitor:", "$visitor_id"] },
+                },
+                {
+                    case: {
+                        $or: [
+                            { $gt: [{ $strLenCP: { $ifNull: ["$ip", ""] } }, 0] },
+                            { $gt: [{ $strLenCP: { $ifNull: ["$user_agent", ""] } }, 0] },
+                        ],
+                    },
+                    then: {
+                        $concat: [
+                            "anon:",
+                            { $ifNull: ["$ip", ""] },
+                            "|",
+                            { $ifNull: ["$user_agent", ""] },
+                        ],
+                    },
+                },
+            ],
+            default: "unknown-visitor",
+        },
+    };
+}
+
+function buildUniqueCountPipeline(match, eventTypes) {
+    return [
+        {
+            $match: {
+                ...match,
+                event_type: { $in: eventTypes },
+            },
+        },
+        {
+            $project: {
+                identity_key: buildIdentityExpr(),
+            },
+        },
+        {
+            $group: {
+                _id: "$identity_key",
+            },
+        },
+        {
+            $count: "count",
+        },
+    ];
+}
+
+function buildDailyUniqueConversionPipeline(match) {
+    return [
+        {
+            $match: {
+                ...match,
+                event_type: { $in: CONVERSION_EVENT_TYPES },
+            },
+        },
+        {
+            $project: {
+                day: {
+                    $dateToString: {
+                        format: "%Y-%m-%d",
+                        date: "$createdAt",
+                    },
+                },
+                identity_key: buildIdentityExpr(),
+            },
+        },
+        {
+            $group: {
+                _id: {
+                    day: "$day",
+                    identity_key: "$identity_key",
+                },
+            },
+        },
+        {
+            $group: {
+                _id: "$_id.day",
+                contactConversions: { $sum: 1 },
+            },
+        },
+        { $sort: { _id: 1 } },
+    ];
+}
+
+function buildTimelinePipeline(match) {
+    return [
+        { $match: match },
+        {
+            $group: {
+                _id: {
+                    day: {
+                        $dateToString: {
+                            format: "%Y-%m-%d",
+                            date: "$createdAt",
+                        },
+                    },
+                },
+                profileViews: {
+                    $sum: {
+                        $cond: [{ $in: ["$event_type", VIEW_EVENT_TYPES] }, 1, 0],
+                    },
+                },
+                linkOpens: {
+                    $sum: {
+                        $cond: [{ $eq: ["$event_type", "link_open"] }, 1, 0],
+                    },
+                },
+                qrScans: {
+                    $sum: {
+                        $cond: [{ $eq: ["$event_type", "qr_scan"] }, 1, 0],
+                    },
+                },
+                cardTaps: {
+                    $sum: {
+                        $cond: [{ $eq: ["$event_type", "nfc_tap"] }, 1, 0],
+                    },
+                },
+                contactsSaved: {
+                    $sum: {
+                        $cond: [{ $eq: ["$event_type", "contact_save"] }, 1, 0],
+                    },
+                },
+                contactExchangeSubmits: {
+                    $sum: {
+                        $cond: [{ $eq: ["$event_type", "contact_exchange"] }, 1, 0],
+                    },
+                },
+                emailClicks: {
+                    $sum: {
+                        $cond: [{ $eq: ["$event_type", "email_clicked"] }, 1, 0],
+                    },
+                },
+                phoneClicks: {
+                    $sum: {
+                        $cond: [{ $eq: ["$event_type", "phone_clicked"] }, 1, 0],
+                    },
+                },
+                socialClicks: {
+                    $sum: {
+                        $cond: [{ $eq: ["$event_type", "social_clicked"] }, 1, 0],
+                    },
+                },
+            },
+        },
+        { $sort: { "_id.day": 1 } },
     ];
 }
 
@@ -443,7 +593,15 @@ router.get("/summary", requireAuth, async (req, res) => {
             match.profile_slug = ownedProfile.profile_slug;
         }
 
-        const [metricsRows, sourceRows, platformRows, timelineRows] = await Promise.all([
+        const [
+            metricsRows,
+            sourceRows,
+            platformRows,
+            timelineRows,
+            dailyUniqueConversionRows,
+            uniqueVisitorRows,
+            uniqueConverterRows,
+        ] = await Promise.all([
             ProfileAnalyticsEvent.aggregate([
                 { $match: match },
                 {
@@ -451,7 +609,7 @@ router.get("/summary", requireAuth, async (req, res) => {
                         _id: null,
                         profileViews: {
                             $sum: {
-                                $cond: [{ $eq: ["$event_type", "profile_view"] }, 1, 0],
+                                $cond: [{ $in: ["$event_type", VIEW_EVENT_TYPES] }, 1, 0],
                             },
                         },
                         qrScans: {
@@ -522,42 +680,14 @@ router.get("/summary", requireAuth, async (req, res) => {
                 },
                 { $sort: { count: -1 } },
             ]),
-            ProfileAnalyticsEvent.aggregate([
-                { $match: match },
-                {
-                    $group: {
-                        _id: {
-                            day: {
-                                $dateToString: {
-                                    format: "%Y-%m-%d",
-                                    date: "$createdAt",
-                                },
-                            },
-                        },
-                        profileViews: {
-                            $sum: {
-                                $cond: [{ $eq: ["$event_type", "profile_view"] }, 1, 0],
-                            },
-                        },
-                        qrScans: {
-                            $sum: {
-                                $cond: [{ $eq: ["$event_type", "qr_scan"] }, 1, 0],
-                            },
-                        },
-                        cardTaps: {
-                            $sum: {
-                                $cond: [{ $eq: ["$event_type", "nfc_tap"] }, 1, 0],
-                            },
-                        },
-                        contactsSaved: {
-                            $sum: {
-                                $cond: [{ $eq: ["$event_type", "contact_save"] }, 1, 0],
-                            },
-                        },
-                    },
-                },
-                { $sort: { "_id.day": 1 } },
-            ]),
+            ProfileAnalyticsEvent.aggregate(buildTimelinePipeline(match)),
+            ProfileAnalyticsEvent.aggregate(buildDailyUniqueConversionPipeline(match)),
+            ProfileAnalyticsEvent.aggregate(
+                buildUniqueCountPipeline(match, VIEW_EVENT_TYPES)
+            ),
+            ProfileAnalyticsEvent.aggregate(
+                buildUniqueCountPipeline(match, CONVERSION_EVENT_TYPES)
+            ),
         ]);
 
         const metrics = metricsRows[0] || {
@@ -573,14 +703,29 @@ router.get("/summary", requireAuth, async (req, res) => {
             socialClicks: 0,
         };
 
+        const uniqueVisitors = uniqueVisitorRows[0]?.count || 0;
+        const contactConversions = uniqueConverterRows[0]?.count || 0;
+
+        const dailyUniqueConversionMap = new Map(
+            dailyUniqueConversionRows.map((row) => [
+                row?._id,
+                row?.contactConversions || 0,
+            ])
+        );
+
         const timelineMap = new Map(
             timelineRows.map((row) => [
                 row?._id?.day,
                 {
                     profileViews: row.profileViews || 0,
+                    linkOpens: row.linkOpens || 0,
                     qrScans: row.qrScans || 0,
                     cardTaps: row.cardTaps || 0,
                     contactsSaved: row.contactsSaved || 0,
+                    contactExchangeSubmits: row.contactExchangeSubmits || 0,
+                    emailClicks: row.emailClicks || 0,
+                    phoneClicks: row.phoneClicks || 0,
+                    socialClicks: row.socialClicks || 0,
                 },
             ])
         );
@@ -591,9 +736,14 @@ router.get("/summary", requireAuth, async (req, res) => {
             const key = formatDayKey(day);
             const row = timelineMap.get(key) || {
                 profileViews: 0,
+                linkOpens: 0,
                 qrScans: 0,
                 cardTaps: 0,
                 contactsSaved: 0,
+                contactExchangeSubmits: 0,
+                emailClicks: 0,
+                phoneClicks: 0,
+                socialClicks: 0,
             };
 
             timeline.push({
@@ -603,13 +753,19 @@ router.get("/summary", requireAuth, async (req, res) => {
                     month: days > 30 ? "short" : undefined,
                 }),
                 profileViews: row.profileViews,
+                linkOpens: row.linkOpens,
                 qrScans: row.qrScans,
                 cardTaps: row.cardTaps,
                 contactsSaved: row.contactsSaved,
+                contactExchangeSubmits: row.contactExchangeSubmits,
+                emailClicks: row.emailClicks,
+                phoneClicks: row.phoneClicks,
+                socialClicks: row.socialClicks,
+                contactConversions: dailyUniqueConversionMap.get(key) || 0,
             });
         }
 
-        const trafficSources = ["direct", "link", "qr", "nfc", "unknown"].map((key) => {
+        const trafficSources = ["link", "qr", "nfc", "unknown"].map((key) => {
             const found = sourceRows.find((row) => row._id === key);
             return {
                 key,
@@ -637,15 +793,9 @@ router.get("/summary", requireAuth, async (req, res) => {
             }
         );
 
-        const totalConversions =
-            (metrics.contactsSaved || 0) +
-            (metrics.contactExchangeSubmits || 0) +
-            (metrics.emailClicks || 0) +
-            (metrics.phoneClicks || 0);
-
         const conversionRate =
-            (metrics.profileViews || 0) > 0
-                ? Number(((totalConversions / metrics.profileViews) * 100).toFixed(1))
+            uniqueVisitors > 0
+                ? Number(((contactConversions / uniqueVisitors) * 100).toFixed(1))
                 : 0;
 
         return res.json({
@@ -657,8 +807,19 @@ router.get("/summary", requireAuth, async (req, res) => {
                 endDate,
             },
             metrics: {
-                ...metrics,
-                totalConversions,
+                profileViews: metrics.profileViews || 0,
+                linkOpens: metrics.linkOpens || 0,
+                cardTaps: metrics.cardTaps || 0,
+                qrScans: metrics.qrScans || 0,
+                contactsSaved: metrics.contactsSaved || 0,
+                contactExchangeOpens: metrics.contactExchangeOpens || 0,
+                contactExchangeSubmits: metrics.contactExchangeSubmits || 0,
+                emailClicks: metrics.emailClicks || 0,
+                phoneClicks: metrics.phoneClicks || 0,
+                socialClicks: metrics.socialClicks || 0,
+                uniqueVisitors,
+                contactConversions,
+                totalConversions: contactConversions,
                 conversionRate,
             },
             trafficSources,
