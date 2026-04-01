@@ -196,6 +196,7 @@ function formatDayKey(date) {
     const day = `${d.getDate()}`.padStart(2, "0");
     return `${y}-${m}-${day}`;
 }
+
 function getValidRangeDays(raw) {
     const value = Number(raw);
 
@@ -474,7 +475,7 @@ function buildTimelinePipeline(match) {
     ];
 }
 
-function buildRecentActivityPipeline(match, limit = 8) {
+function buildRecentActivityPipeline(match, limit = 10) {
     return [
         {
             $match: {
@@ -796,7 +797,7 @@ router.get("/summary", requireAuth, async (req, res) => {
             ProfileAnalyticsEvent.aggregate(
                 buildUniqueCountPipeline(match, CONVERSION_EVENT_TYPES)
             ),
-            ProfileAnalyticsEvent.aggregate(buildRecentActivityPipeline(match, 8)),
+            ProfileAnalyticsEvent.aggregate(buildRecentActivityPipeline(match, 10)),
         ]);
 
         const metrics = metricsRows[0] || {
