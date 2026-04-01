@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 
 const profileAnalyticsEventSchema = new mongoose.Schema(
     {
-        // Who owns the profile (the dashboard user)
+        // Owner of the profile being viewed / interacted with
         owner_user: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "User",
@@ -10,7 +10,7 @@ const profileAnalyticsEventSchema = new mongoose.Schema(
             index: true,
         },
 
-        // Which profile (business card)
+        // Specific BusinessCard profile doc
         business_card: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "BusinessCard",
@@ -18,16 +18,16 @@ const profileAnalyticsEventSchema = new mongoose.Schema(
             index: true,
         },
 
-        // Public slug (faster queries, no join needed)
+        // Profile slug for easy querying
         profile_slug: {
             type: String,
             required: true,
-            index: true,
-            lowercase: true,
             trim: true,
+            lowercase: true,
+            index: true,
         },
 
-        // 👇 WHAT happened
+        // Main analytics event type
         event_type: {
             type: String,
             enum: [
@@ -35,60 +35,196 @@ const profileAnalyticsEventSchema = new mongoose.Schema(
                 "qr_scan",
                 "nfc_tap",
                 "link_open",
-
-                "contact_save",           // Save My Number
-                "contact_exchange",       // Form submitted
+                "contact_save",
+                "contact_exchange",
                 "contact_exchange_opened",
-
                 "email_clicked",
                 "phone_clicked",
                 "social_clicked",
             ],
             required: true,
+            trim: true,
+            lowercase: true,
             index: true,
         },
 
-        // 👇 WHERE it came from
-        source: {
+        // High-level source bucket
+        // qr | nfc | direct | link | unknown
+        source_type: {
             type: String,
-            enum: [
-                "qr",
-                "nfc",
-                "direct",
-                "link",
-                "unknown",
-            ],
+            enum: ["qr", "nfc", "direct", "link", "unknown"],
             default: "unknown",
+            trim: true,
+            lowercase: true,
             index: true,
         },
 
-        // 👇 PLATFORM (for socials)
-        platform: {
+        // More specific platform/source
+        // facebook | instagram | linkedin | google | tiktok | x | other | unknown
+        source_platform: {
             type: String,
-            default: "", // facebook / instagram / etc
+            default: "unknown",
+            trim: true,
+            lowercase: true,
             index: true,
         },
 
-        // 👇 Extra metadata (flexible)
-        meta: {
-            type: mongoose.Schema.Types.Mixed,
-            default: {},
+        // Where user came from
+        referrer: {
+            type: String,
+            default: "",
+            trim: true,
+            maxlength: 1000,
         },
 
-        // Debug / tracking
-        ip: { type: String, maxlength: 64 },
-        user_agent: { type: String, maxlength: 300 },
+        // UTM tracking
+        utm_source: {
+            type: String,
+            default: "",
+            trim: true,
+            lowercase: true,
+            maxlength: 120,
+        },
+        utm_medium: {
+            type: String,
+            default: "",
+            trim: true,
+            lowercase: true,
+            maxlength: 120,
+        },
+        utm_campaign: {
+            type: String,
+            default: "",
+            trim: true,
+            lowercase: true,
+            maxlength: 160,
+        },
+        utm_term: {
+            type: String,
+            default: "",
+            trim: true,
+            maxlength: 160,
+        },
+        utm_content: {
+            type: String,
+            default: "",
+            trim: true,
+            maxlength: 160,
+        },
+
+        // Anonymous tracking ids from frontend
+        visitor_id: {
+            type: String,
+            default: "",
+            trim: true,
+            maxlength: 120,
+            index: true,
+        },
+
+        // Browser tab/session id
+        session_id: {
+            type: String,
+            default: "",
+            trim: true,
+            maxlength: 120,
+            index: true,
+        },
+
+        // One actual visit/open id
+        // refresh should reuse this, new tap/scan/open should create a new one
+        visit_id: {
+            type: String,
+            default: "",
+            trim: true,
+            maxlength: 120,
+            index: true,
+        },
+
+        // Optional click target info
+        // e.g. phone, email, instagram
+        action_target: {
+            type: String,
+            default: "",
+            trim: true,
+            lowercase: true,
+            maxlength: 120,
+        },
+
+        // Optional URL clicked
+        target_url: {
+            type: String,
+            default: "",
+            trim: true,
+            maxlength: 1200,
+        },
+
+        // Device / browser metadata
+        user_agent: {
+            type: String,
+            default: "",
+            maxlength: 500,
+        },
+
+        ip: {
+            type: String,
+            default: "",
+            maxlength: 64,
+        },
     },
     { timestamps: true }
 );
 
-// Useful indexes for analytics queries
+// Helpful indexes for analytics queries
 profileAnalyticsEventSchema.index({ owner_user: 1, createdAt: -1 });
+profileAnalyticsEventSchema.index({ business_card: 1, createdAt: -1 });
 profileAnalyticsEventSchema.index({ profile_slug: 1, createdAt: -1 });
-profileAnalyticsEventSchema.index({ event_type: 1, createdAt: -1 });
-profileAnalyticsEventSchema.index({ source: 1 });
 
-module.exports = mongoose.model(
-    "ProfileAnalyticsEvent",
-    profileAnalyticsEventSchema
-);
+profileAnalyticsEventSchema.index({
+    owner_user: 1,
+    event_type: 1,
+    createdAt: -1,
+});
+
+profileAnalyticsEventSchema.index({
+    business_card: 1,
+    event_type: 1,
+    createdAt: -1,
+});
+
+profileAnalyticsEventSchema.index({
+    owner_user: 1,
+    source_type: 1,
+    createdAt: -1,
+});
+
+profileAnalyticsEventSchema.index({
+    owner_user: 1,
+    source_platform: 1,
+    createdAt: -1,
+});
+
+profileAnalyticsEventSchema.index({
+    business_card: 1,
+    event_type: 1,
+    source_type: 1,
+    visit_id: 1,
+    createdAt: -1,
+});
+
+profileAnalyticsEventSchema.index({
+    business_card: 1,
+    event_type: 1,
+    source_type: 1,
+    session_id: 1,
+    createdAt: -1,
+});
+
+profileAnalyticsEventSchema.index({
+    business_card: 1,
+    event_type: 1,
+    source_type: 1,
+    visitor_id: 1,
+    createdAt: -1,
+});
+
+module.exports = mongoose.model("ProfileAnalyticsEvent", profileAnalyticsEventSchema);

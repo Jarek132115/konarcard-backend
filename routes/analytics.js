@@ -123,12 +123,13 @@ function pickTrackPayload(req) {
             ? req.body.meta
             : {};
 
-    const pageUrl = cleanString(rawMeta.pageUrl).slice(0, 1200);
+    const pageUrl = cleanString(rawMeta.pageUrl || rawMeta.page_url).slice(0, 1200);
     const referrer = cleanString(rawMeta.referrer).slice(0, 1000);
-    const actionTarget = cleanLowerString(rawMeta.actionTarget).slice(0, 120);
-    const targetUrl = cleanString(rawMeta.targetUrl).slice(0, 1200);
+    const actionTarget = cleanLowerString(rawMeta.actionTarget || rawMeta.action_target).slice(0, 120);
+    const targetUrl = cleanString(rawMeta.targetUrl || rawMeta.target_url).slice(0, 1200);
     const visitorId = cleanString(rawMeta.visitorId || rawMeta.visitor_id).slice(0, 120);
     const sessionId = cleanString(rawMeta.sessionId || rawMeta.session_id).slice(0, 120);
+    const visitId = cleanString(rawMeta.visitId || rawMeta.visit_id).slice(0, 120);
 
     const parsedPageUrl = parseUrlSafe(pageUrl);
     const utm_source = cleanLowerString(
@@ -148,11 +149,13 @@ function pickTrackPayload(req) {
     ).slice(0, 160);
 
     return {
+        page_url: pageUrl,
         referrer,
         action_target: actionTarget,
         target_url: targetUrl,
         visitor_id: visitorId,
         session_id: sessionId,
+        visit_id: visitId,
         utm_source,
         utm_medium,
         utm_campaign,
@@ -210,6 +213,13 @@ function buildRecentDuplicateQuery({
         createdAt: { $gte: since },
     };
 
+    if (payload.visit_id) {
+        return {
+            ...base,
+            visit_id: payload.visit_id,
+        };
+    }
+
     if (payload.session_id) {
         return {
             ...base,
@@ -229,6 +239,68 @@ function buildRecentDuplicateQuery({
         ip,
         user_agent: userAgent,
     };
+}
+
+function buildTrafficSourcePipeline(match) {
+    return [
+        {
+            $match: {
+                ...match,
+                event_type: { $in: VIEW_EVENT_TYPES },
+            },
+        },
+        {
+            $project: {
+                source_type: 1,
+                event_type: 1,
+                canonical_source: {
+                    $switch: {
+                        branches: [
+                            {
+                                case: { $eq: ["$event_type", "qr_scan"] },
+                                then: "qr",
+                            },
+                            {
+                                case: { $eq: ["$event_type", "nfc_tap"] },
+                                then: "nfc",
+                            },
+                            {
+                                case: { $eq: ["$event_type", "link_open"] },
+                                then: "link",
+                            },
+                            {
+                                case: {
+                                    $and: [
+                                        { $eq: ["$event_type", "profile_view"] },
+                                        {
+                                            $in: [
+                                                "$source_type",
+                                                ["direct", "unknown"],
+                                            ],
+                                        },
+                                    ],
+                                },
+                                then: "$source_type",
+                            },
+                        ],
+                        default: null,
+                    },
+                },
+            },
+        },
+        {
+            $match: {
+                canonical_source: { $in: ["direct", "link", "qr", "nfc", "unknown"] },
+            },
+        },
+        {
+            $group: {
+                _id: "$canonical_source",
+                count: { $sum: 1 },
+            },
+        },
+        { $sort: { count: -1 } },
+    ];
 }
 
 /**
@@ -315,6 +387,7 @@ router.post("/track", async (req, res) => {
             utm_content: payload.utm_content,
             visitor_id: payload.visitor_id,
             session_id: payload.session_id,
+            visit_id: payload.visit_id,
             action_target: payload.action_target,
             target_url: payload.target_url,
             ip,
@@ -433,21 +506,7 @@ router.get("/summary", requireAuth, async (req, res) => {
                     },
                 },
             ]),
-            ProfileAnalyticsEvent.aggregate([
-                {
-                    $match: {
-                        ...match,
-                        event_type: "profile_view",
-                    },
-                },
-                {
-                    $group: {
-                        _id: "$source_type",
-                        count: { $sum: 1 },
-                    },
-                },
-                { $sort: { count: -1 } },
-            ]),
+            ProfileAnalyticsEvent.aggregate(buildTrafficSourcePipeline(match)),
             ProfileAnalyticsEvent.aggregate([
                 {
                     $match: {
