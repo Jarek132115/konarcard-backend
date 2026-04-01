@@ -196,15 +196,21 @@ function formatDayKey(date) {
     const day = `${d.getDate()}`.padStart(2, "0");
     return `${y}-${m}-${day}`;
 }
-
 function getValidRangeDays(raw) {
     const value = Number(raw);
+
     if (value === 1) return 1;
+    if (value === 2) return 2;
     if (value === 7) return 7;
+    if (value === 14) return 14;
     if (value === 30) return 30;
     if (value === 60) return 60;
     if (value === 90) return 90;
+    if (value === 120) return 120;
+    if (value === 180) return 180;
     if (value === 365) return 365;
+    if (value === 730) return 730;
+
     return 7;
 }
 
