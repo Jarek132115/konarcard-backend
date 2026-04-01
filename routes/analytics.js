@@ -40,6 +40,17 @@ const ALLOWED_PLATFORMS = new Set([
 
 const VIEW_EVENT_TYPES = ["qr_scan", "nfc_tap", "link_open"];
 const CONVERSION_EVENT_TYPES = ["contact_save", "contact_exchange"];
+const RECENT_ACTIVITY_EVENT_TYPES = [
+    "qr_scan",
+    "nfc_tap",
+    "link_open",
+    "contact_save",
+    "contact_exchange",
+    "contact_exchange_opened",
+    "email_clicked",
+    "phone_clicked",
+    "social_clicked",
+];
 
 const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
 
@@ -453,6 +464,92 @@ function buildTimelinePipeline(match) {
     ];
 }
 
+function buildRecentActivityPipeline(match, limit = 8) {
+    return [
+        {
+            $match: {
+                ...match,
+                event_type: { $in: RECENT_ACTIVITY_EVENT_TYPES },
+            },
+        },
+        { $sort: { createdAt: -1, _id: -1 } },
+        { $limit: limit },
+        {
+            $project: {
+                _id: 1,
+                event_type: 1,
+                source_type: 1,
+                source_platform: 1,
+                profile_slug: 1,
+                action_target: 1,
+                target_url: 1,
+                createdAt: 1,
+            },
+        },
+    ];
+}
+
+function getRecentActivityMessage(event) {
+    const eventType = cleanLowerString(event?.event_type);
+    const actionTarget = cleanLowerString(event?.action_target);
+    const sourcePlatform = cleanLowerString(event?.source_platform);
+
+    switch (eventType) {
+        case "qr_scan":
+            return "Someone scanned your QR code";
+        case "nfc_tap":
+            return "Someone tapped your NFC card";
+        case "link_open":
+            return "Someone clicked your link";
+        case "contact_save":
+            return "Someone saved your number";
+        case "contact_exchange":
+            return "Someone exchanged contacts with you";
+        case "contact_exchange_opened":
+            return "Someone opened your contact exchange form";
+        case "email_clicked":
+            return "Someone clicked your email";
+        case "phone_clicked":
+            return "Someone clicked your phone number";
+        case "social_clicked": {
+            const socialName =
+                actionTarget === "facebook_url" || sourcePlatform === "facebook"
+                    ? "Facebook"
+                    : actionTarget === "instagram_url" || sourcePlatform === "instagram"
+                        ? "Instagram"
+                        : actionTarget === "linkedin_url" || sourcePlatform === "linkedin"
+                            ? "LinkedIn"
+                            : actionTarget === "x_url" ||
+                                actionTarget === "twitter_url" ||
+                                sourcePlatform === "x"
+                                ? "X"
+                                : actionTarget === "tiktok_url" || sourcePlatform === "tiktok"
+                                    ? "TikTok"
+                                    : "social";
+
+            return socialName === "social"
+                ? "Someone clicked one of your social links"
+                : `Someone clicked your ${socialName} profile`;
+        }
+        default:
+            return "New activity on your profile";
+    }
+}
+
+function normalizeRecentActivity(rows) {
+    return rows.map((row) => ({
+        id: row?._id?.toString?.() || String(row?._id || ""),
+        event_type: row?.event_type || "",
+        source_type: row?.source_type || "unknown",
+        source_platform: row?.source_platform || "unknown",
+        profile_slug: row?.profile_slug || "",
+        action_target: row?.action_target || "",
+        target_url: row?.target_url || "",
+        createdAt: row?.createdAt || null,
+        message: getRecentActivityMessage(row),
+    }));
+}
+
 /**
  * POST /api/analytics/track
  * Public endpoint
@@ -601,6 +698,7 @@ router.get("/summary", requireAuth, async (req, res) => {
             dailyUniqueConversionRows,
             uniqueVisitorRows,
             uniqueConverterRows,
+            recentActivityRows,
         ] = await Promise.all([
             ProfileAnalyticsEvent.aggregate([
                 { $match: match },
@@ -688,6 +786,7 @@ router.get("/summary", requireAuth, async (req, res) => {
             ProfileAnalyticsEvent.aggregate(
                 buildUniqueCountPipeline(match, CONVERSION_EVENT_TYPES)
             ),
+            ProfileAnalyticsEvent.aggregate(buildRecentActivityPipeline(match, 8)),
         ]);
 
         const metrics = metricsRows[0] || {
@@ -779,24 +878,32 @@ router.get("/summary", requireAuth, async (req, res) => {
             };
         });
 
-        const socialBreakdown = ["facebook", "instagram", "linkedin", "x", "tiktok", "google", "other"].map(
-            (key) => {
-                const found = platformRows.find((row) => row._id === key);
-                return {
-                    key,
-                    label:
-                        key === "x"
-                            ? "X"
-                            : key.charAt(0).toUpperCase() + key.slice(1),
-                    value: found?.count || 0,
-                };
-            }
-        );
+        const socialBreakdown = [
+            "facebook",
+            "instagram",
+            "linkedin",
+            "x",
+            "tiktok",
+            "google",
+            "other",
+        ].map((key) => {
+            const found = platformRows.find((row) => row._id === key);
+            return {
+                key,
+                label:
+                    key === "x"
+                        ? "X"
+                        : key.charAt(0).toUpperCase() + key.slice(1),
+                value: found?.count || 0,
+            };
+        });
 
         const conversionRate =
             uniqueVisitors > 0
                 ? Number(((contactConversions / uniqueVisitors) * 100).toFixed(1))
                 : 0;
+
+        const recentActivity = normalizeRecentActivity(recentActivityRows || []);
 
         return res.json({
             ok: true,
@@ -825,6 +932,7 @@ router.get("/summary", requireAuth, async (req, res) => {
             trafficSources,
             socialBreakdown,
             timeline,
+            recentActivity,
         });
     } catch (err) {
         console.error("GET /api/analytics/summary error:", err);
