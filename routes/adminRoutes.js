@@ -18,6 +18,9 @@ const ADMIN_ORDER_STATUS_OPTIONS = [
     "delivered",
 ];
 
+const PUBLIC_PROFILE_DOMAIN =
+    process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
+
 function cleanString(v, max = 500) {
     return String(v || "").trim().slice(0, max);
 }
@@ -86,6 +89,15 @@ function bestUserName(user) {
         cleanString(user?.email, 120) ||
         "User"
     );
+}
+
+function buildPublicProfileUrl(slug) {
+    const safeSlug = cleanLower(slug, 120)
+        .replace(/[^a-z0-9-]/g, "")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "");
+
+    return safeSlug ? `${PUBLIC_PROFILE_DOMAIN}/u/${safeSlug}` : "";
 }
 
 function buildTrackingEmailHtml({ user, order, trackingUrl, deliveryWindow }) {
@@ -177,9 +189,48 @@ function extractOrderAddress(order) {
     return combined || "—";
 }
 
+function getOrderCustomization(order) {
+    const preview = order?.preview && typeof order.preview === "object" ? order.preview : {};
+    const customization =
+        preview?.customization && typeof preview.customization === "object"
+            ? preview.customization
+            : {};
+
+    return {
+        frontText: cleanString(customization.frontText, 120),
+        fontFamily: cleanString(customization.fontFamily, 120),
+        fontWeight:
+            typeof customization.fontWeight === "number"
+                ? customization.fontWeight
+                : Number(customization.fontWeight || 0) || 0,
+        fontSize:
+            typeof customization.fontSize === "number"
+                ? customization.fontSize
+                : Number(customization.fontSize || 0) || 0,
+        orientation: cleanString(customization.orientation, 40),
+        textColor: cleanString(customization.textColor, 40),
+    };
+}
+
 function serializeOrder(order) {
     const user = order?.user || null;
     const profile = order?.profile || null;
+    const preview = order?.preview && typeof order.preview === "object" ? order.preview : {};
+    const customization = getOrderCustomization(order);
+
+    const profileSlug =
+        cleanString(profile?.profile_slug, 120) ||
+        cleanString(preview?.profileSlug, 120);
+
+    const publicProfileUrl =
+        cleanString(preview?.publicProfileUrl, 1200) ||
+        buildPublicProfileUrl(profileSlug);
+
+    const qrCodeUrl =
+        cleanString(order?.qrCodeUrl, 1200) ||
+        cleanString(profile?.qr_code_url, 1200) ||
+        cleanString(preview?.qrCodeUrl, 1200) ||
+        "";
 
     return {
         _id: order?._id?.toString?.() || String(order?._id || ""),
@@ -193,6 +244,7 @@ function serializeOrder(order) {
         deliveryWindow: cleanString(order?.deliveryWindow, 160),
 
         amountTotal: typeof order?.amountTotal === "number" ? order.amountTotal : 0,
+        amountTotalFormatted: formatMoneyMinor(order?.amountTotal, order?.currency),
         currency: cleanLower(order?.currency, 12) || "gbp",
         quantity: Number(order?.quantity || 1),
 
@@ -201,7 +253,22 @@ function serializeOrder(order) {
 
         logoUrl: cleanString(order?.logoUrl, 1200),
         previewImageUrl: cleanString(order?.previewImageUrl, 1200),
-        preview: order?.preview || {},
+        qrCodeUrl,
+        publicProfileUrl,
+
+        preview: preview || {},
+        previewMeta: {
+            family: cleanString(preview?.family, 80),
+            edition: cleanString(preview?.edition, 80),
+            variant: cleanString(preview?.variant, 80),
+            profileSlug,
+            styleKey: cleanString(preview?.styleKey, 120),
+            frontTemplate: cleanString(preview?.frontTemplate, 120),
+            backTemplate: cleanString(preview?.backTemplate, 120),
+            usesPresetArtwork: !!preview?.usesPresetArtwork,
+        },
+
+        customization,
 
         customerName: extractOrderCustomerName(order),
         customerEmail: extractOrderCustomerEmail(order),
@@ -214,6 +281,7 @@ function serializeOrder(order) {
                 name: cleanString(user.name, 120),
                 email: safeEmail(user.email),
                 username: cleanString(user.username, 120),
+                role: cleanLower(user.role, 20) || "user",
                 plan: cleanLower(user.plan, 40) || "free",
                 subscriptionStatus: cleanLower(user.subscriptionStatus, 40) || "free",
                 teamsProfilesQty: Number(user.teamsProfilesQty || 1),
@@ -228,6 +296,7 @@ function serializeOrder(order) {
                 profile_slug: cleanString(profile.profile_slug, 120),
                 business_card_name: cleanString(profile.business_card_name, 120),
                 full_name: cleanString(profile.full_name, 120),
+                qr_code_url: cleanString(profile.qr_code_url, 1200),
             }
             : null,
 
@@ -252,7 +321,16 @@ router.get("/summary", async (req, res) => {
                     subscriptionStatus: { $in: ["active", "trialing"] },
                 }),
                 NfcOrder.countDocuments({
-                    status: { $in: ["paid", "processing", "fulfilled", "shipped", "complete", "completed"] },
+                    status: {
+                        $in: [
+                            "paid",
+                            "processing",
+                            "fulfilled",
+                            "shipped",
+                            "complete",
+                            "completed",
+                        ],
+                    },
                 }),
             ]);
 
@@ -277,7 +355,8 @@ router.get("/summary", async (req, res) => {
  */
 router.get("/users", async (req, res) => {
     try {
-        const q = buildSearchRegex(req.query?.q);
+        const qRaw = cleanString(req.query?.q, 120);
+        const q = buildSearchRegex(qRaw);
 
         const userQuery = q
             ? {
@@ -286,17 +365,21 @@ router.get("/users", async (req, res) => {
                     { name: q },
                     { username: q },
                     { slug: q },
-                    { _id: cleanString(req.query?.q, 80) },
                 ],
             }
             : {};
 
-        const users = await User.find(userQuery)
+        let users = await User.find(userQuery)
             .select(
                 "name email username slug role plan planInterval subscriptionStatus teamsProfilesQty extraProfilesQty isVerified createdAt profileUrl"
             )
             .sort({ createdAt: -1 })
             .lean();
+
+        if (qRaw && !q && qRaw.length >= 12) {
+            const directId = users.find((u) => String(u._id) === qRaw);
+            if (directId) users = [directId];
+        }
 
         const userIds = users.map((u) => u._id);
         const [profilesAgg, ordersAgg] = await Promise.all([
@@ -332,6 +415,7 @@ router.get("/users", async (req, res) => {
         const profilesMap = new Map(
             profilesAgg.map((x) => [String(x._id), { count: x.count || 0, slugs: x.slugs || [] }])
         );
+
         const ordersMap = new Map(
             ordersAgg.map((x) => [
                 String(x._id),
@@ -340,12 +424,12 @@ router.get("/users", async (req, res) => {
         );
 
         const data = users.map((u) => {
-            const pid = String(u._id);
-            const p = profilesMap.get(pid) || { count: 0, slugs: [] };
-            const o = ordersMap.get(pid) || { count: 0, paidCount: 0 };
+            const id = String(u._id);
+            const p = profilesMap.get(id) || { count: 0, slugs: [] };
+            const o = ordersMap.get(id) || { count: 0, paidCount: 0 };
 
             return {
-                _id: pid,
+                _id: id,
                 name: cleanString(u.name, 120),
                 email: safeEmail(u.email),
                 username: cleanString(u.username, 120),
@@ -395,11 +479,11 @@ router.get("/users/:id", async (req, res) => {
 
         const [profiles, orders] = await Promise.all([
             BusinessCard.find({ user: userId })
-                .select("profile_slug business_card_name full_name business_name trade_title createdAt")
+                .select("profile_slug business_card_name full_name business_name trade_title createdAt qr_code_url")
                 .sort({ createdAt: -1 })
                 .lean(),
             NfcOrder.find({ user: userId })
-                .populate("profile", "profile_slug business_card_name full_name")
+                .populate("profile", "profile_slug business_card_name full_name qr_code_url")
                 .sort({ createdAt: -1 })
                 .lean(),
         ]);
@@ -433,7 +517,8 @@ router.get("/users/:id", async (req, res) => {
                     full_name: cleanString(p.full_name, 120),
                     business_name: cleanString(p.business_name, 120),
                     trade_title: cleanString(p.trade_title, 120),
-                    publicUrl: p.profile_slug ? `https://www.konarcard.com/u/${p.profile_slug}` : "",
+                    qrCodeUrl: cleanString(p.qr_code_url, 1200),
+                    publicUrl: p.profile_slug ? buildPublicProfileUrl(p.profile_slug) : "",
                     createdAt: p.createdAt || null,
                 })),
                 orders: (orders || []).map(serializeOrder),
@@ -454,19 +539,20 @@ router.get("/orders", async (req, res) => {
         const fulfillmentStatus = cleanLower(req.query?.fulfillmentStatus, 60);
 
         const baseQuery = {};
-
         if (fulfillmentStatus) {
             baseQuery.fulfillmentStatus = normalizeFulfillmentStatus(fulfillmentStatus);
         }
 
         let orders = await NfcOrder.find(baseQuery)
-            .populate("user", "name email username plan subscriptionStatus teamsProfilesQty extraProfilesQty createdAt")
-            .populate("profile", "profile_slug business_card_name full_name")
+            .populate("user", "name email username role plan subscriptionStatus teamsProfilesQty extraProfilesQty createdAt")
+            .populate("profile", "profile_slug business_card_name full_name qr_code_url")
             .sort({ createdAt: -1 })
             .lean();
 
         if (q) {
             orders = orders.filter((o) => {
+                const customization = getOrderCustomization(o);
+
                 const haystack = [
                     o?._id?.toString?.(),
                     o?.user?._id?.toString?.(),
@@ -480,6 +566,7 @@ router.get("/orders", async (req, res) => {
                     o?.trackingUrl,
                     o?.deliveryName,
                     o?.customerEmail,
+                    customization.frontText,
                 ]
                     .map((x) => cleanString(x, 300))
                     .join(" ");
@@ -513,21 +600,23 @@ router.patch("/orders/:id/tracking", async (req, res) => {
         const deliveryWindow = cleanString(req.body?.deliveryWindow, 160);
         const notify = !!req.body?.notify;
 
+        const update = {
+            trackingUrl,
+            trackingCode,
+            deliveryWindow,
+        };
+
+        if (trackingUrl) {
+            update.fulfillmentStatus = "shipped";
+        }
+
         const order = await NfcOrder.findByIdAndUpdate(
             orderId,
-            {
-                $set: {
-                    trackingUrl,
-                    trackingCode,
-                    deliveryWindow,
-                    fulfillmentStatus: trackingUrl
-                        ? "shipped"
-                        : undefined,
-                },
-            },
+            { $set: update },
             { new: true }
         )
             .populate("user", "name email")
+            .populate("profile", "profile_slug business_card_name full_name qr_code_url")
             .lean();
 
         if (!order) {
@@ -583,6 +672,7 @@ router.patch("/orders/:id/status", async (req, res) => {
             { new: true }
         )
             .populate("user", "name email")
+            .populate("profile", "profile_slug business_card_name full_name qr_code_url")
             .lean();
 
         if (!order) {

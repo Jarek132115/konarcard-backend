@@ -1,77 +1,186 @@
-// backend/routes/nfcOrders.js
-const express = require("express");
-const router = express.Router();
+const mongoose = require("mongoose");
 
-const { requireAuth } = require("../helpers/auth");
-const NfcOrder = require("../models/NfcOrder");
+const { Schema } = mongoose;
 
-function normalizeOrderStatus(raw) {
-    const s = String(raw || "").trim().toLowerCase();
+const nfcOrderSchema = new Schema(
+    {
+        user: {
+            type: Schema.Types.ObjectId,
+            ref: "User",
+            required: true,
+            index: true,
+        },
 
-    if (["paid", "processing", "fulfilled", "shipped", "complete", "completed"].includes(s)) {
-        return "paid";
+        profile: {
+            type: Schema.Types.ObjectId,
+            ref: "BusinessCard",
+            required: true,
+            index: true,
+        },
+
+        // Product
+        productKey: {
+            type: String,
+            required: true,
+            trim: true,
+            index: true,
+        },
+
+        variant: {
+            type: String,
+            default: "",
+            trim: true,
+            index: true,
+        },
+
+        quantity: {
+            type: Number,
+            required: true,
+            min: 1,
+            max: 50,
+            default: 1,
+        },
+
+        // Assets / preview
+        logoUrl: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        previewImageUrl: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        qrCodeUrl: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        // Flexible order preview payload
+        preview: {
+            type: Schema.Types.Mixed,
+            default: {},
+        },
+
+        // Stripe / money
+        currency: {
+            type: String,
+            default: "gbp",
+            trim: true,
+            lowercase: true,
+        },
+
+        amountTotal: {
+            type: Number,
+            default: 0, // pennies
+        },
+
+        stripeCustomerId: {
+            type: String,
+            default: "",
+            trim: true,
+            index: true,
+        },
+
+        stripeCheckoutSessionId: {
+            type: String,
+            default: "",
+            trim: true,
+            index: true,
+        },
+
+        stripePaymentIntentId: {
+            type: String,
+            default: "",
+            trim: true,
+            index: true,
+        },
+
+        // Payment state
+        status: {
+            type: String,
+            enum: ["draft", "pending", "paid", "failed", "cancelled", "fulfilled"],
+            default: "pending",
+            index: true,
+        },
+
+        // Physical fulfilment state
+        fulfillmentStatus: {
+            type: String,
+            enum: [
+                "order_placed",
+                "designing_card",
+                "packaged",
+                "shipped",
+                "delivered",
+            ],
+            default: "order_placed",
+            index: true,
+        },
+
+        // Shipping / tracking
+        trackingUrl: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        trackingCode: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        deliveryWindow: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        // Customer snapshot at time of checkout
+        customerName: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        customerEmail: {
+            type: String,
+            default: "",
+            trim: true,
+            lowercase: true,
+        },
+
+        deliveryName: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        deliveryAddress: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        // Optional raw shipping payload if you later store structured address
+        shipping: {
+            type: Schema.Types.Mixed,
+            default: {},
+        },
+    },
+    {
+        timestamps: true,
     }
+);
 
-    if (["pending", "open", "unpaid"].includes(s)) {
-        return "pending";
-    }
+nfcOrderSchema.index({ user: 1, createdAt: -1 });
+nfcOrderSchema.index({ profile: 1, createdAt: -1 });
+nfcOrderSchema.index({ productKey: 1, variant: 1 });
+nfcOrderSchema.index({ status: 1, fulfillmentStatus: 1, createdAt: -1 });
 
-    if (["cancelled", "canceled", "expired"].includes(s)) {
-        return "cancelled";
-    }
-
-    if (["failed", "payment_failed"].includes(s)) {
-        return "failed";
-    }
-
-    return s || "pending";
-}
-
-function decorateOrder(order) {
-    const normalizedStatus = normalizeOrderStatus(order?.status);
-
-    return {
-        ...order,
-        normalizedStatus,
-        isPurchased: normalizedStatus === "paid",
-        isPending: normalizedStatus === "pending",
-        isCancelled: normalizedStatus === "cancelled",
-        isFailed: normalizedStatus === "failed",
-        isActive:
-            normalizedStatus === "paid" ||
-            normalizedStatus === "pending",
-    };
-}
-
-router.get("/mine", requireAuth, async (req, res) => {
-    try {
-        const userId = req.user?._id;
-        if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-        const rawOrders = await NfcOrder.find({ user: userId })
-            .populate("profile", "profile_slug business_card_name full_name main_heading")
-            .sort({ createdAt: -1 })
-            .lean();
-
-        const orders = (Array.isArray(rawOrders) ? rawOrders : []).map(decorateOrder);
-
-        const purchasedOrders = orders.filter((o) => o.isPurchased);
-        const pendingOrders = orders.filter((o) => o.isPending);
-        const cancelledOrders = orders.filter((o) => o.isCancelled || o.isFailed);
-        const activeOrders = orders.filter((o) => o.isActive);
-
-        return res.json({
-            ok: true,
-            orders,
-            purchasedOrders,
-            activeOrders,
-            pendingOrders,
-            cancelledOrders,
-        });
-    } catch (err) {
-        console.error("GET /nfc-orders/mine error:", err);
-        return res.status(500).json({ error: "Failed to load orders" });
-    }
-});
-
-module.exports = router;
+module.exports = mongoose.model("NfcOrder", nfcOrderSchema);
