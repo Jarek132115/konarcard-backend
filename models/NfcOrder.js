@@ -1,35 +1,36 @@
 const mongoose = require("mongoose");
 
-const nfcOrderSchema = new mongoose.Schema(
+const { Schema } = mongoose;
+
+const nfcOrderSchema = new Schema(
     {
         user: {
-            type: mongoose.Schema.Types.ObjectId,
+            type: Schema.Types.ObjectId,
             ref: "User",
             required: true,
             index: true,
         },
 
         profile: {
-            type: mongoose.Schema.Types.ObjectId,
+            type: Schema.Types.ObjectId,
             ref: "BusinessCard",
             required: true,
             index: true,
         },
 
-        // "plastic-white" | "plastic-black" | "metal-card" | "konartag"
+        // Product
         productKey: {
             type: String,
             required: true,
-            index: true,
             trim: true,
+            index: true,
         },
 
-        // "white" | "black" | "gold" etc
         variant: {
             type: String,
             default: "",
-            index: true,
             trim: true,
+            index: true,
         },
 
         quantity: {
@@ -40,26 +41,32 @@ const nfcOrderSchema = new mongoose.Schema(
             default: 1,
         },
 
-        // Uploaded logo (S3 url)
+        // Assets / preview
         logoUrl: {
             type: String,
             default: "",
             trim: true,
         },
 
-        // Final preview image (product + logo)
         previewImageUrl: {
             type: String,
             default: "",
             trim: true,
         },
 
-        // Flexible preview/customisation JSON
+        qrCodeUrl: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        // Flexible order preview payload
         preview: {
-            type: mongoose.Schema.Types.Mixed,
+            type: Schema.Types.Mixed,
             default: {},
         },
 
+        // Stripe / money
         currency: {
             type: String,
             default: "gbp",
@@ -67,34 +74,33 @@ const nfcOrderSchema = new mongoose.Schema(
             lowercase: true,
         },
 
-        // stored in pennies
         amountTotal: {
             type: Number,
-            default: 0,
+            default: 0, // pennies
         },
 
-        // Stripe linkage
         stripeCustomerId: {
             type: String,
             default: "",
             trim: true,
+            index: true,
         },
 
         stripeCheckoutSessionId: {
             type: String,
             default: "",
             trim: true,
+            index: true,
         },
 
         stripePaymentIntentId: {
             type: String,
             default: "",
             trim: true,
+            index: true,
         },
 
-        /**
-         * Payment / high-level order lifecycle
-         */
+        // Payment state
         status: {
             type: String,
             enum: ["draft", "pending", "paid", "failed", "cancelled", "fulfilled"],
@@ -102,9 +108,7 @@ const nfcOrderSchema = new mongoose.Schema(
             index: true,
         },
 
-        /**
-         * Internal fulfilment / shipping progress for admin control
-         */
+        // Physical fulfilment state
         fulfillmentStatus: {
             type: String,
             enum: [
@@ -118,9 +122,7 @@ const nfcOrderSchema = new mongoose.Schema(
             index: true,
         },
 
-        /**
-         * Shipping / delivery info
-         */
+        // Shipping / tracking
         trackingUrl: {
             type: String,
             default: "",
@@ -138,8 +140,48 @@ const nfcOrderSchema = new mongoose.Schema(
             default: "",
             trim: true,
         },
+
+        // Customer snapshot at time of checkout
+        customerName: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        customerEmail: {
+            type: String,
+            default: "",
+            trim: true,
+            lowercase: true,
+        },
+
+        deliveryName: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        deliveryAddress: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        // Optional raw structured shipping payload
+        shipping: {
+            type: Schema.Types.Mixed,
+            default: {},
+        },
     },
-    { timestamps: true }
+    {
+        timestamps: true,
+    }
 );
 
-module.exports = mongoose.model("NfcOrder", nfcOrderSchema);
+nfcOrderSchema.index({ user: 1, createdAt: -1 });
+nfcOrderSchema.index({ profile: 1, createdAt: -1 });
+nfcOrderSchema.index({ productKey: 1, variant: 1 });
+nfcOrderSchema.index({ status: 1, fulfillmentStatus: 1, createdAt: -1 });
+
+module.exports =
+    mongoose.models.NfcOrder || mongoose.model("NfcOrder", nfcOrderSchema);
