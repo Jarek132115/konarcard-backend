@@ -52,6 +52,14 @@ function isActiveStatus(status) {
   return status === "active" || status === "trialing";
 }
 
+function cleanString(v, max = 2000) {
+  return String(v || "").trim().slice(0, max);
+}
+
+function cleanLower(v, max = 240) {
+  return cleanString(v, max).toLowerCase();
+}
+
 function safeProfileSlug(v) {
   return String(v || "")
     .trim()
@@ -94,6 +102,43 @@ function buildPublicUrlBySlug(profileSlug) {
   const s = safeProfileSlug(profileSlug);
   if (!s) return "";
   return `${PUBLIC_PROFILE_DOMAIN}/u/${s}`;
+}
+
+function buildAddressString(address) {
+  if (!address || typeof address !== "object") return "";
+
+  return [
+    cleanString(address.line1, 120),
+    cleanString(address.line2, 120),
+    cleanString(address.city, 120),
+    cleanString(address.state, 120),
+    cleanString(address.postal_code, 60),
+    cleanString(address.country, 60),
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function normalizeShippingPayload(details) {
+  if (!details || typeof details !== "object") return {};
+
+  const address =
+    details.address && typeof details.address === "object"
+      ? {
+        line1: cleanString(details.address.line1, 120),
+        line2: cleanString(details.address.line2, 120),
+        city: cleanString(details.address.city, 120),
+        state: cleanString(details.address.state, 120),
+        postal_code: cleanString(details.address.postal_code, 60),
+        country: cleanString(details.address.country, 60),
+      }
+      : {};
+
+  return {
+    name: cleanString(details.name, 160),
+    phone: cleanString(details.phone, 60),
+    address,
+  };
 }
 
 /**
@@ -230,51 +275,85 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   }
 
   const amountTotal = Number(session.amount_total || 0);
-  const currency = String(session.currency || "gbp").toLowerCase();
+  const currency = cleanLower(session.currency || "gbp", 12) || "gbp";
   const paymentIntentId = session.payment_intent ? String(session.payment_intent) : "";
 
-  const productKey = session?.metadata?.productKey ? String(session.metadata.productKey) : "";
-  const variant = session?.metadata?.variant ? String(session.metadata.variant) : "";
-  const family = session?.metadata?.family ? String(session.metadata.family) : "";
-  const edition = session?.metadata?.edition ? String(session.metadata.edition) : "";
-  const logoUrl = session?.metadata?.logoUrl ? String(session.metadata.logoUrl) : "";
-  const previewImageUrl = session?.metadata?.previewImageUrl
-    ? String(session.metadata.previewImageUrl)
-    : "";
+  const productKey = cleanString(session?.metadata?.productKey, 120);
+  const variant = cleanString(session?.metadata?.variant, 120);
+  const family = cleanString(session?.metadata?.family, 120);
+  const edition = cleanString(session?.metadata?.edition, 120);
+  const logoUrl = cleanString(session?.metadata?.logoUrl, 1200);
+  const previewImageUrl = cleanString(session?.metadata?.previewImageUrl, 1200);
   const quantityMeta = session?.metadata?.quantity ? Number(session.metadata.quantity) : null;
-  const profileId = session?.metadata?.profileId ? String(session.metadata.profileId) : "";
-  const profileSlug = session?.metadata?.profileSlug ? String(session.metadata.profileSlug) : "";
-  const publicProfileUrl = session?.metadata?.publicProfileUrl
-    ? String(session.metadata.publicProfileUrl)
-    : "";
-  const nfcProfileUrl = session?.metadata?.nfcProfileUrl
-    ? String(session.metadata.nfcProfileUrl)
-    : "";
+  const profileId = cleanString(session?.metadata?.profileId, 120);
+  const profileSlug = cleanString(session?.metadata?.profileSlug, 120);
+  const publicProfileUrl = cleanString(session?.metadata?.publicProfileUrl, 1200);
+  const nfcProfileUrl = cleanString(session?.metadata?.nfcProfileUrl, 1200);
 
-  const frontText = session?.metadata?.frontText ? String(session.metadata.frontText) : "";
-  const fontFamily = session?.metadata?.fontFamily ? String(session.metadata.fontFamily) : "";
+  const frontText = cleanString(session?.metadata?.frontText, 240);
+  const fontFamily = cleanString(session?.metadata?.fontFamily, 120);
   const fontWeight = session?.metadata?.fontWeight ? Number(session.metadata.fontWeight) : null;
   const fontSize = session?.metadata?.fontSize ? Number(session.metadata.fontSize) : null;
-  const orientation = session?.metadata?.orientation ? String(session.metadata.orientation) : "";
-  const textColor = session?.metadata?.textColor ? String(session.metadata.textColor) : "";
+  const orientation = cleanString(session?.metadata?.orientation, 80);
+  const textColor = cleanString(session?.metadata?.textColor, 80);
 
-  const styleKey = session?.metadata?.styleKey ? String(session.metadata.styleKey) : "";
-  const frontTemplate = session?.metadata?.frontTemplate
-    ? String(session.metadata.frontTemplate)
-    : "";
-  const backTemplate = session?.metadata?.backTemplate
-    ? String(session.metadata.backTemplate)
-    : "";
+  const styleKey = cleanString(session?.metadata?.styleKey, 120);
+  const frontTemplate = cleanString(session?.metadata?.frontTemplate, 120);
+  const backTemplate = cleanString(session?.metadata?.backTemplate, 120);
   const usesPresetArtwork = session?.metadata?.usesPresetArtwork === "true";
 
-  const existing = await NfcOrder.findById(orderId).select("_id status preview");
+  const customerDetails =
+    session?.customer_details && typeof session.customer_details === "object"
+      ? session.customer_details
+      : {};
+
+  const shippingDetails =
+    session?.shipping_details && typeof session.shipping_details === "object"
+      ? session.shipping_details
+      : {};
+
+  const customerName = cleanString(
+    customerDetails.name || shippingDetails.name || "",
+    160
+  );
+  const customerEmail = cleanLower(customerDetails.email || "", 240);
+  const deliveryName = cleanString(
+    shippingDetails.name || customerDetails.name || "",
+    160
+  );
+
+  const shippingPayload = normalizeShippingPayload(shippingDetails);
+  const deliveryAddress = buildAddressString(shippingPayload.address);
+
+  const existing = await NfcOrder.findById(orderId).select("_id status preview profile qrCodeUrl");
   if (!existing) return null;
+
+  let qrCodeUrl = cleanString(existing?.qrCodeUrl, 1200);
+
+  if (!qrCodeUrl) {
+    const profileDoc =
+      profileId
+        ? await BusinessCard.findById(profileId).select("_id qr_code_url profile_slug").lean()
+        : existing.profile
+          ? await BusinessCard.findById(existing.profile).select("_id qr_code_url profile_slug").lean()
+          : null;
+
+    if (profileDoc) {
+      qrCodeUrl = cleanString(profileDoc.qr_code_url, 1200);
+    }
+  }
 
   if (existing.status === "fulfilled") {
     await NfcOrder.findByIdAndUpdate(orderId, {
       $set: {
         stripeCheckoutSessionId: String(session.id || ""),
         ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
+        ...(customerName ? { customerName } : {}),
+        ...(customerEmail ? { customerEmail } : {}),
+        ...(deliveryName ? { deliveryName } : {}),
+        ...(deliveryAddress ? { deliveryAddress } : {}),
+        ...(Object.keys(shippingPayload).length ? { shipping: shippingPayload } : {}),
+        ...(qrCodeUrl ? { qrCodeUrl } : {}),
       },
     });
     return null;
@@ -330,6 +409,12 @@ async function updateNfcOrderFromSession(session, statusOverride) {
         ...(productKey ? { productKey } : {}),
         ...(variant ? { variant } : {}),
         ...(profileId ? { profile: profileId } : {}),
+        ...(customerName ? { customerName } : {}),
+        ...(customerEmail ? { customerEmail } : {}),
+        ...(deliveryName ? { deliveryName } : {}),
+        ...(deliveryAddress ? { deliveryAddress } : {}),
+        ...(Object.keys(shippingPayload).length ? { shipping: shippingPayload } : {}),
+        ...(qrCodeUrl ? { qrCodeUrl } : {}),
         preview: mergedPreview,
         ...(safeQtyMeta ? { quantity: safeQtyMeta } : {}),
       },
@@ -428,36 +513,33 @@ module.exports = async function stripeWebhookHandler(req, res) {
       }
 
       if (session.mode === "payment") {
-        const updatedOrder = await updateNfcOrderFromSession(session);
+        await updateNfcOrderFromSession(session);
 
         try {
-          const customerEmail = session.customer_details?.email;
-          const productKey = session.metadata?.productKey
-            ? String(session.metadata.productKey)
-            : "";
-          const variant = session.metadata?.variant ? String(session.metadata.variant) : "";
+          const customerEmail = cleanLower(session.customer_details?.email || "", 240);
+          const customerName = cleanString(session.customer_details?.name || "", 160);
+
+          const productKey = cleanString(session.metadata?.productKey, 120);
+          const variant = cleanString(session.metadata?.variant, 120);
           const qtyMeta = session.metadata?.quantity
             ? Number(session.metadata.quantity)
             : null;
-          const frontText = session.metadata?.frontText
-            ? String(session.metadata.frontText)
-            : "";
+          const frontText = cleanString(session.metadata?.frontText, 240);
 
           const amountTotal = Number(session.amount_total || 0);
           const amountPaid = amountTotal ? (amountTotal / 100).toFixed(2) : null;
 
           const productLine =
             productKey || qtyMeta || frontText
-              ? `<p>Product: ${productKey || "nfc"}${variant ? ` • ${variant}` : ""}${qtyMeta ? ` • Qty: ${qtyMeta}` : ""
-              }${frontText ? ` • Text: ${frontText}` : ""}</p>`
+              ? `<p>Product: ${productKey || "nfc"}${variant ? ` • ${variant}` : ""}${qtyMeta ? ` • Qty: ${qtyMeta}` : ""}${frontText ? ` • Text: ${frontText}` : ""}</p>`
               : "";
 
           if (process.env.EMAIL_USER) {
             await sendEmail(
               process.env.EMAIL_USER,
-              amountPaid ? `New Konar Order - £${amountPaid}` : `New Konar Order`,
-              `<p>New order from: ${customerEmail || "Unknown email"}</p>${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
-              }`
+              amountPaid ? `New Konar Order - £${amountPaid}` : "New Konar Order",
+              `<p>New order from: ${customerName || customerEmail || "Unknown customer"}</p>${customerEmail ? `<p>Email: ${customerEmail}</p>` : ""
+              }${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""}`
             );
           }
 
