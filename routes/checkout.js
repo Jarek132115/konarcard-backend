@@ -801,6 +801,16 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             `&order=${encodeURIComponent(String(order._id))}` +
             `&product=${encodeURIComponent(productKey)}`;
 
+        console.log("NFC checkout debug:", {
+            productKey,
+            resolvedVariant,
+            priceId,
+            quantity,
+            profileId,
+            configFamily: config.family,
+            configEdition: config.edition,
+        });
+
         const session = await stripe.checkout.sessions.create({
             mode: "payment",
             customer: stripeCustomerId,
