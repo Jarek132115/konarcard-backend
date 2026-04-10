@@ -246,37 +246,92 @@ async function createClaimedProfileForUser({
 // -------------------------
 // NFC product price mapping
 // -------------------------
-const NFC_PRICE_MAP = {
-    "plastic-card": {
-        white: process.env.STRIPE_PRICE_PLASTIC_WHITE,
-        black: process.env.STRIPE_PRICE_PLASTIC_BLACK,
+function getEnvAny(...keys) {
+    for (const key of keys) {
+        if (process.env[key]) return process.env[key];
+    }
+    return "";
+}
+
+const NFC_PRODUCT_CONFIG = {
+    "plastic-white": {
+        family: "plastic",
+        edition: "plastic",
+        variant: "white",
+        priceId: getEnvAny("STRIPE_PRICE_PLASTIC_WHITE", "plastic-white"),
+    },
+    "plastic-black": {
+        family: "plastic",
+        edition: "plastic",
+        variant: "black",
+        priceId: getEnvAny("STRIPE_PRICE_PLASTIC_BLACK", "plastic-black"),
+    },
+    "plastic-blue": {
+        family: "plastic",
+        edition: "plastic",
+        variant: "blue",
+        priceId: getEnvAny("STRIPE_PRICE_PLASTIC_BLUE", "plastic-blue"),
+    },
+    "plastic-green": {
+        family: "plastic",
+        edition: "plastic",
+        variant: "green",
+        priceId: getEnvAny("STRIPE_PRICE_PLASTIC_GREEN", "plastic-green"),
+    },
+    "plastic-magenta": {
+        family: "plastic",
+        edition: "plastic",
+        variant: "magenta",
+        priceId: getEnvAny("STRIPE_PRICE_PLASTIC_MAGENTA", "plastic-magenta"),
+    },
+    "plastic-orange": {
+        family: "plastic",
+        edition: "plastic",
+        variant: "orange",
+        priceId: getEnvAny("STRIPE_PRICE_PLASTIC_ORANGE", "plastic-orange"),
     },
     "metal-card": {
-        black: process.env.STRIPE_PRICE_METAL_BLACK,
-        gold: process.env.STRIPE_PRICE_METAL_GOLD,
+        family: "metal",
+        edition: "metal",
+        variant: "gold",
+        optionPriceMap: {
+            black: getEnvAny("STRIPE_PRICE_METAL_BLACK", "metal-black"),
+            gold: getEnvAny("STRIPE_PRICE_METAL_GOLD", "metal-gold"),
+        },
     },
     konartag: {
-        black: process.env.STRIPE_PRICE_KONARTAG_BLACK,
-        gold: process.env.STRIPE_PRICE_KONARTAG_GOLD,
+        family: "tag",
+        edition: "tag",
+        variant: "black",
+        optionPriceMap: {
+            black: getEnvAny("STRIPE_PRICE_KONARTAG_BLACK", "konartag-black"),
+            gold: getEnvAny("STRIPE_PRICE_KONARTAG_GOLD", "konartag-gold"),
+        },
     },
 };
 
 function normalizeProductKey(v) {
     const s = String(v || "").trim().toLowerCase();
-    if (s === "plastic" || s === "plastic-card" || s === "konarcard-plastic") return "plastic-card";
+
+    if (s === "plastic" || s === "plastic-card" || s === "konarcard-plastic") return "plastic-white";
+    if (s === "plastic-white") return "plastic-white";
+    if (s === "plastic-black") return "plastic-black";
+    if (s === "plastic-blue") return "plastic-blue";
+    if (s === "plastic-green") return "plastic-green";
+    if (s === "plastic-magenta") return "plastic-magenta";
+    if (s === "plastic-orange") return "plastic-orange";
+
     if (s === "metal" || s === "metal-card" || s === "konarcard-metal") return "metal-card";
     if (s === "konartag" || s === "tag") return "konartag";
+
     return s;
 }
 
 function normalizeVariantForProduct(productKey, rawVariant) {
-    let variant = String(rawVariant || "").trim().toLowerCase();
+    const variant = String(rawVariant || "").trim().toLowerCase();
 
     if (!variant) {
-        if (productKey === "plastic-card") return "white";
-        if (productKey === "metal-card") return "black";
-        if (productKey === "konartag") return "black";
-        return "";
+        return NFC_PRODUCT_CONFIG?.[productKey]?.variant || "";
     }
 
     if (productKey === "konartag" && variant === "white") {
@@ -596,7 +651,18 @@ router.post("/nfc/preview", requireAuth, async (req, res) => {
 // ----------------------------------------------------
 // Create NFC checkout session (one-time payment)
 // POST /api/checkout/nfc/session
-// Body: { productKey, variant?, quantity, profileId, logoUrl?, previewImageUrl?, preview?, returnUrl? }
+// Body:
+// {
+//   productKey,
+//   variant?,
+//   quantity,
+//   profileId,
+//   logoUrl?,
+//   previewImageUrl?,
+//   preview?,
+//   customization?,
+//   returnUrl?
+// }
 // ----------------------------------------------------
 router.post("/nfc/session", requireAuth, async (req, res) => {
     try {
@@ -607,9 +673,9 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
         const productKey = normalizeProductKey(req.body?.productKey);
+        const config = NFC_PRODUCT_CONFIG[productKey];
 
-        const variantsMap = NFC_PRICE_MAP?.[productKey] || null;
-        if (!variantsMap) {
+        if (!config) {
             return res.status(400).json({
                 error: "Invalid product",
                 code: "INVALID_NFC_PRODUCT",
@@ -618,25 +684,33 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         }
 
         const variant = normalizeVariantForProduct(productKey, req.body?.variant);
+        let priceId = "";
+        let resolvedVariant = variant || config.variant || "";
 
-        const allowedVariants = Object.keys(variantsMap);
-        if (!allowedVariants.includes(variant)) {
-            return res.status(400).json({
-                error: "Invalid variant",
-                code: "INVALID_NFC_VARIANT",
-                productKey,
-                variant,
-                allowedVariants,
-            });
+        if (config.optionPriceMap) {
+            const allowedVariants = Object.keys(config.optionPriceMap);
+            if (!allowedVariants.includes(resolvedVariant)) {
+                return res.status(400).json({
+                    error: "Invalid variant",
+                    code: "INVALID_NFC_VARIANT",
+                    productKey,
+                    variant: resolvedVariant,
+                    allowedVariants,
+                });
+            }
+
+            priceId = config.optionPriceMap[resolvedVariant];
+        } else {
+            resolvedVariant = config.variant || resolvedVariant;
+            priceId = config.priceId;
         }
 
-        const priceId = variantsMap?.[variant];
         if (!priceId) {
             return res.status(500).json({
-                error: "Stripe price ID missing in env for this product/variant",
+                error: "Stripe price ID missing in env for this product",
                 code: "MISSING_NFC_PRICE_ID",
                 productKey,
-                variant,
+                variant: resolvedVariant,
             });
         }
 
@@ -661,26 +735,54 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
 
         const logoUrl = String(req.body?.logoUrl || "").trim();
         const previewImageUrl = String(req.body?.previewImageUrl || "").trim();
-        const preview = req.body?.preview && typeof req.body.preview === "object" ? req.body.preview : {};
-        const returnBaseUrl = buildFrontendReturnUrl(req.body?.returnUrl, "/cards");
 
+        const preview =
+            req.body?.preview && typeof req.body.preview === "object" ? req.body.preview : {};
+
+        const customization =
+            req.body?.customization && typeof req.body.customization === "object"
+                ? req.body.customization
+                : {};
+
+        const frontText = String(customization.frontText || "").trim();
+        const fontFamily = String(customization.fontFamily || "").trim();
+        const fontWeight = Number(customization.fontWeight || 0);
+        const fontSize = Number(customization.fontSize || 0);
+        const orientation = String(customization.orientation || "").trim();
+        const textColor = String(customization.textColor || "").trim();
+
+        const cleanCustomization = {
+            ...(frontText ? { frontText } : {}),
+            ...(fontFamily ? { fontFamily } : {}),
+            ...(Number.isFinite(fontWeight) && fontWeight > 0 ? { fontWeight } : {}),
+            ...(Number.isFinite(fontSize) && fontSize > 0 ? { fontSize } : {}),
+            ...(orientation ? { orientation } : {}),
+            ...(textColor ? { textColor } : {}),
+        };
+
+        const cleanPreview = {
+            ...(preview && typeof preview === "object" ? preview : {}),
+            variant: resolvedVariant,
+            family: config.family,
+            edition: config.edition,
+            profileSlug,
+            publicProfileUrl,
+            nfcProfileUrl,
+            ...(Object.keys(cleanCustomization).length ? { customization: cleanCustomization } : {}),
+        };
+
+        const returnBaseUrl = buildFrontendReturnUrl(req.body?.returnUrl, "/cards");
         const stripeCustomerId = await ensureStripeCustomer(user);
 
         const order = await NfcOrder.create({
             user: user._id,
             profile: profile._id,
             productKey,
-            variant,
+            variant: resolvedVariant,
             quantity,
             logoUrl,
             previewImageUrl,
-            preview: {
-                ...preview,
-                variant,
-                profileSlug,
-                publicProfileUrl,
-                nfcProfileUrl,
-            },
+            preview: cleanPreview,
             currency: "gbp",
             status: "pending",
             stripeCustomerId,
@@ -714,7 +816,9 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
                 userId: String(user._id),
                 orderId: String(order._id),
                 productKey,
-                variant,
+                variant: resolvedVariant,
+                family: config.family,
+                edition: config.edition,
                 quantity: String(quantity),
                 profileId: String(profile._id),
                 profileSlug,
@@ -723,6 +827,18 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
                 logoUrl: logoUrl || "",
                 previewImageUrl: previewImageUrl || "",
                 returnUrl: returnBaseUrl,
+
+                frontText: frontText || "",
+                fontFamily: fontFamily || "",
+                fontWeight: Number.isFinite(fontWeight) && fontWeight > 0 ? String(fontWeight) : "",
+                fontSize: Number.isFinite(fontSize) && fontSize > 0 ? String(fontSize) : "",
+                orientation: orientation || "",
+                textColor: textColor || "",
+
+                styleKey: String(preview?.styleKey || ""),
+                frontTemplate: String(preview?.frontTemplate || ""),
+                backTemplate: String(preview?.backTemplate || ""),
+                usesPresetArtwork: preview?.usesPresetArtwork ? "true" : "false",
             },
 
             success_url: successUrl,

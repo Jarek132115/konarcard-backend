@@ -215,10 +215,10 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
  */
 async function updateNfcOrderFromSession(session, statusOverride) {
   const checkoutType = session?.metadata?.checkoutType;
-  if (checkoutType !== "nfc_order") return;
+  if (checkoutType !== "nfc_order") return null;
 
   const orderId = session?.metadata?.orderId ? String(session.metadata.orderId) : "";
-  if (!orderId) return;
+  if (!orderId) return null;
 
   const paymentStatus = String(session.payment_status || "").toLowerCase();
 
@@ -235,11 +235,40 @@ async function updateNfcOrderFromSession(session, statusOverride) {
 
   const productKey = session?.metadata?.productKey ? String(session.metadata.productKey) : "";
   const variant = session?.metadata?.variant ? String(session.metadata.variant) : "";
+  const family = session?.metadata?.family ? String(session.metadata.family) : "";
+  const edition = session?.metadata?.edition ? String(session.metadata.edition) : "";
   const logoUrl = session?.metadata?.logoUrl ? String(session.metadata.logoUrl) : "";
+  const previewImageUrl = session?.metadata?.previewImageUrl
+    ? String(session.metadata.previewImageUrl)
+    : "";
   const quantityMeta = session?.metadata?.quantity ? Number(session.metadata.quantity) : null;
+  const profileId = session?.metadata?.profileId ? String(session.metadata.profileId) : "";
+  const profileSlug = session?.metadata?.profileSlug ? String(session.metadata.profileSlug) : "";
+  const publicProfileUrl = session?.metadata?.publicProfileUrl
+    ? String(session.metadata.publicProfileUrl)
+    : "";
+  const nfcProfileUrl = session?.metadata?.nfcProfileUrl
+    ? String(session.metadata.nfcProfileUrl)
+    : "";
+
+  const frontText = session?.metadata?.frontText ? String(session.metadata.frontText) : "";
+  const fontFamily = session?.metadata?.fontFamily ? String(session.metadata.fontFamily) : "";
+  const fontWeight = session?.metadata?.fontWeight ? Number(session.metadata.fontWeight) : null;
+  const fontSize = session?.metadata?.fontSize ? Number(session.metadata.fontSize) : null;
+  const orientation = session?.metadata?.orientation ? String(session.metadata.orientation) : "";
+  const textColor = session?.metadata?.textColor ? String(session.metadata.textColor) : "";
+
+  const styleKey = session?.metadata?.styleKey ? String(session.metadata.styleKey) : "";
+  const frontTemplate = session?.metadata?.frontTemplate
+    ? String(session.metadata.frontTemplate)
+    : "";
+  const backTemplate = session?.metadata?.backTemplate
+    ? String(session.metadata.backTemplate)
+    : "";
+  const usesPresetArtwork = session?.metadata?.usesPresetArtwork === "true";
 
   const existing = await NfcOrder.findById(orderId).select("_id status preview");
-  if (!existing) return;
+  if (!existing) return null;
 
   if (existing.status === "fulfilled") {
     await NfcOrder.findByIdAndUpdate(orderId, {
@@ -248,19 +277,46 @@ async function updateNfcOrderFromSession(session, statusOverride) {
         ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
       },
     });
-    return;
+    return null;
   }
 
   const prevPreview =
     existing.preview && typeof existing.preview === "object" ? existing.preview : {};
+  const prevCustomization =
+    prevPreview.customization && typeof prevPreview.customization === "object"
+      ? prevPreview.customization
+      : {};
+
+  const mergedCustomization = {
+    ...prevCustomization,
+    ...(frontText ? { frontText } : {}),
+    ...(fontFamily ? { fontFamily } : {}),
+    ...(Number.isFinite(fontWeight) && fontWeight > 0 ? { fontWeight } : {}),
+    ...(Number.isFinite(fontSize) && fontSize > 0 ? { fontSize } : {}),
+    ...(orientation ? { orientation } : {}),
+    ...(textColor ? { textColor } : {}),
+  };
+
   const mergedPreview = {
     ...prevPreview,
     ...(variant ? { variant } : {}),
+    ...(family ? { family } : {}),
+    ...(edition ? { edition } : {}),
+    ...(profileSlug ? { profileSlug } : {}),
+    ...(publicProfileUrl ? { publicProfileUrl } : {}),
+    ...(nfcProfileUrl ? { nfcProfileUrl } : {}),
+    ...(styleKey ? { styleKey } : {}),
+    ...(frontTemplate ? { frontTemplate } : {}),
+    ...(backTemplate ? { backTemplate } : {}),
+    ...(session?.metadata?.usesPresetArtwork ? { usesPresetArtwork } : {}),
+    ...(Object.keys(mergedCustomization).length
+      ? { customization: mergedCustomization }
+      : {}),
   };
 
   const safeQtyMeta = Number.isFinite(quantityMeta) ? quantityMeta : undefined;
 
-  await NfcOrder.findByIdAndUpdate(
+  const updated = await NfcOrder.findByIdAndUpdate(
     orderId,
     {
       $set: {
@@ -270,13 +326,18 @@ async function updateNfcOrderFromSession(session, statusOverride) {
         stripeCheckoutSessionId: String(session.id || ""),
         ...(paymentIntentId ? { stripePaymentIntentId: paymentIntentId } : {}),
         ...(logoUrl ? { logoUrl } : {}),
+        ...(previewImageUrl ? { previewImageUrl } : {}),
         ...(productKey ? { productKey } : {}),
+        ...(variant ? { variant } : {}),
+        ...(profileId ? { profile: profileId } : {}),
         preview: mergedPreview,
         ...(safeQtyMeta ? { quantity: safeQtyMeta } : {}),
       },
     },
     { new: true }
   );
+
+  return updated;
 }
 
 module.exports = async function stripeWebhookHandler(req, res) {
@@ -367,7 +428,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
       }
 
       if (session.mode === "payment") {
-        await updateNfcOrderFromSession(session);
+        const updatedOrder = await updateNfcOrderFromSession(session);
 
         try {
           const customerEmail = session.customer_details?.email;
@@ -378,20 +439,25 @@ module.exports = async function stripeWebhookHandler(req, res) {
           const qtyMeta = session.metadata?.quantity
             ? Number(session.metadata.quantity)
             : null;
+          const frontText = session.metadata?.frontText
+            ? String(session.metadata.frontText)
+            : "";
 
           const amountTotal = Number(session.amount_total || 0);
           const amountPaid = amountTotal ? (amountTotal / 100).toFixed(2) : null;
 
           const productLine =
-            productKey || qtyMeta
-              ? `<p>Product: ${productKey || "nfc"}${variant ? ` • ${variant}` : ""}${qtyMeta ? ` • Qty: ${qtyMeta}` : ""}</p>`
+            productKey || qtyMeta || frontText
+              ? `<p>Product: ${productKey || "nfc"}${variant ? ` • ${variant}` : ""}${qtyMeta ? ` • Qty: ${qtyMeta}` : ""
+              }${frontText ? ` • Text: ${frontText}` : ""}</p>`
               : "";
 
           if (process.env.EMAIL_USER) {
             await sendEmail(
               process.env.EMAIL_USER,
               amountPaid ? `New Konar Order - £${amountPaid}` : `New Konar Order`,
-              `<p>New order from: ${customerEmail || "Unknown email"}</p>${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""}`
+              `<p>New order from: ${customerEmail || "Unknown email"}</p>${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""
+              }`
             );
           }
 
@@ -405,6 +471,8 @@ module.exports = async function stripeWebhookHandler(req, res) {
         } catch (e) {
           console.warn("Email send failed (ignored):", e?.message || e);
         }
+
+        return res.status(200).send("OK");
       }
     }
 
