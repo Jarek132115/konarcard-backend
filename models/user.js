@@ -1,4 +1,3 @@
-// backend/models/user.js
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
@@ -15,6 +14,14 @@ const userSchema = new Schema(
             sparse: true,
             trim: true,
             lowercase: true,
+        },
+
+        role: {
+            type: String,
+            enum: ["user", "admin"],
+            default: "user",
+            lowercase: true,
+            trim: true,
         },
 
         // local auth

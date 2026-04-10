@@ -15,6 +15,7 @@ const businessCardRoutes = require("./routes/businessCardRoutes");
 const authRoutes = require("./routes/authRoutes");
 const nfcOrdersRoutes = require("./routes/nfcOrders");
 const analyticsRoutes = require("./routes/analytics");
+const adminRoutes = require("./routes/adminRoutes");
 
 // Stripe webhook handler (exports a FUNCTION, not a router)
 const stripeWebhookHandler = require("./routes/webHook");
@@ -108,6 +109,7 @@ app.use("/api/contact", contactRoutes);
 app.use("/api/business-card", businessCardRoutes);
 app.use("/api/nfc-orders", nfcOrdersRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/admin", adminRoutes);
 
 /* -------------------- Health -------------------- */
 app.get("/healthz", (req, res) => res.status(200).send("ok"));
