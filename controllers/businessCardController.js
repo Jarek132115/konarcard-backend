@@ -69,7 +69,29 @@ const getPlan = (userDoc) => {
   return "free";
 };
 
-const FREE_LIMIT = 6;
+const FREE_MAX_WORKS = 6;
+const FREE_MAX_SERVICES = 3;
+const FREE_MAX_REVIEWS = 3;
+
+const PAID_MAX_WORKS = 12;
+const PAID_MAX_SERVICES = 12;
+const PAID_MAX_REVIEWS = 12;
+
+const getContentLimitsForPlan = (plan) => {
+  if (plan === "plus" || plan === "teams") {
+    return {
+      maxWorks: PAID_MAX_WORKS,
+      maxServices: PAID_MAX_SERVICES,
+      maxReviews: PAID_MAX_REVIEWS,
+    };
+  }
+
+  return {
+    maxWorks: FREE_MAX_WORKS,
+    maxServices: FREE_MAX_SERVICES,
+    maxReviews: FREE_MAX_REVIEWS,
+  };
+};
 
 const upgradeRequired = (res, payload = {}) => {
   return res.status(403).json({
@@ -78,15 +100,16 @@ const upgradeRequired = (res, payload = {}) => {
   });
 };
 
-const clampFreeContent = ({ plan, works, services, reviews }) => {
-  if (plan !== "free") return { works, services, reviews };
+const clampPlanContent = ({ plan, works, services, reviews }) => {
+  const limits = getContentLimitsForPlan(plan);
 
   const safeArr = (a) => (Array.isArray(a) ? a : []).filter(Boolean);
 
   return {
-    works: safeArr(works).slice(0, FREE_LIMIT),
-    services: safeArr(services).slice(0, FREE_LIMIT),
-    reviews: safeArr(reviews).slice(0, FREE_LIMIT),
+    works: safeArr(works).slice(0, limits.maxWorks),
+    services: safeArr(services).slice(0, limits.maxServices),
+    reviews: safeArr(reviews).slice(0, limits.maxReviews),
+    limits,
   };
 };
 
@@ -140,11 +163,9 @@ const hasMeaningfulProfileContent = (cardLike = {}) => {
 
   const hasText = textFields.some((v) => norm(v).length > 0);
 
-  const hasImages = [
-    cardLike.cover_photo,
-    cardLike.logo,
-    cardLike.avatar,
-  ].some((v) => norm(v).length > 0);
+  const hasImages = [cardLike.cover_photo, cardLike.logo, cardLike.avatar].some(
+    (v) => norm(v).length > 0
+  );
 
   const hasWorks =
     Array.isArray(cardLike.works) && cardLike.works.some((v) => norm(v).length > 0);
@@ -280,9 +301,7 @@ const createMyProfile = async (req, res) => {
       });
     }
 
-    const slugTaken = await BusinessCard.findOne({ profile_slug: slug }).select(
-      "_id"
-    );
+    const slugTaken = await BusinessCard.findOne({ profile_slug: slug }).select("_id");
     if (slugTaken) {
       return res.status(409).json({ error: "Profile slug already exists" });
     }
@@ -379,6 +398,7 @@ const saveBusinessCard = async (req, res) => {
       "plan teamsProfilesQty extraProfilesQty username slug profileUrl qrCodeUrl"
     );
     const plan = getPlan(freshUser);
+    const limits = getContentLimitsForPlan(plan);
 
     const requestedSlug = safeSlug(req.body.profile_slug || "");
     if (!requestedSlug || requestedSlug.length < 3) {
@@ -428,16 +448,13 @@ const saveBusinessCard = async (req, res) => {
     let services = normalizeServices(req.body.services);
     let reviews = normalizeReviews(req.body.reviews);
 
-    const existingWorksFromRequest = cleanStringArray(
-      []
-        .concat(req.body.existing_works || [])
-        .flat()
-    );
+    const existingWorksFromRequest = cleanStringArray([]
+      .concat(req.body.existing_works || [])
+      .flat());
 
     const coverRemoved = String(req.body.cover_photo_removed || "0") === "1";
     const avatarRemoved = String(req.body.avatar_removed || "0") === "1";
-    const logoRemoved =
-      String(req.body.logo_removed || "0") === "1" || avatarRemoved;
+    const logoRemoved = String(req.body.logo_removed || "0") === "1" || avatarRemoved;
 
     let coverPhotoUrl = "";
     let avatarUrl = "";
@@ -464,17 +481,8 @@ const saveBusinessCard = async (req, res) => {
     const uploadedWorkUrls = [];
     const workFiles = req.files?.works || [];
 
-    const maxWorks = plan === "free" ? FREE_LIMIT : Infinity;
-
-    const remainingSlots = Math.max(
-      0,
-      maxWorks === Infinity
-        ? workFiles.length
-        : maxWorks - existingWorksFromRequest.length
-    );
-
-    const filesToUpload =
-      plan === "free" ? workFiles.slice(0, remainingSlots) : workFiles;
+    const remainingWorkSlots = Math.max(0, limits.maxWorks - existingWorksFromRequest.length);
+    const filesToUpload = workFiles.slice(0, remainingWorkSlots);
 
     for (const f of filesToUpload) {
       const key = `works/${userId}/${Date.now()}-${Math.random()
@@ -486,12 +494,16 @@ const saveBusinessCard = async (req, res) => {
 
     let works = [...existingWorksFromRequest, ...uploadedWorkUrls];
 
-    ({ works, services, reviews } = clampFreeContent({
+    const clamped = clampPlanContent({
       plan,
       works,
       services,
       reviews,
-    }));
+    });
+
+    works = clamped.works;
+    services = clamped.services;
+    reviews = clamped.reviews;
 
     const requestedTemplate =
       req.body.template_id || existingCard?.template_id || "template-1";
@@ -615,10 +627,7 @@ const saveBusinessCard = async (req, res) => {
         (willRenameSlug && safeSlug(saved.profile_slug) === requestedSlug);
 
       if (needsQr) {
-        const qrUrl = await generateAndUploadProfileQr(
-          userId,
-          saved.profile_slug
-        );
+        const qrUrl = await generateAndUploadProfileQr(userId, saved.profile_slug);
         if (qrUrl) {
           saved.qr_code_url = qrUrl;
           await saved.save();
@@ -643,11 +652,16 @@ const saveBusinessCard = async (req, res) => {
         theme_mode_saved: saved?.theme_mode || "",
         trade_title_saved: saved?.trade_title || "",
         works_count: Array.isArray(saved?.works) ? saved.works.length : 0,
+        services_count: Array.isArray(saved?.services) ? saved.services.length : 0,
+        reviews_count: Array.isArray(saved?.reviews) ? saved.reviews.length : 0,
       },
       normalized: {
         plan,
         template_id: effectiveTemplate,
-        limitsApplied: plan === "free",
+        limitsApplied: true,
+        maxWorks: limits.maxWorks,
+        maxServices: limits.maxServices,
+        maxReviews: limits.maxReviews,
         renamedSingleProfile: !!willRenameSlug,
       },
     });
