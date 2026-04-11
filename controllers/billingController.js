@@ -1,4 +1,3 @@
-// backend/controllers/billingController.js
 const Stripe = require("stripe");
 const User = require("../models/user");
 
@@ -32,6 +31,40 @@ const noStore = (res) => {
     res.set("Surrogate-Control", "no-store");
 };
 
+function cleanLower(v) {
+    return String(v || "").trim().toLowerCase();
+}
+
+function isPaidInvoice(inv) {
+    if (!inv || typeof inv !== "object") return false;
+
+    const status = cleanLower(inv.status);
+    const amountPaid = typeof inv.amount_paid === "number" ? inv.amount_paid : 0;
+    const total = typeof inv.total === "number" ? inv.total : 0;
+    const amountDue = typeof inv.amount_due === "number" ? inv.amount_due : null;
+    const paidFlag = inv.paid === true;
+
+    if (paidFlag) return true;
+    if (status === "paid") return true;
+
+    // Covers legitimate 100% discount / free completed invoices
+    if (
+        (status === "paid" || status === "open" || status === "draft") &&
+        total === 0 &&
+        amountPaid === 0 &&
+        amountDue === 0
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+function isSucceededPaymentIntent(pi) {
+    if (!pi || typeof pi !== "object") return false;
+    return cleanLower(pi.status) === "succeeded";
+}
+
 // ----------------------------------------------------
 // GET /api/billing/summary
 // ----------------------------------------------------
@@ -53,7 +86,6 @@ const getBillingSummary = async (req, res) => {
             googleId: user.googleId || null,
         };
 
-        // Stripe not configured
         if (!stripe) {
             return res.json({
                 ok: true,
@@ -69,7 +101,6 @@ const getBillingSummary = async (req, res) => {
             });
         }
 
-        // No customer => free
         if (!user.stripeCustomerId) {
             return res.json({
                 ok: true,
@@ -85,9 +116,6 @@ const getBillingSummary = async (req, res) => {
             });
         }
 
-        // ------------------------------
-        // 1) Try Stripe subscription
-        // ------------------------------
         let subscription = null;
 
         if (user.stripeSubscriptionId) {
@@ -117,15 +145,10 @@ const getBillingSummary = async (req, res) => {
 
         const subscriptionStatus = user.subscriptionStatus || subscription?.status || "free";
 
-        // Prefer DB -> then Stripe sub
         let currentPeriodEndISO =
             isoFromDateLike(user.currentPeriodEnd) ||
             isoFromUnixSeconds(subscription?.current_period_end);
 
-        // ------------------------------
-        // 2) Fallback: derive renew date from latest invoice line period end
-        // (This fixes cases where subscription fetch fails / returns no current_period_end)
-        // ------------------------------
         if (!currentPeriodEndISO) {
             try {
                 const inv = await stripe.invoices.list({
@@ -135,8 +158,6 @@ const getBillingSummary = async (req, res) => {
 
                 const latest = inv?.data?.[0];
                 const linePeriodEnd = latest?.lines?.data?.[0]?.period?.end;
-
-                // Stripe gives unix seconds
                 currentPeriodEndISO = isoFromUnixSeconds(linePeriodEnd);
             } catch {
                 // ignore
@@ -148,12 +169,10 @@ const getBillingSummary = async (req, res) => {
             stripeConfigured: true,
             customerExists: true,
             account,
-
             plan: user.plan || "free",
             planInterval: user.planInterval || null,
             subscriptionStatus,
             currentPeriodEnd: currentPeriodEndISO,
-
             stripeCustomerId: user.stripeCustomerId,
             stripeSubscriptionId: user.stripeSubscriptionId || subscription?.id || null,
         });
@@ -165,6 +184,7 @@ const getBillingSummary = async (req, res) => {
 
 // ----------------------------------------------------
 // GET /api/billing/invoices?limit=10
+// Only return completed / paid invoices
 // ----------------------------------------------------
 const listBillingInvoices = async (req, res) => {
     try {
@@ -175,27 +195,39 @@ const listBillingInvoices = async (req, res) => {
 
         const user = await User.findById(req.user._id).lean();
         if (!user) return res.status(401).json({ error: "Unauthorized" });
-        if (!user.stripeCustomerId) return res.json({ ok: true, stripeConfigured: true, invoices: [] });
+        if (!user.stripeCustomerId) {
+            return res.json({ ok: true, stripeConfigured: true, invoices: [] });
+        }
 
         const limit = Math.min(25, Math.max(1, Number(req.query.limit || 10)));
 
+        // Fetch more than limit so filtering still leaves enough good rows
         const invoices = await stripe.invoices.list({
             customer: user.stripeCustomerId,
-            limit,
+            limit: Math.min(100, Math.max(limit * 3, 25)),
         });
 
-        const cleaned = (invoices.data || []).map((inv) => ({
-            id: inv.id,
-            number: inv.number || null,
-            status: inv.status || null,
-            currency: inv.currency || null,
-            total: typeof inv.total === "number" ? inv.total : null,
-            amount_paid: typeof inv.amount_paid === "number" ? inv.amount_paid : null,
-            amount_due: typeof inv.amount_due === "number" ? inv.amount_due : null,
-            created: isoFromUnixSeconds(inv.created),
-            hosted_invoice_url: inv.hosted_invoice_url || null,
-            invoice_pdf: inv.invoice_pdf || null,
-        }));
+        const cleaned = (invoices.data || [])
+            .filter(isPaidInvoice)
+            .sort((a, b) => Number(b.created || 0) - Number(a.created || 0))
+            .slice(0, limit)
+            .map((inv) => ({
+                id: inv.id,
+                number: inv.number || null,
+                status:
+                    typeof inv.total === "number" &&
+                        inv.total === 0 &&
+                        (inv.paid === true || cleanLower(inv.status) === "paid")
+                        ? "paid"
+                        : inv.status || null,
+                currency: inv.currency || null,
+                total: typeof inv.total === "number" ? inv.total : null,
+                amount_paid: typeof inv.amount_paid === "number" ? inv.amount_paid : null,
+                amount_due: typeof inv.amount_due === "number" ? inv.amount_due : null,
+                created: isoFromUnixSeconds(inv.created),
+                hosted_invoice_url: inv.hosted_invoice_url || null,
+                invoice_pdf: inv.invoice_pdf || null,
+            }));
 
         return res.json({ ok: true, stripeConfigured: true, invoices: cleaned });
     } catch (err) {
@@ -206,6 +238,7 @@ const listBillingInvoices = async (req, res) => {
 
 // ----------------------------------------------------
 // GET /api/billing/payments?limit=10
+// Only return real successful payments
 // ----------------------------------------------------
 const listBillingPayments = async (req, res) => {
     try {
@@ -216,24 +249,31 @@ const listBillingPayments = async (req, res) => {
 
         const user = await User.findById(req.user._id).lean();
         if (!user) return res.status(401).json({ error: "Unauthorized" });
-        if (!user.stripeCustomerId) return res.json({ ok: true, stripeConfigured: true, payments: [] });
+        if (!user.stripeCustomerId) {
+            return res.json({ ok: true, stripeConfigured: true, payments: [] });
+        }
 
         const limit = Math.min(25, Math.max(1, Number(req.query.limit || 10)));
 
+        // Pull more rows so filtering still returns enough successful ones
         const payments = await stripe.paymentIntents.list({
             customer: user.stripeCustomerId,
-            limit,
+            limit: Math.min(100, Math.max(limit * 4, 30)),
         });
 
-        const cleaned = (payments.data || []).map((pi) => ({
-            id: pi.id,
-            status: pi.status || null,
-            currency: pi.currency || null,
-            amount: typeof pi.amount === "number" ? pi.amount : null,
-            created: isoFromUnixSeconds(pi.created),
-            description: pi.description || null,
-            receipt_email: pi.receipt_email || null,
-        }));
+        const cleaned = (payments.data || [])
+            .filter(isSucceededPaymentIntent)
+            .sort((a, b) => Number(b.created || 0) - Number(a.created || 0))
+            .slice(0, limit)
+            .map((pi) => ({
+                id: pi.id,
+                status: "succeeded",
+                currency: pi.currency || null,
+                amount: typeof pi.amount === "number" ? pi.amount : null,
+                created: isoFromUnixSeconds(pi.created),
+                description: pi.description || null,
+                receipt_email: pi.receipt_email || null,
+            }));
 
         return res.json({ ok: true, stripeConfigured: true, payments: cleaned });
     } catch (err) {
