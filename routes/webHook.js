@@ -84,37 +84,6 @@ function buildTrackedUrlBySlug(profileSlug, via = "") {
   return `${base}?via=${encodeURIComponent(cleanVia)}`;
 }
 
-async function updateUserByCustomer(customerId, { set = {}, unset = {} }) {
-  if (!customerId) return null;
-
-  const update = {};
-  if (Object.keys(set).length) update.$set = set;
-  if (Object.keys(unset).length) update.$unset = unset;
-  if (!Object.keys(update).length) return null;
-
-  return User.findOneAndUpdate({ stripeCustomerId: customerId }, update, {
-    new: true,
-  });
-}
-
-async function updateUserById(userId, { set = {}, unset = {} }) {
-  if (!userId) return null;
-
-  const update = {};
-  if (Object.keys(set).length) update.$set = set;
-  if (Object.keys(unset).length) update.$unset = unset;
-  if (!Object.keys(update).length) return null;
-
-  return User.findByIdAndUpdate(userId, update, { new: true });
-}
-
-async function findUserIdByCustomer(customerId) {
-  if (!customerId) return null;
-  const u = await User.findOne({ stripeCustomerId: customerId }).select("_id username");
-  if (!u) return null;
-  return { userId: String(u._id), username: u.username || "" };
-}
-
 function buildAddressString(address) {
   if (!address || typeof address !== "object") return "";
 
@@ -150,6 +119,80 @@ function normalizeShippingPayload(details) {
     phone: cleanString(details.phone, 60),
     address,
   };
+}
+
+function isWeekend(date) {
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
+function addWorkingDays(dateLike, daysToAdd) {
+  const d = new Date(dateLike);
+  d.setHours(12, 0, 0, 0);
+
+  let added = 0;
+  while (added < daysToAdd) {
+    d.setDate(d.getDate() + 1);
+    if (!isWeekend(d)) {
+      added += 1;
+    }
+  }
+
+  return d;
+}
+
+function formatEstimatedDeliveryDate(date) {
+  return date.toLocaleDateString("en-GB", {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+}
+
+function getInitialEstimatedDelivery(now = new Date()) {
+  const beforeCutoff = now.getHours() < 13;
+
+  const deliveryDate = beforeCutoff
+    ? addWorkingDays(now, 1)
+    : addWorkingDays(now, 2);
+
+  return {
+    label: formatEstimatedDeliveryDate(deliveryDate),
+    helper: beforeCutoff
+      ? "Same-day shipping when you order before 1pm."
+      : "Orders after 1pm ship next working day.",
+  };
+}
+
+async function updateUserByCustomer(customerId, { set = {}, unset = {} }) {
+  if (!customerId) return null;
+
+  const update = {};
+  if (Object.keys(set).length) update.$set = set;
+  if (Object.keys(unset).length) update.$unset = unset;
+  if (!Object.keys(update).length) return null;
+
+  return User.findOneAndUpdate({ stripeCustomerId: customerId }, update, {
+    new: true,
+  });
+}
+
+async function updateUserById(userId, { set = {}, unset = {} }) {
+  if (!userId) return null;
+
+  const update = {};
+  if (Object.keys(set).length) update.$set = set;
+  if (Object.keys(unset).length) update.$unset = unset;
+  if (!Object.keys(update).length) return null;
+
+  return User.findByIdAndUpdate(userId, update, { new: true });
+}
+
+async function findUserIdByCustomer(customerId) {
+  if (!customerId) return null;
+  const u = await User.findOne({ stripeCustomerId: customerId }).select("_id username");
+  if (!u) return null;
+  return { userId: String(u._id), username: u.username || "" };
 }
 
 /**
@@ -299,6 +342,7 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   const quantityMeta = session?.metadata?.quantity ? Number(session.metadata.quantity) : null;
   const profileId = cleanString(session?.metadata?.profileId, 120);
   const profileSlug = cleanString(session?.metadata?.profileSlug, 120);
+  const deliveryWindowMeta = cleanString(session?.metadata?.deliveryWindow, 160);
 
   let publicProfileUrl = cleanString(session?.metadata?.publicProfileUrl, 1200);
   let qrTargetUrl = cleanString(session?.metadata?.qrTargetUrl, 1200);
@@ -340,16 +384,14 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   const deliveryAddress = buildAddressString(shippingPayload.address);
 
   const existing = await NfcOrder.findById(orderId).select(
-    "_id status preview profile qrCodeUrl publicProfileUrl qrTargetUrl nfcTargetUrl"
+    "_id status preview profile qrCodeUrl publicProfileUrl qrTargetUrl nfcTargetUrl deliveryWindow"
   );
   if (!existing) return null;
 
   let qrCodeUrl = cleanString(existing?.qrCodeUrl, 1200);
 
   let resolvedProfileSlug = safeProfileSlug(
-    profileSlug ||
-    existing?.preview?.profileSlug ||
-    ""
+    profileSlug || existing?.preview?.profileSlug || ""
   );
 
   if (!resolvedProfileSlug && existing.profile) {
@@ -445,6 +487,7 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   };
 
   const safeQtyMeta = Number.isFinite(quantityMeta) ? quantityMeta : undefined;
+  const estimatedDelivery = getInitialEstimatedDelivery();
 
   const updated = await NfcOrder.findByIdAndUpdate(
     orderId,
@@ -469,6 +512,11 @@ async function updateNfcOrderFromSession(session, statusOverride) {
         ...(publicProfileUrl ? { publicProfileUrl } : {}),
         ...(qrTargetUrl ? { qrTargetUrl } : {}),
         ...(nfcTargetUrl ? { nfcTargetUrl } : {}),
+        ...(existing.deliveryWindow
+          ? {}
+          : {
+            deliveryWindow: deliveryWindowMeta || estimatedDelivery.label,
+          }),
         preview: mergedPreview,
         ...(safeQtyMeta ? { quantity: safeQtyMeta } : {}),
       },

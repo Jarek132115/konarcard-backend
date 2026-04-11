@@ -73,6 +73,49 @@ function buildFrontendReturnUrl(rawReturnUrl, fallbackPath = "/cards") {
     }
 }
 
+function isWeekend(date) {
+    const day = date.getDay();
+    return day === 0 || day === 6;
+}
+
+function addWorkingDays(dateLike, daysToAdd) {
+    const d = new Date(dateLike);
+    d.setHours(12, 0, 0, 0);
+
+    let added = 0;
+    while (added < daysToAdd) {
+        d.setDate(d.getDate() + 1);
+        if (!isWeekend(d)) {
+            added += 1;
+        }
+    }
+
+    return d;
+}
+
+function formatEstimatedDeliveryDate(date) {
+    return date.toLocaleDateString("en-GB", {
+        weekday: "short",
+        day: "numeric",
+        month: "short",
+    });
+}
+
+function getInitialEstimatedDelivery(now = new Date()) {
+    const beforeCutoff = now.getHours() < 13;
+
+    const deliveryDate = beforeCutoff
+        ? addWorkingDays(now, 1)
+        : addWorkingDays(now, 2);
+
+    return {
+        label: formatEstimatedDeliveryDate(deliveryDate),
+        helper: beforeCutoff
+            ? "Same-day shipping when you order before 1pm."
+            : "Orders after 1pm ship next working day.",
+    };
+}
+
 // -------------------------
 // Subscription helpers
 // -------------------------
@@ -722,7 +765,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         }
 
         const profile = await BusinessCard.findOne({ _id: profileId, user: user._id })
-            .select("_id profile_slug")
+            .select("_id profile_slug qr_code_url")
             .lean();
 
         if (!profile) {
@@ -733,6 +776,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
         const publicProfileUrl = buildPublicProfileUrl(profileSlug);
         const qrTargetUrl = buildTrackedProfileUrl(profileSlug, "qr");
         const nfcTargetUrl = buildTrackedProfileUrl(profileSlug, "nfc");
+        const qrCodeUrl = String(profile?.qr_code_url || "").trim();
 
         const logoUrl = String(req.body?.logoUrl || "").trim();
         const previewImageUrl = String(req.body?.previewImageUrl || "").trim();
@@ -775,6 +819,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
 
         const returnBaseUrl = buildFrontendReturnUrl(req.body?.returnUrl, "/cards");
         const stripeCustomerId = await ensureStripeCustomer(user);
+        const estimatedDelivery = getInitialEstimatedDelivery();
 
         const order = await NfcOrder.create({
             user: user._id,
@@ -784,7 +829,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             quantity,
             logoUrl,
             previewImageUrl,
-            qrCodeUrl: "",
+            qrCodeUrl,
             publicProfileUrl,
             qrTargetUrl,
             nfcTargetUrl,
@@ -792,6 +837,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             currency: "gbp",
             status: "pending",
             stripeCustomerId,
+            deliveryWindow: estimatedDelivery.label,
         });
 
         const successUrl =
@@ -818,6 +864,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             publicProfileUrl,
             qrTargetUrl,
             nfcTargetUrl,
+            deliveryWindow: estimatedDelivery.label,
         });
 
         const session = await stripe.checkout.sessions.create({
@@ -825,6 +872,11 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             customer: stripeCustomerId,
             payment_method_types: ["card"],
             allow_promotion_codes: true,
+
+            billing_address_collection: "required",
+            shipping_address_collection: {
+                allowed_countries: ["GB"],
+            },
 
             line_items: [{ price: priceId, quantity }],
 
@@ -847,6 +899,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
                 logoUrl: logoUrl || "",
                 previewImageUrl: previewImageUrl || "",
                 returnUrl: returnBaseUrl,
+                deliveryWindow: estimatedDelivery.label,
 
                 frontText: frontText || "",
                 fontFamily: fontFamily || "",
@@ -875,6 +928,7 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             publicProfileUrl,
             qrTargetUrl,
             nfcTargetUrl,
+            deliveryWindow: estimatedDelivery.label,
         });
     } catch (err) {
         console.error("nfc/session error:", err);
