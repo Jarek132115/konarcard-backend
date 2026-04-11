@@ -7,24 +7,28 @@ const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
-// -------------------------
-// Stripe price mapping
-// -------------------------
-const SUBSCRIPTION_PRICE_MAP = {
-    "plus-monthly": process.env.STRIPE_PRICE_PLUS_MONTHLY,
-    "plus-quarterly": process.env.STRIPE_PRICE_PLUS_QUARTERLY,
-    "plus-yearly": process.env.STRIPE_PRICE_PLUS_YEARLY,
+const STRIPE_PRICE_PLUS_MONTHLY = process.env.NEW_STRIPE_PRICE_PLUS_MONTHLY;
+const STRIPE_PRICE_PLUS_YEARLY = process.env.NEW_STRIPE_PRICE_PLUS_YEARLY;
+const STRIPE_PRICE_EXTRA_PROFILE_MONTHLY =
+    process.env.NEW_STRIPE_PRICE_EXTRA_PROFILE_MONTHLY;
 
-    "teams-monthly": process.env.STRIPE_PRICE_TEAMS_MONTHLY,
-    "teams-quarterly": process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
-    "teams-yearly": process.env.STRIPE_PRICE_TEAMS_YEARLY,
-};
+const ALLOWED_PLAN_KEYS = new Set([
+    "plus-monthly",
+    "plus-yearly",
+    "teams-monthly",
+]);
 
 const parsePlanKey = (planKey) => {
     const [plan, interval] = String(planKey || "").split("-");
     if (!["plus", "teams"].includes(plan)) return null;
-    if (!["monthly", "quarterly", "yearly"].includes(interval)) return null;
+    if (!["monthly", "yearly"].includes(interval)) return null;
     return { plan, interval };
+};
+
+const getPlusPriceIdForInterval = (interval) => {
+    if (interval === "monthly") return STRIPE_PRICE_PLUS_MONTHLY;
+    if (interval === "yearly") return STRIPE_PRICE_PLUS_YEARLY;
+    return null;
 };
 
 /**
@@ -47,6 +51,60 @@ const ensureStripeCustomer = async (userDoc) => {
     return customer.id;
 };
 
+/**
+ * Build Stripe line items for a selected plan.
+ *
+ * Pricing model:
+ * - Plus Monthly = £5
+ * - Plus Yearly = yearly price
+ * - Teams Monthly = Plus Monthly + £2 per extra profile
+ *
+ * Teams is NOT a standalone Stripe product bundle.
+ * Teams uses:
+ * - 1 x Plus Monthly
+ * - N x Extra Profile Monthly
+ */
+const buildSubscriptionLineItems = ({ plan, interval, profileCount }) => {
+    if (plan === "plus") {
+        const plusPriceId = getPlusPriceIdForInterval(interval);
+        if (!plusPriceId) {
+            throw new Error("Plus price is not configured for this interval");
+        }
+
+        return [{ price: plusPriceId, quantity: 1 }];
+    }
+
+    if (plan === "teams") {
+        if (interval !== "monthly") {
+            throw new Error("Teams is currently only available on monthly billing");
+        }
+
+        if (!STRIPE_PRICE_PLUS_MONTHLY) {
+            throw new Error("Plus monthly price is not configured on server");
+        }
+
+        if (!STRIPE_PRICE_EXTRA_PROFILE_MONTHLY) {
+            throw new Error("Extra profile monthly price is not configured on server");
+        }
+
+        const safeProfileCount = Math.max(1, Number(profileCount) || 1);
+        const extraProfiles = Math.max(0, safeProfileCount - 1);
+
+        const lineItems = [{ price: STRIPE_PRICE_PLUS_MONTHLY, quantity: 1 }];
+
+        if (extraProfiles > 0) {
+            lineItems.push({
+                price: STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
+                quantity: extraProfiles,
+            });
+        }
+
+        return lineItems;
+    }
+
+    throw new Error("Unsupported plan");
+};
+
 // ----------------------------------------------------
 // STRIPE: Create Subscription Checkout Session
 // (PROTECTED BY requireAuth)
@@ -55,12 +113,11 @@ const subscribeUser = async (req, res) => {
     try {
         if (!req.user) return res.status(401).json({ error: "Unauthorized" });
 
-        // ✅ always re-fetch fresh user doc (to save stripeCustomerId if needed)
         const user = await User.findById(req.user._id);
         if (!user) return res.status(401).json({ error: "Unauthorized" });
 
-        // ✅ must have at least 1 profile before checkout
         const profileCount = await BusinessCard.countDocuments({ user: user._id });
+
         if (profileCount <= 0) {
             return res.status(400).json({
                 error: "You must create a profile before subscribing.",
@@ -70,11 +127,14 @@ const subscribeUser = async (req, res) => {
 
         const { planKey, returnUrl } = req.body;
 
-        const parsed = parsePlanKey(planKey);
-        if (!parsed) return res.status(400).json({ error: "Invalid planKey" });
+        if (!ALLOWED_PLAN_KEYS.has(String(planKey || ""))) {
+            return res.status(400).json({ error: "Invalid planKey" });
+        }
 
-        const priceId = SUBSCRIPTION_PRICE_MAP[planKey];
-        if (!priceId) return res.status(500).json({ error: "Price not configured on server" });
+        const parsed = parsePlanKey(planKey);
+        if (!parsed) {
+            return res.status(400).json({ error: "Invalid planKey" });
+        }
 
         const baseReturn =
             typeof returnUrl === "string" && returnUrl.trim()
@@ -87,40 +147,50 @@ const subscribeUser = async (req, res) => {
 
         const cancelUrl = `${FRONTEND_URL}/pricing`;
 
-        // ✅ TEAMS quantity model:
-        // - priced per profile
-        const quantity = parsed.plan === "teams" ? Math.max(1, profileCount) : 1;
-
-        // ✅ ensure a Stripe customer so later we can UPDATE subscription quantities cleanly
         const stripeCustomerId = await ensureStripeCustomer(user);
+
+        let lineItems;
+        try {
+            lineItems = buildSubscriptionLineItems({
+                plan: parsed.plan,
+                interval: parsed.interval,
+                profileCount,
+            });
+        } catch (pricingError) {
+            console.error("buildSubscriptionLineItems error:", pricingError);
+            return res.status(500).json({
+                error: pricingError.message || "Subscription pricing is not configured correctly",
+            });
+        }
+
+        const extraProfiles = Math.max(0, Number(profileCount) - 1);
 
         const session = await stripe.checkout.sessions.create({
             mode: "subscription",
             customer: stripeCustomerId,
             payment_method_types: ["card"],
             allow_promotion_codes: true,
-
-            line_items: [{ price: priceId, quantity }],
-
+            line_items: lineItems,
             success_url: successUrl,
             cancel_url: cancelUrl,
-
             client_reference_id: String(user._id),
             metadata: {
                 userId: String(user._id),
                 plan: parsed.plan,
                 interval: parsed.interval,
                 planKey,
-                teamsQuantityAtCheckout: String(quantity),
+                profileCountAtCheckout: String(profileCount),
+                extraProfilesAtCheckout: String(extraProfiles),
                 checkoutType: "base_subscription",
             },
-
             subscription_data: {
                 metadata: {
                     userId: String(user._id),
                     plan: parsed.plan,
                     interval: parsed.interval,
                     planKey,
+                    profileCountAtCheckout: String(profileCount),
+                    extraProfilesAtCheckout: String(extraProfiles),
                     checkoutType: "base_subscription",
                 },
             },
@@ -152,10 +222,15 @@ const cancelSubscription = async (req, res) => {
                 $set: { subscriptionStatus: "cancelling" },
             });
 
-            return res.json({ success: true, message: "Subscription will cancel at period end" });
+            return res.json({
+                success: true,
+                message: "Subscription will cancel at period end",
+            });
         }
 
-        if (!user.stripeCustomerId) return res.status(400).json({ error: "No subscription found" });
+        if (!user.stripeCustomerId) {
+            return res.status(400).json({ error: "No subscription found" });
+        }
 
         const subscriptions = await stripe.subscriptions.list({
             customer: user.stripeCustomerId,
@@ -163,17 +238,25 @@ const cancelSubscription = async (req, res) => {
             limit: 1,
         });
 
-        if (!subscriptions.data.length) return res.status(400).json({ error: "No active subscription found" });
+        if (!subscriptions.data.length) {
+            return res.status(400).json({ error: "No active subscription found" });
+        }
 
         await stripe.subscriptions.update(subscriptions.data[0].id, {
             cancel_at_period_end: true,
         });
 
         await User.findByIdAndUpdate(user._id, {
-            $set: { stripeSubscriptionId: subscriptions.data[0].id, subscriptionStatus: "cancelling" },
+            $set: {
+                stripeSubscriptionId: subscriptions.data[0].id,
+                subscriptionStatus: "cancelling",
+            },
         });
 
-        return res.json({ success: true, message: "Subscription will cancel at period end" });
+        return res.json({
+            success: true,
+            message: "Subscription will cancel at period end",
+        });
     } catch (err) {
         console.error("cancelSubscription error:", err);
         return res.status(500).json({ error: "Failed to cancel subscription" });
@@ -231,8 +314,11 @@ const syncSubscriptions = async (req, res) => {
             user.isSubscribed = false;
             user.subscriptionStatus = "free";
             user.plan = "free";
+            user.planInterval = "monthly";
             user.stripeSubscriptionId = undefined;
+            user.currentPeriodEnd = null;
             await user.save();
+
             return res.json({ success: true, synced: true, isSubscribed: false });
         }
 
@@ -244,6 +330,17 @@ const syncSubscriptions = async (req, res) => {
             user.currentPeriodEnd = new Date(latest.current_period_end * 1000);
         }
 
+        const metadataPlan = String(latest.metadata?.plan || "").toLowerCase();
+        const metadataInterval = String(latest.metadata?.interval || "").toLowerCase();
+
+        if (metadataPlan === "plus" || metadataPlan === "teams") {
+            user.plan = metadataPlan;
+        }
+
+        if (metadataInterval === "monthly" || metadataInterval === "yearly") {
+            user.planInterval = metadataInterval;
+        }
+
         await user.save();
 
         return res.json({
@@ -252,6 +349,8 @@ const syncSubscriptions = async (req, res) => {
             isSubscribed: user.isSubscribed,
             subscriptionStatus: user.subscriptionStatus,
             currentPeriodEnd: user.currentPeriodEnd || null,
+            plan: user.plan || "free",
+            interval: user.planInterval || "monthly",
         });
     } catch (err) {
         console.error("syncSubscriptions error:", err);
