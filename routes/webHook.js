@@ -99,25 +99,35 @@ function buildAddressString(address) {
     .join(", ");
 }
 
-function normalizeShippingPayload(details) {
-  if (!details || typeof details !== "object") return {};
+function normalizeShippingPayload(shippingDetails, customerDetails = {}) {
+  const shippingObj =
+    shippingDetails && typeof shippingDetails === "object" ? shippingDetails : {};
+  const customerObj =
+    customerDetails && typeof customerDetails === "object" ? customerDetails : {};
 
-  const address =
-    details.address && typeof details.address === "object"
-      ? {
-        line1: cleanString(details.address.line1, 120),
-        line2: cleanString(details.address.line2, 120),
-        city: cleanString(details.address.city, 120),
-        state: cleanString(details.address.state, 120),
-        postal_code: cleanString(details.address.postal_code, 60),
-        country: cleanString(details.address.country, 60),
-      }
-      : {};
+  const shippingAddress =
+    shippingObj.address && typeof shippingObj.address === "object"
+      ? shippingObj.address
+      : null;
+
+  const customerAddress =
+    customerObj.address && typeof customerObj.address === "object"
+      ? customerObj.address
+      : null;
+
+  const chosenAddress = shippingAddress || customerAddress || {};
 
   return {
-    name: cleanString(details.name, 160),
-    phone: cleanString(details.phone, 60),
-    address,
+    name: cleanString(shippingObj.name || customerObj.name, 160),
+    phone: cleanString(shippingObj.phone || customerObj.phone, 60),
+    address: {
+      line1: cleanString(chosenAddress.line1, 120),
+      line2: cleanString(chosenAddress.line2, 120),
+      city: cleanString(chosenAddress.city, 120),
+      state: cleanString(chosenAddress.state, 120),
+      postal_code: cleanString(chosenAddress.postal_code, 60),
+      country: cleanString(chosenAddress.country, 60),
+    },
   };
 }
 
@@ -380,7 +390,7 @@ async function updateNfcOrderFromSession(session, statusOverride) {
     160
   );
 
-  const shippingPayload = normalizeShippingPayload(shippingDetails);
+  const shippingPayload = normalizeShippingPayload(shippingDetails, customerDetails);
   const deliveryAddress = buildAddressString(shippingPayload.address);
 
   const existing = await NfcOrder.findById(orderId).select(
