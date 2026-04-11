@@ -128,6 +128,81 @@ function detectPlatformFromReferrer(referrer = "", fallback = "") {
     return "other";
 }
 
+function resolveSocialPlatformFromValues(sourcePlatform = "", actionTarget = "") {
+    const source = cleanLowerString(sourcePlatform);
+    const target = cleanLowerString(actionTarget);
+    const combined = `${source} ${target}`.trim();
+
+    if (
+        source === "facebook" ||
+        target === "facebook" ||
+        target === "facebook_url" ||
+        combined.includes("facebook")
+    ) {
+        return "facebook";
+    }
+
+    if (
+        source === "instagram" ||
+        target === "instagram" ||
+        target === "instagram_url" ||
+        combined.includes("instagram")
+    ) {
+        return "instagram";
+    }
+
+    if (
+        source === "linkedin" ||
+        target === "linkedin" ||
+        target === "linkedin_url" ||
+        combined.includes("linkedin")
+    ) {
+        return "linkedin";
+    }
+
+    if (
+        source === "x" ||
+        target === "x" ||
+        target === "x_url" ||
+        target === "twitter" ||
+        target === "twitter_url" ||
+        combined.includes("twitter") ||
+        combined.includes("x")
+    ) {
+        return "x";
+    }
+
+    if (
+        source === "tiktok" ||
+        target === "tiktok" ||
+        target === "tiktok_url" ||
+        combined.includes("tiktok")
+    ) {
+        return "tiktok";
+    }
+
+    if (
+        source === "google" ||
+        target === "google" ||
+        combined.includes("google")
+    ) {
+        return "google";
+    }
+
+    if (source === "other" || target === "other") {
+        return "other";
+    }
+
+    return "unknown";
+}
+
+function resolveSocialPlatform(event = {}) {
+    return resolveSocialPlatformFromValues(
+        event?.source_platform,
+        event?.action_target
+    );
+}
+
 function pickTrackPayload(req) {
     const rawMeta =
         req.body?.meta &&
@@ -138,7 +213,16 @@ function pickTrackPayload(req) {
 
     const pageUrl = cleanString(rawMeta.pageUrl || rawMeta.page_url).slice(0, 1200);
     const referrer = cleanString(rawMeta.referrer).slice(0, 1000);
-    const actionTarget = cleanLowerString(rawMeta.actionTarget || rawMeta.action_target).slice(0, 120);
+    const actionTarget = cleanLowerString(
+        rawMeta.actionTarget ||
+        rawMeta.action_target ||
+        rawMeta.socialTarget ||
+        rawMeta.social_target ||
+        req.body?.actionTarget ||
+        req.body?.action_target ||
+        req.body?.platform ||
+        ""
+    ).slice(0, 120);
     const targetUrl = cleanString(rawMeta.targetUrl || rawMeta.target_url).slice(0, 1200);
     const visitorId = cleanString(rawMeta.visitorId || rawMeta.visitor_id).slice(0, 120);
     const sessionId = cleanString(rawMeta.sessionId || rawMeta.session_id).slice(0, 120);
@@ -502,8 +586,6 @@ function buildRecentActivityPipeline(match, limit = 10) {
 
 function getRecentActivityMessage(event) {
     const eventType = cleanLowerString(event?.event_type);
-    const actionTarget = cleanLowerString(event?.action_target);
-    const sourcePlatform = cleanLowerString(event?.source_platform);
 
     switch (eventType) {
         case "qr_scan":
@@ -523,24 +605,16 @@ function getRecentActivityMessage(event) {
         case "phone_clicked":
             return "Someone clicked your phone number";
         case "social_clicked": {
-            const socialName =
-                actionTarget === "facebook_url" || sourcePlatform === "facebook"
-                    ? "Facebook"
-                    : actionTarget === "instagram_url" || sourcePlatform === "instagram"
-                        ? "Instagram"
-                        : actionTarget === "linkedin_url" || sourcePlatform === "linkedin"
-                            ? "LinkedIn"
-                            : actionTarget === "x_url" ||
-                                actionTarget === "twitter_url" ||
-                                sourcePlatform === "x"
-                                ? "X"
-                                : actionTarget === "tiktok_url" || sourcePlatform === "tiktok"
-                                    ? "TikTok"
-                                    : "social";
+            const socialPlatform = resolveSocialPlatform(event);
 
-            return socialName === "social"
-                ? "Someone clicked one of your social links"
-                : `Someone clicked your ${socialName} profile`;
+            if (socialPlatform === "facebook") return "Someone clicked your Facebook profile";
+            if (socialPlatform === "instagram") return "Someone clicked your Instagram profile";
+            if (socialPlatform === "linkedin") return "Someone clicked your LinkedIn profile";
+            if (socialPlatform === "x") return "Someone clicked your X profile";
+            if (socialPlatform === "tiktok") return "Someone clicked your TikTok profile";
+            if (socialPlatform === "google") return "Someone clicked your Google profile";
+
+            return "Someone clicked one of your social links";
         }
         default:
             return "New activity on your profile";
@@ -627,16 +701,18 @@ router.post("/track", async (req, res) => {
             }
         }
 
+        const canonicalSocialPlatform =
+            eventType === "social_clicked"
+                ? resolveSocialPlatformFromValues(req.body?.platform, payload.action_target)
+                : detectPlatformFromReferrer(payload.referrer, req.body?.platform);
+
         await ProfileAnalyticsEvent.create({
             owner_user: businessCard.user,
             business_card: businessCard._id,
             profile_slug: businessCard.profile_slug,
             event_type: eventType,
             source_type: sourceType,
-            source_platform: detectPlatformFromReferrer(
-                payload.referrer,
-                req.body?.platform
-            ),
+            source_platform: canonicalSocialPlatform,
             referrer: payload.referrer,
             utm_source: payload.utm_source,
             utm_medium: payload.utm_medium,
@@ -782,8 +858,80 @@ router.get("/summary", requireAuth, async (req, res) => {
                     },
                 },
                 {
+                    $project: {
+                        canonical_platform: {
+                            $switch: {
+                                branches: [
+                                    {
+                                        case: {
+                                            $or: [
+                                                { $eq: ["$source_platform", "facebook"] },
+                                                { $eq: ["$action_target", "facebook"] },
+                                                { $eq: ["$action_target", "facebook_url"] },
+                                            ],
+                                        },
+                                        then: "facebook",
+                                    },
+                                    {
+                                        case: {
+                                            $or: [
+                                                { $eq: ["$source_platform", "instagram"] },
+                                                { $eq: ["$action_target", "instagram"] },
+                                                { $eq: ["$action_target", "instagram_url"] },
+                                            ],
+                                        },
+                                        then: "instagram",
+                                    },
+                                    {
+                                        case: {
+                                            $or: [
+                                                { $eq: ["$source_platform", "linkedin"] },
+                                                { $eq: ["$action_target", "linkedin"] },
+                                                { $eq: ["$action_target", "linkedin_url"] },
+                                            ],
+                                        },
+                                        then: "linkedin",
+                                    },
+                                    {
+                                        case: {
+                                            $or: [
+                                                { $eq: ["$source_platform", "x"] },
+                                                { $eq: ["$action_target", "x"] },
+                                                { $eq: ["$action_target", "x_url"] },
+                                                { $eq: ["$action_target", "twitter"] },
+                                                { $eq: ["$action_target", "twitter_url"] },
+                                            ],
+                                        },
+                                        then: "x",
+                                    },
+                                    {
+                                        case: {
+                                            $or: [
+                                                { $eq: ["$source_platform", "tiktok"] },
+                                                { $eq: ["$action_target", "tiktok"] },
+                                                { $eq: ["$action_target", "tiktok_url"] },
+                                            ],
+                                        },
+                                        then: "tiktok",
+                                    },
+                                    {
+                                        case: {
+                                            $or: [
+                                                { $eq: ["$source_platform", "google"] },
+                                                { $eq: ["$action_target", "google"] },
+                                            ],
+                                        },
+                                        then: "google",
+                                    },
+                                ],
+                                default: "other",
+                            },
+                        },
+                    },
+                },
+                {
                     $group: {
-                        _id: "$source_platform",
+                        _id: "$canonical_platform",
                         count: { $sum: 1 },
                     },
                 },
