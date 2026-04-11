@@ -18,6 +18,15 @@ const ADMIN_ORDER_STATUS_OPTIONS = [
     "delivered",
 ];
 
+const PAID_ORDER_STATUSES = [
+    "paid",
+    "processing",
+    "fulfilled",
+    "shipped",
+    "complete",
+    "completed",
+];
+
 const PUBLIC_PROFILE_DOMAIN =
     process.env.PUBLIC_PROFILE_DOMAIN || "https://www.konarcard.com";
 
@@ -91,12 +100,15 @@ function bestUserName(user) {
     );
 }
 
-function buildPublicProfileUrl(slug) {
-    const safeSlug = cleanLower(slug, 120)
+function normalizeSlug(v) {
+    return cleanLower(v, 120)
         .replace(/[^a-z0-9-]/g, "")
         .replace(/-+/g, "-")
         .replace(/^-|-$/g, "");
+}
 
+function buildPublicProfileUrl(slug) {
+    const safeSlug = normalizeSlug(slug);
     return safeSlug ? `${PUBLIC_PROFILE_DOMAIN}/u/${safeSlug}` : "";
 }
 
@@ -189,48 +201,127 @@ function extractOrderAddress(order) {
     return combined || "—";
 }
 
+function getOrderPreview(order) {
+    return order?.preview && typeof order.preview === "object" ? order.preview : {};
+}
+
 function getOrderCustomization(order) {
-    const preview = order?.preview && typeof order.preview === "object" ? order.preview : {};
+    const preview = getOrderPreview(order);
     const customization =
         preview?.customization && typeof preview.customization === "object"
             ? preview.customization
             : {};
 
+    const frontText =
+        cleanString(customization.frontText, 120) ||
+        cleanString(preview?.frontText, 120);
+
+    const fontFamily =
+        cleanString(customization.fontFamily, 120) ||
+        cleanString(preview?.fontFamily, 120);
+
+    const fontWeightRaw =
+        customization.fontWeight ??
+        preview?.fontWeight ??
+        "";
+
+    const fontSizeRaw =
+        customization.fontSize ??
+        preview?.fontSize ??
+        "";
+
+    const orientation =
+        cleanString(customization.orientation, 40) ||
+        cleanString(preview?.orientation, 40);
+
+    const textColor =
+        cleanString(customization.textColor, 40) ||
+        cleanString(preview?.textColor, 40);
+
     return {
-        frontText: cleanString(customization.frontText, 120),
-        fontFamily: cleanString(customization.fontFamily, 120),
+        frontText,
+        fontFamily,
         fontWeight:
-            typeof customization.fontWeight === "number"
-                ? customization.fontWeight
-                : Number(customization.fontWeight || 0) || 0,
+            typeof fontWeightRaw === "number"
+                ? fontWeightRaw
+                : Number(fontWeightRaw || 0) || 0,
         fontSize:
-            typeof customization.fontSize === "number"
-                ? customization.fontSize
-                : Number(customization.fontSize || 0) || 0,
-        orientation: cleanString(customization.orientation, 40),
-        textColor: cleanString(customization.textColor, 40),
+            typeof fontSizeRaw === "number"
+                ? fontSizeRaw
+                : Number(fontSizeRaw || 0) || 0,
+        orientation,
+        textColor,
     };
+}
+
+function getProfileSlugFromOrder(order) {
+    const preview = getOrderPreview(order);
+
+    return (
+        cleanString(order?.profile?.profile_slug, 120) ||
+        cleanString(preview?.profileSlug, 120) ||
+        cleanString(order?.metadata?.profileSlug, 120) ||
+        cleanString(order?.metadata?.profile_slug, 120) ||
+        ""
+    );
+}
+
+function getPublicProfileUrlFromOrder(order) {
+    const preview = getOrderPreview(order);
+    const profileSlug = getProfileSlugFromOrder(order);
+
+    return (
+        cleanString(preview?.publicProfileUrl, 1200) ||
+        cleanString(order?.metadata?.publicProfileUrl, 1200) ||
+        cleanString(order?.metadata?.public_profile_url, 1200) ||
+        buildPublicProfileUrl(profileSlug)
+    );
+}
+
+function getQrTargetUrlFromOrder(order) {
+    const preview = getOrderPreview(order);
+    const publicProfileUrl = getPublicProfileUrlFromOrder(order);
+
+    return (
+        cleanString(order?.qrCodeUrl, 1200) ||
+        cleanString(order?.qrTargetUrl, 1200) ||
+        cleanString(preview?.qrCodeUrl, 1200) ||
+        cleanString(preview?.qrTargetUrl, 1200) ||
+        cleanString(preview?.publicProfileUrl, 1200) ||
+        cleanString(order?.profile?.qr_code_url, 1200) ||
+        cleanString(order?.metadata?.qrCodeUrl, 1200) ||
+        cleanString(order?.metadata?.qrTargetUrl, 1200) ||
+        cleanString(order?.metadata?.qr_code_url, 1200) ||
+        publicProfileUrl
+    );
+}
+
+function getNfcTargetUrlFromOrder(order) {
+    const preview = getOrderPreview(order);
+    const publicProfileUrl = getPublicProfileUrlFromOrder(order);
+
+    return (
+        cleanString(order?.nfcTargetUrl, 1200) ||
+        cleanString(order?.nfcUrl, 1200) ||
+        cleanString(preview?.nfcTargetUrl, 1200) ||
+        cleanString(preview?.nfcUrl, 1200) ||
+        cleanString(order?.metadata?.nfcTargetUrl, 1200) ||
+        cleanString(order?.metadata?.nfcUrl, 1200) ||
+        cleanString(preview?.publicProfileUrl, 1200) ||
+        publicProfileUrl
+    );
 }
 
 function serializeOrder(order) {
     const user = order?.user || null;
     const profile = order?.profile || null;
-    const preview = order?.preview && typeof order.preview === "object" ? order.preview : {};
+    const preview = getOrderPreview(order);
     const customization = getOrderCustomization(order);
 
-    const profileSlug =
-        cleanString(profile?.profile_slug, 120) ||
-        cleanString(preview?.profileSlug, 120);
-
-    const publicProfileUrl =
-        cleanString(preview?.publicProfileUrl, 1200) ||
-        buildPublicProfileUrl(profileSlug);
-
-    const qrCodeUrl =
-        cleanString(order?.qrCodeUrl, 1200) ||
-        cleanString(profile?.qr_code_url, 1200) ||
-        cleanString(preview?.qrCodeUrl, 1200) ||
-        "";
+    const profileSlug = getProfileSlugFromOrder(order);
+    const publicProfileUrl = getPublicProfileUrlFromOrder(order);
+    const qrTargetUrl = getQrTargetUrlFromOrder(order);
+    const nfcTargetUrl = getNfcTargetUrlFromOrder(order);
 
     return {
         _id: order?._id?.toString?.() || String(order?._id || ""),
@@ -253,8 +344,12 @@ function serializeOrder(order) {
 
         logoUrl: cleanString(order?.logoUrl, 1200),
         previewImageUrl: cleanString(order?.previewImageUrl, 1200),
-        qrCodeUrl,
+
+        qrCodeUrl: qrTargetUrl,
+        qrTargetUrl,
+        nfcTargetUrl,
         publicProfileUrl,
+        profileSlug,
 
         preview: preview || {},
         previewMeta: {
@@ -322,14 +417,7 @@ router.get("/summary", async (req, res) => {
                 }),
                 NfcOrder.countDocuments({
                     status: {
-                        $in: [
-                            "paid",
-                            "processing",
-                            "fulfilled",
-                            "shipped",
-                            "complete",
-                            "completed",
-                        ],
+                        $in: PAID_ORDER_STATUSES,
                     },
                 }),
             ]);
@@ -397,10 +485,7 @@ router.get("/users", async (req, res) => {
                             $sum: {
                                 $cond: [
                                     {
-                                        $in: [
-                                            "$status",
-                                            ["paid", "processing", "fulfilled", "shipped", "complete", "completed"],
-                                        ],
+                                        $in: ["$status", PAID_ORDER_STATUSES],
                                     },
                                     1,
                                     0,
@@ -536,15 +621,36 @@ router.get("/users/:id", async (req, res) => {
 router.get("/orders", async (req, res) => {
     try {
         const q = buildSearchRegex(req.query?.q);
-        const fulfillmentStatus = cleanLower(req.query?.fulfillmentStatus, 60);
+        const requestedFulfillmentStatus = cleanLower(req.query?.fulfillmentStatus, 60);
 
-        const baseQuery = {};
-        if (fulfillmentStatus) {
-            baseQuery.fulfillmentStatus = normalizeFulfillmentStatus(fulfillmentStatus);
+        const mongoQuery = {};
+
+        if (requestedFulfillmentStatus) {
+            const normalizedRequestedStatus = normalizeFulfillmentStatus(requestedFulfillmentStatus);
+
+            if (normalizedRequestedStatus === "order_placed") {
+                mongoQuery.$or = [
+                    { fulfillmentStatus: "order_placed" },
+                    { fulfillmentStatus: "preparing_card" },
+                    { fulfillmentStatus: { $exists: false } },
+                    { fulfillmentStatus: null },
+                    { fulfillmentStatus: "" },
+                ];
+            } else if (normalizedRequestedStatus === "designing_card") {
+                mongoQuery.$or = [
+                    { fulfillmentStatus: "designing_card" },
+                    { fulfillmentStatus: "preparing_card" },
+                ];
+            } else {
+                mongoQuery.fulfillmentStatus = normalizedRequestedStatus;
+            }
         }
 
-        let orders = await NfcOrder.find(baseQuery)
-            .populate("user", "name email username role plan subscriptionStatus teamsProfilesQty extraProfilesQty createdAt")
+        let orders = await NfcOrder.find(mongoQuery)
+            .populate(
+                "user",
+                "name email username role plan subscriptionStatus teamsProfilesQty extraProfilesQty createdAt"
+            )
             .populate("profile", "profile_slug business_card_name full_name qr_code_url")
             .sort({ createdAt: -1 })
             .lean();
@@ -552,6 +658,10 @@ router.get("/orders", async (req, res) => {
         if (q) {
             orders = orders.filter((o) => {
                 const customization = getOrderCustomization(o);
+                const profileSlug = getProfileSlugFromOrder(o);
+                const publicProfileUrl = getPublicProfileUrlFromOrder(o);
+                const qrTargetUrl = getQrTargetUrlFromOrder(o);
+                const nfcTargetUrl = getNfcTargetUrlFromOrder(o);
 
                 const haystack = [
                     o?._id?.toString?.(),
@@ -560,6 +670,7 @@ router.get("/orders", async (req, res) => {
                     o?.user?.name,
                     o?.user?.username,
                     o?.profile?.profile_slug,
+                    profileSlug,
                     o?.productKey,
                     o?.variant,
                     o?.trackingCode,
@@ -567,8 +678,12 @@ router.get("/orders", async (req, res) => {
                     o?.deliveryName,
                     o?.customerEmail,
                     customization.frontText,
+                    publicProfileUrl,
+                    qrTargetUrl,
+                    nfcTargetUrl,
+                    normalizeFulfillmentStatus(o?.fulfillmentStatus),
                 ]
-                    .map((x) => cleanString(x, 300))
+                    .map((x) => cleanString(x, 1200))
                     .join(" ");
 
                 return q.test(haystack);
