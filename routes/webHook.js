@@ -67,6 +67,23 @@ function safeProfileSlug(v) {
     .replace(/[^a-z0-9-]/g, "");
 }
 
+function buildPublicUrlBySlug(profileSlug) {
+  const s = safeProfileSlug(profileSlug);
+  if (!s) return "";
+  return `${PUBLIC_PROFILE_DOMAIN}/u/${s}`;
+}
+
+function buildTrackedUrlBySlug(profileSlug, via = "") {
+  const base = buildPublicUrlBySlug(profileSlug);
+  const cleanVia = cleanLower(via, 20);
+
+  if (!base) return "";
+  if (!cleanVia) return base;
+
+  if (!["qr", "nfc"].includes(cleanVia)) return base;
+  return `${base}?via=${encodeURIComponent(cleanVia)}`;
+}
+
 async function updateUserByCustomer(customerId, { set = {}, unset = {} }) {
   if (!customerId) return null;
 
@@ -96,12 +113,6 @@ async function findUserIdByCustomer(customerId) {
   const u = await User.findOne({ stripeCustomerId: customerId }).select("_id username");
   if (!u) return null;
   return { userId: String(u._id), username: u.username || "" };
-}
-
-function buildPublicUrlBySlug(profileSlug) {
-  const s = safeProfileSlug(profileSlug);
-  if (!s) return "";
-  return `${PUBLIC_PROFILE_DOMAIN}/u/${s}`;
 }
 
 function buildAddressString(address) {
@@ -202,10 +213,11 @@ async function ensureClaimedProfile({ userId, claimedSlug }) {
   if (existing) return { created: false, reason: "already_exists" };
 
   const publicUrl = buildPublicUrlBySlug(slug);
+  const qrTargetUrl = buildTrackedUrlBySlug(slug, "qr");
 
   let qrUrl = "";
   try {
-    const pngBuffer = await QRCode.toBuffer(publicUrl, {
+    const pngBuffer = await QRCode.toBuffer(qrTargetUrl || publicUrl, {
       errorCorrectionLevel: "M",
       margin: 2,
       width: 512,
@@ -287,8 +299,10 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   const quantityMeta = session?.metadata?.quantity ? Number(session.metadata.quantity) : null;
   const profileId = cleanString(session?.metadata?.profileId, 120);
   const profileSlug = cleanString(session?.metadata?.profileSlug, 120);
-  const publicProfileUrl = cleanString(session?.metadata?.publicProfileUrl, 1200);
-  const nfcProfileUrl = cleanString(session?.metadata?.nfcProfileUrl, 1200);
+
+  let publicProfileUrl = cleanString(session?.metadata?.publicProfileUrl, 1200);
+  let qrTargetUrl = cleanString(session?.metadata?.qrTargetUrl, 1200);
+  let nfcTargetUrl = cleanString(session?.metadata?.nfcTargetUrl, 1200);
 
   const frontText = cleanString(session?.metadata?.frontText, 240);
   const fontFamily = cleanString(session?.metadata?.fontFamily, 120);
@@ -325,22 +339,55 @@ async function updateNfcOrderFromSession(session, statusOverride) {
   const shippingPayload = normalizeShippingPayload(shippingDetails);
   const deliveryAddress = buildAddressString(shippingPayload.address);
 
-  const existing = await NfcOrder.findById(orderId).select("_id status preview profile qrCodeUrl");
+  const existing = await NfcOrder.findById(orderId).select(
+    "_id status preview profile qrCodeUrl publicProfileUrl qrTargetUrl nfcTargetUrl"
+  );
   if (!existing) return null;
 
   let qrCodeUrl = cleanString(existing?.qrCodeUrl, 1200);
 
-  if (!qrCodeUrl) {
-    const profileDoc =
-      profileId
-        ? await BusinessCard.findById(profileId).select("_id qr_code_url profile_slug").lean()
-        : existing.profile
-          ? await BusinessCard.findById(existing.profile).select("_id qr_code_url profile_slug").lean()
-          : null;
+  let resolvedProfileSlug = safeProfileSlug(
+    profileSlug ||
+    existing?.preview?.profileSlug ||
+    ""
+  );
 
-    if (profileDoc) {
+  if (!resolvedProfileSlug && existing.profile) {
+    const profileDoc = await BusinessCard.findById(existing.profile)
+      .select("_id qr_code_url profile_slug")
+      .lean();
+
+    if (profileDoc?.profile_slug) {
+      resolvedProfileSlug = safeProfileSlug(profileDoc.profile_slug);
+    }
+
+    if (!qrCodeUrl && profileDoc?.qr_code_url) {
       qrCodeUrl = cleanString(profileDoc.qr_code_url, 1200);
     }
+  } else if (!qrCodeUrl && profileId) {
+    const profileDoc = await BusinessCard.findById(profileId)
+      .select("_id qr_code_url profile_slug")
+      .lean();
+
+    if (profileDoc?.profile_slug && !resolvedProfileSlug) {
+      resolvedProfileSlug = safeProfileSlug(profileDoc.profile_slug);
+    }
+
+    if (profileDoc?.qr_code_url) {
+      qrCodeUrl = cleanString(profileDoc.qr_code_url, 1200);
+    }
+  }
+
+  if (!publicProfileUrl && resolvedProfileSlug) {
+    publicProfileUrl = buildPublicUrlBySlug(resolvedProfileSlug);
+  }
+
+  if (!qrTargetUrl && resolvedProfileSlug) {
+    qrTargetUrl = buildTrackedUrlBySlug(resolvedProfileSlug, "qr");
+  }
+
+  if (!nfcTargetUrl && resolvedProfileSlug) {
+    nfcTargetUrl = buildTrackedUrlBySlug(resolvedProfileSlug, "nfc");
   }
 
   if (existing.status === "fulfilled") {
@@ -354,6 +401,9 @@ async function updateNfcOrderFromSession(session, statusOverride) {
         ...(deliveryAddress ? { deliveryAddress } : {}),
         ...(Object.keys(shippingPayload).length ? { shipping: shippingPayload } : {}),
         ...(qrCodeUrl ? { qrCodeUrl } : {}),
+        ...(publicProfileUrl ? { publicProfileUrl } : {}),
+        ...(qrTargetUrl ? { qrTargetUrl } : {}),
+        ...(nfcTargetUrl ? { nfcTargetUrl } : {}),
       },
     });
     return null;
@@ -381,9 +431,10 @@ async function updateNfcOrderFromSession(session, statusOverride) {
     ...(variant ? { variant } : {}),
     ...(family ? { family } : {}),
     ...(edition ? { edition } : {}),
-    ...(profileSlug ? { profileSlug } : {}),
+    ...(resolvedProfileSlug ? { profileSlug: resolvedProfileSlug } : {}),
     ...(publicProfileUrl ? { publicProfileUrl } : {}),
-    ...(nfcProfileUrl ? { nfcProfileUrl } : {}),
+    ...(qrTargetUrl ? { qrTargetUrl } : {}),
+    ...(nfcTargetUrl ? { nfcTargetUrl } : {}),
     ...(styleKey ? { styleKey } : {}),
     ...(frontTemplate ? { frontTemplate } : {}),
     ...(backTemplate ? { backTemplate } : {}),
@@ -415,6 +466,9 @@ async function updateNfcOrderFromSession(session, statusOverride) {
         ...(deliveryAddress ? { deliveryAddress } : {}),
         ...(Object.keys(shippingPayload).length ? { shipping: shippingPayload } : {}),
         ...(qrCodeUrl ? { qrCodeUrl } : {}),
+        ...(publicProfileUrl ? { publicProfileUrl } : {}),
+        ...(qrTargetUrl ? { qrTargetUrl } : {}),
+        ...(nfcTargetUrl ? { nfcTargetUrl } : {}),
         preview: mergedPreview,
         ...(safeQtyMeta ? { quantity: safeQtyMeta } : {}),
       },

@@ -731,7 +731,8 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
 
         const profileSlug = safeSlug(profile.profile_slug);
         const publicProfileUrl = buildPublicProfileUrl(profileSlug);
-        const nfcProfileUrl = buildTrackedProfileUrl(profileSlug, "nfc");
+        const qrTargetUrl = buildTrackedProfileUrl(profileSlug, "qr");
+        const nfcTargetUrl = buildTrackedProfileUrl(profileSlug, "nfc");
 
         const logoUrl = String(req.body?.logoUrl || "").trim();
         const previewImageUrl = String(req.body?.previewImageUrl || "").trim();
@@ -767,7 +768,8 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             edition: config.edition,
             profileSlug,
             publicProfileUrl,
-            nfcProfileUrl,
+            qrTargetUrl,
+            nfcTargetUrl,
             ...(Object.keys(cleanCustomization).length ? { customization: cleanCustomization } : {}),
         };
 
@@ -782,6 +784,10 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             quantity,
             logoUrl,
             previewImageUrl,
+            qrCodeUrl: "",
+            publicProfileUrl,
+            qrTargetUrl,
+            nfcTargetUrl,
             preview: cleanPreview,
             currency: "gbp",
             status: "pending",
@@ -809,6 +815,9 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             profileId,
             configFamily: config.family,
             configEdition: config.edition,
+            publicProfileUrl,
+            qrTargetUrl,
+            nfcTargetUrl,
         });
 
         const session = await stripe.checkout.sessions.create({
@@ -833,7 +842,8 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
                 profileId: String(profile._id),
                 profileSlug,
                 publicProfileUrl: publicProfileUrl || "",
-                nfcProfileUrl: nfcProfileUrl || "",
+                qrTargetUrl: qrTargetUrl || "",
+                nfcTargetUrl: nfcTargetUrl || "",
                 logoUrl: logoUrl || "",
                 previewImageUrl: previewImageUrl || "",
                 returnUrl: returnBaseUrl,
@@ -863,7 +873,8 @@ router.post("/nfc/session", requireAuth, async (req, res) => {
             orderId: String(order._id),
             profileSlug,
             publicProfileUrl,
-            nfcProfileUrl,
+            qrTargetUrl,
+            nfcTargetUrl,
         });
     } catch (err) {
         console.error("nfc/session error:", err);

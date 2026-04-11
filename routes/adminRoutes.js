@@ -112,6 +112,23 @@ function buildPublicProfileUrl(slug) {
     return safeSlug ? `${PUBLIC_PROFILE_DOMAIN}/u/${safeSlug}` : "";
 }
 
+function appendVia(url, via) {
+    const base = cleanString(url, 1200);
+    const safeVia = cleanLower(via, 20);
+
+    if (!base) return "";
+    if (!safeVia) return base;
+
+    try {
+        const parsed = new URL(base);
+        parsed.searchParams.set("via", safeVia);
+        return parsed.toString();
+    } catch {
+        const joiner = base.includes("?") ? "&" : "?";
+        return `${base}${joiner}via=${encodeURIComponent(safeVia)}`;
+    }
+}
+
 function buildTrackingEmailHtml({ user, order, trackingUrl, deliveryWindow }) {
     const name = bestUserName(user);
     const amount = formatMoneyMinor(order?.amountTotal, order?.currency);
@@ -271,10 +288,27 @@ function getPublicProfileUrlFromOrder(order) {
     const profileSlug = getProfileSlugFromOrder(order);
 
     return (
+        cleanString(order?.publicProfileUrl, 1200) ||
         cleanString(preview?.publicProfileUrl, 1200) ||
         cleanString(order?.metadata?.publicProfileUrl, 1200) ||
         cleanString(order?.metadata?.public_profile_url, 1200) ||
         buildPublicProfileUrl(profileSlug)
+    );
+}
+
+function getQrImageUrlFromOrder(order) {
+    const preview = getOrderPreview(order);
+
+    return (
+        cleanString(order?.qrCodeImageUrl, 1200) ||
+        cleanString(order?.qrCodeUrl, 1200) ||
+        cleanString(preview?.qrCodeImageUrl, 1200) ||
+        cleanString(preview?.qrCodeUrl, 1200) ||
+        cleanString(order?.profile?.qr_code_url, 1200) ||
+        cleanString(order?.metadata?.qrCodeImageUrl, 1200) ||
+        cleanString(order?.metadata?.qrCodeUrl, 1200) ||
+        cleanString(order?.metadata?.qr_code_url, 1200) ||
+        ""
     );
 }
 
@@ -283,16 +317,11 @@ function getQrTargetUrlFromOrder(order) {
     const publicProfileUrl = getPublicProfileUrlFromOrder(order);
 
     return (
-        cleanString(order?.qrCodeUrl, 1200) ||
         cleanString(order?.qrTargetUrl, 1200) ||
-        cleanString(preview?.qrCodeUrl, 1200) ||
         cleanString(preview?.qrTargetUrl, 1200) ||
-        cleanString(preview?.publicProfileUrl, 1200) ||
-        cleanString(order?.profile?.qr_code_url, 1200) ||
-        cleanString(order?.metadata?.qrCodeUrl, 1200) ||
         cleanString(order?.metadata?.qrTargetUrl, 1200) ||
-        cleanString(order?.metadata?.qr_code_url, 1200) ||
-        publicProfileUrl
+        cleanString(order?.metadata?.qr_target_url, 1200) ||
+        appendVia(publicProfileUrl, "qr")
     );
 }
 
@@ -306,9 +335,9 @@ function getNfcTargetUrlFromOrder(order) {
         cleanString(preview?.nfcTargetUrl, 1200) ||
         cleanString(preview?.nfcUrl, 1200) ||
         cleanString(order?.metadata?.nfcTargetUrl, 1200) ||
+        cleanString(order?.metadata?.nfc_target_url, 1200) ||
         cleanString(order?.metadata?.nfcUrl, 1200) ||
-        cleanString(preview?.publicProfileUrl, 1200) ||
-        publicProfileUrl
+        appendVia(publicProfileUrl, "nfc")
     );
 }
 
@@ -320,6 +349,7 @@ function serializeOrder(order) {
 
     const profileSlug = getProfileSlugFromOrder(order);
     const publicProfileUrl = getPublicProfileUrlFromOrder(order);
+    const qrCodeImageUrl = getQrImageUrlFromOrder(order);
     const qrTargetUrl = getQrTargetUrlFromOrder(order);
     const nfcTargetUrl = getNfcTargetUrlFromOrder(order);
 
@@ -345,7 +375,8 @@ function serializeOrder(order) {
         logoUrl: cleanString(order?.logoUrl, 1200),
         previewImageUrl: cleanString(order?.previewImageUrl, 1200),
 
-        qrCodeUrl: qrTargetUrl,
+        qrCodeImageUrl,
+        qrCodeUrl: qrCodeImageUrl,
         qrTargetUrl,
         nfcTargetUrl,
         publicProfileUrl,
@@ -448,12 +479,7 @@ router.get("/users", async (req, res) => {
 
         const userQuery = q
             ? {
-                $or: [
-                    { email: q },
-                    { name: q },
-                    { username: q },
-                    { slug: q },
-                ],
+                $or: [{ email: q }, { name: q }, { username: q }, { slug: q }],
             }
             : {};
 
@@ -483,13 +509,7 @@ router.get("/users", async (req, res) => {
                         count: { $sum: 1 },
                         paidCount: {
                             $sum: {
-                                $cond: [
-                                    {
-                                        $in: ["$status", PAID_ORDER_STATUSES],
-                                    },
-                                    1,
-                                    0,
-                                ],
+                                $cond: [{ $in: ["$status", PAID_ORDER_STATUSES] }, 1, 0],
                             },
                         },
                     },

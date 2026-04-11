@@ -54,7 +54,35 @@ const nfcOrderSchema = new Schema(
             trim: true,
         },
 
+        /**
+         * QR IMAGE FILE URL
+         * This is the uploaded QR PNG image itself, not the destination link.
+         */
         qrCodeUrl: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        /**
+         * Canonical destination links
+         * publicProfileUrl = plain profile URL
+         * qrTargetUrl = tracked QR destination
+         * nfcTargetUrl = tracked NFC destination
+         */
+        publicProfileUrl: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        qrTargetUrl: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+
+        nfcTargetUrl: {
             type: String,
             default: "",
             trim: true,
@@ -182,6 +210,9 @@ nfcOrderSchema.index({ user: 1, createdAt: -1 });
 nfcOrderSchema.index({ profile: 1, createdAt: -1 });
 nfcOrderSchema.index({ productKey: 1, variant: 1 });
 nfcOrderSchema.index({ status: 1, fulfillmentStatus: 1, createdAt: -1 });
+nfcOrderSchema.index({ publicProfileUrl: 1 });
+nfcOrderSchema.index({ qrTargetUrl: 1 });
+nfcOrderSchema.index({ nfcTargetUrl: 1 });
 
 module.exports =
     mongoose.models.NfcOrder || mongoose.model("NfcOrder", nfcOrderSchema);
