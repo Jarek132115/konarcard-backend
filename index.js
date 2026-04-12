@@ -125,6 +125,22 @@ app.use((err, req, res, next) => {
   return res.status(500).json({ error: "Internal server error" });
 });
 
+/* -------------------- Cron Jobs -------------------- */
+try {
+  const cron = require("node-cron");
+  const sendPaymentReminders = require("./jobs/paymentReminder");
+
+  // Run daily at 9:00 AM UTC
+  cron.schedule("0 9 * * *", () => {
+    console.log("[cron] Running payment reminder job...");
+    sendPaymentReminders();
+  });
+
+  console.log("✅ Cron jobs scheduled");
+} catch (err) {
+  console.warn("⚠️  node-cron not installed — payment reminders disabled. Run: npm install node-cron");
+}
+
 /* -------------------- Start -------------------- */
 const port = Number(process.env.PORT || 8080);
 

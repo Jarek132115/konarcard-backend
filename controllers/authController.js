@@ -8,6 +8,9 @@ const sendEmail = require("../utils/SendEmail");
 const {
     verificationEmailTemplate,
     passwordResetTemplate,
+    passwordResetSuccessTemplate,
+    welcomeEmailTemplate,
+    contactFormAdminTemplate,
 } = require("../utils/emailTemplates");
 const crypto = require("crypto");
 const uploadToS3 = require("../utils/uploadToS3");
@@ -327,6 +330,10 @@ const verifyEmailCode = async (req, res) => {
         user.verificationCodeExpires = undefined;
         await user.save();
 
+        // Send welcome email (non-blocking)
+        sendEmail(user.email, "Welcome to KonarCard!", welcomeEmailTemplate(user.name))
+            .catch((err) => console.error("Welcome email failed:", err));
+
         return res.json({ success: true, message: "Email verified successfully" });
     } catch (err) {
         console.error("verifyEmailCode error:", err);
@@ -496,6 +503,10 @@ const resetPassword = async (req, res) => {
         user.resetTokenExpires = undefined;
         await user.save();
 
+        // Send confirmation email (non-blocking)
+        sendEmail(user.email, "Your password has been changed", passwordResetSuccessTemplate(user.name))
+            .catch((err) => console.error("Password reset success email failed:", err));
+
         return res.json({ success: true, message: "Password updated successfully" });
     } catch (err) {
         console.error("resetPassword error:", err);
@@ -609,13 +620,7 @@ const submitContactForm = async (req, res) => {
         return res.status(400).json({ error: "All fields are required" });
     }
 
-    const html = `
-    <h2>New Contact Message</h2>
-    <p><strong>Name:</strong> ${name}</p>
-    <p><strong>Email:</strong> ${email}</p>
-    <p><strong>Reason:</strong> ${reason}</p>
-    <p><strong>Message:</strong><br/>${message}</p>
-  `;
+    const html = contactFormAdminTemplate(name, email, reason, message);
 
     try {
         await sendEmail("supportteam@konarcard.com", `Contact Form: ${reason}`, html);

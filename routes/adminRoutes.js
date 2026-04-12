@@ -9,6 +9,10 @@ const BusinessCard = require("../models/BusinessCard");
 const NfcOrder = require("../models/NfcOrder");
 
 const sendEmail = require("../utils/SendEmail");
+const {
+    orderShippedTemplate,
+    orderStatusUpdateTemplate,
+} = require("../utils/emailTemplates");
 
 const ADMIN_ORDER_STATUS_OPTIONS = [
     "order_placed",
@@ -129,48 +133,16 @@ function appendVia(url, via) {
     }
 }
 
-function buildTrackingEmailHtml({ user, order, trackingUrl, deliveryWindow }) {
+function buildTrackingEmailHtml({ user, trackingUrl, deliveryWindow }) {
     const name = bestUserName(user);
-    const amount = formatMoneyMinor(order?.amountTotal, order?.currency);
-
-    return `
-    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111827;padding:24px;">
-      <h2 style="margin:0 0 16px;">Your KonarCard order has shipped</h2>
-      <p style="margin:0 0 12px;">Hi ${name},</p>
-      <p style="margin:0 0 12px;">
-        Your order is on the way${amount !== "—" ? ` (${amount})` : ""}.
-      </p>
-      ${trackingUrl
-            ? `<p style="margin:0 0 12px;"><strong>Tracking link:</strong> <a href="${trackingUrl}" target="_blank" rel="noreferrer">${trackingUrl}</a></p>`
-            : ""
-        }
-      ${deliveryWindow
-            ? `<p style="margin:0 0 12px;"><strong>Estimated delivery:</strong> ${deliveryWindow}</p>`
-            : ""
-        }
-      <p style="margin:20px 0 0;">Thanks,<br/>KonarCard Support</p>
-    </div>
-  `;
+    return orderShippedTemplate(name, trackingUrl, deliveryWindow);
 }
 
 function buildStatusEmailHtml({ user, status, trackingUrl }) {
     const name = bestUserName(user);
     const label = buildOrderStatusLabel(status);
-
-    return `
-    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111827;padding:24px;">
-      <h2 style="margin:0 0 16px;">Your KonarCard order update</h2>
-      <p style="margin:0 0 12px;">Hi ${name},</p>
-      <p style="margin:0 0 12px;">
-        Your order status is now: <strong>${label}</strong>.
-      </p>
-      ${trackingUrl && normalizeFulfillmentStatus(status) === "shipped"
-            ? `<p style="margin:0 0 12px;"><strong>Tracking link:</strong> <a href="${trackingUrl}" target="_blank" rel="noreferrer">${trackingUrl}</a></p>`
-            : ""
-        }
-      <p style="margin:20px 0 0;">Thanks,<br/>KonarCard Support</p>
-    </div>
-  `;
+    const tracking = normalizeFulfillmentStatus(status) === "shipped" ? trackingUrl : null;
+    return orderStatusUpdateTemplate(name, label, tracking);
 }
 
 function extractOrderCustomerName(order) {

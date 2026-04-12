@@ -22,7 +22,12 @@ const NfcOrder = require("../models/NfcOrder");
 const uploadToS3 = require("../utils/uploadToS3");
 
 const sendEmail = require("../utils/SendEmail");
-const { orderConfirmationTemplate } = require("../utils/emailTemplates");
+const {
+    orderConfirmationTemplate,
+    orderNotificationAdminTemplate,
+    subscriptionStartedTemplate,
+    paymentFailedTemplate,
+} = require("../utils/emailTemplates");
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -641,25 +646,19 @@ module.exports = async function stripeWebhookHandler(req, res) {
           const amountTotal = Number(session.amount_total || 0);
           const amountPaid = amountTotal ? (amountTotal / 100).toFixed(2) : null;
 
-          const productLine =
-            productKey || qtyMeta || frontText
-              ? `<p>Product: ${productKey || "nfc"}${variant ? ` • ${variant}` : ""}${qtyMeta ? ` • Qty: ${qtyMeta}` : ""}${frontText ? ` • Text: ${frontText}` : ""}</p>`
-              : "";
-
           if (process.env.EMAIL_USER) {
             await sendEmail(
               process.env.EMAIL_USER,
               amountPaid ? `New Konar Order - £${amountPaid}` : "New Konar Order",
-              `<p>New order from: ${customerName || customerEmail || "Unknown customer"}</p>${customerEmail ? `<p>Email: ${customerEmail}</p>` : ""
-              }${productLine}${amountPaid ? `<p>Total: £${amountPaid}</p>` : ""}`
+              orderNotificationAdminTemplate(customerName, customerEmail, productKey, variant, qtyMeta, amountPaid)
             );
           }
 
           if (customerEmail && amountPaid) {
             await sendEmail(
               customerEmail,
-              "Your Konar Order Confirmation",
-              orderConfirmationTemplate(customerEmail, amountPaid)
+              "Your KonarCard Order Confirmation",
+              orderConfirmationTemplate(customerName || customerEmail, amountPaid)
             );
           }
         } catch (e) {
@@ -728,6 +727,22 @@ module.exports = async function stripeWebhookHandler(req, res) {
       }
 
       await updateUserByCustomer(customerId, { set, unset });
+
+      // Send subscription welcome email on first creation only
+      if (event.type === "customer.subscription.created" && isActiveStatus(status)) {
+        try {
+          const subUser = await User.findOne({ stripeCustomerId: customerId });
+          if (subUser?.email) {
+            sendEmail(
+              subUser.email,
+              "Your KonarCard subscription is active!",
+              subscriptionStartedTemplate(subUser.name, extracted.plan, extracted.interval)
+            ).catch((err) => console.error("Subscription started email failed:", err));
+          }
+        } catch (e) {
+          console.warn("Subscription email lookup failed:", e?.message);
+        }
+      }
     }
 
     if (event.type === "invoice.paid") {
@@ -793,6 +808,20 @@ module.exports = async function stripeWebhookHandler(req, res) {
           isSubscribed: false,
         },
       });
+
+      // Notify user about failed payment
+      try {
+        const failedUser = await User.findOne({ stripeCustomerId: customerId });
+        if (failedUser?.email) {
+          sendEmail(
+            failedUser.email,
+            "Action needed: payment failed",
+            paymentFailedTemplate(failedUser.name)
+          ).catch((err) => console.error("Payment failed email error:", err));
+        }
+      } catch (e) {
+        console.warn("Payment failed email lookup error:", e?.message);
+      }
     }
 
     if (event.type === "customer.subscription.deleted") {

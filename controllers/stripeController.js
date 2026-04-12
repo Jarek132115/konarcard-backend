@@ -2,6 +2,8 @@
 const Stripe = require("stripe");
 const User = require("../models/user");
 const BusinessCard = require("../models/BusinessCard");
+const sendEmail = require("../utils/SendEmail");
+const { subscriptionCancelledTemplate } = require("../utils/emailTemplates");
 
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -214,13 +216,20 @@ const cancelSubscription = async (req, res) => {
         const user = req.user;
 
         if (user.stripeSubscriptionId) {
-            await stripe.subscriptions.update(user.stripeSubscriptionId, {
+            const sub = await stripe.subscriptions.update(user.stripeSubscriptionId, {
                 cancel_at_period_end: true,
             });
 
             await User.findByIdAndUpdate(user._id, {
                 $set: { subscriptionStatus: "cancelling" },
             });
+
+            // Send cancellation confirmation email
+            const endDate = sub.current_period_end
+                ? new Date(sub.current_period_end * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })
+                : "the end of your billing period";
+            sendEmail(user.email, "Your KonarCard subscription has been cancelled", subscriptionCancelledTemplate(user.name, endDate))
+                .catch((err) => console.error("Cancellation email failed:", err));
 
             return res.json({
                 success: true,
@@ -242,7 +251,7 @@ const cancelSubscription = async (req, res) => {
             return res.status(400).json({ error: "No active subscription found" });
         }
 
-        await stripe.subscriptions.update(subscriptions.data[0].id, {
+        const sub2 = await stripe.subscriptions.update(subscriptions.data[0].id, {
             cancel_at_period_end: true,
         });
 
@@ -252,6 +261,12 @@ const cancelSubscription = async (req, res) => {
                 subscriptionStatus: "cancelling",
             },
         });
+
+        const endDate2 = sub2.current_period_end
+            ? new Date(sub2.current_period_end * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })
+            : "the end of your billing period";
+        sendEmail(user.email, "Your KonarCard subscription has been cancelled", subscriptionCancelledTemplate(user.name, endDate2))
+            .catch((err) => console.error("Cancellation email failed:", err));
 
         return res.json({
             success: true,

@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const sendEmail = require('../utils/SendEmail');
+const { contactFormAdminTemplate } = require('../utils/emailTemplates');
 
 router.post('/', async (req, res) => {
     try {
@@ -10,19 +11,10 @@ router.post('/', async (req, res) => {
             return res.status(400).json({ error: 'All fields are required' });
         }
 
-        const html = `
-      <div style="font-family: Arial, sans-serif; padding: 20px;">
-        <h2>New Contact Message</h2>
-        <p><strong>Name:</strong> ${name}</p>
-        <p><strong>Email:</strong> ${email}</p>
-        <p><strong>Reason:</strong> ${reason}</p>
-        <p><strong>Message:</strong></p>
-        <p>${message}</p>
-      </div>
-    `;
+        const html = contactFormAdminTemplate(name, email, reason, message);
 
         await sendEmail(
-            'supportteam@konarcard.com',  // your target inbox
+            'supportteam@konarcard.com',
             `New Contact Form: ${reason}`,
             html
         );
