@@ -4,7 +4,10 @@ const User = require("../models/user");
 const BusinessCard = require("../models/BusinessCard");
 const jwt = require("jsonwebtoken");
 const QRCode = require("qrcode");
+const Stripe = require("stripe");
 const sendEmail = require("../utils/SendEmail");
+
+const stripe = process.env.STRIPE_SECRET_KEY ? Stripe(process.env.STRIPE_SECRET_KEY) : null;
 const {
     verificationEmailTemplate,
     passwordResetTemplate,
@@ -519,8 +522,42 @@ const getProfile = async (req, res) => {
     try {
         if (!req.user?._id) return res.status(401).json({ error: "Unauthorized" });
 
-        const freshUser = await User.findById(req.user._id);
+        let freshUser = await User.findById(req.user._id);
         if (!freshUser) return res.status(401).json({ error: "Unauthorized" });
+
+        // Self-heal: if the user has a Stripe customer but we still think they're "free",
+        // pull their subscription from Stripe and fix the local plan.
+        const currentPlan = String(freshUser.plan || "free").toLowerCase();
+        if (currentPlan === "free" && freshUser.stripeCustomerId && stripe) {
+            try {
+                const subs = await stripe.subscriptions.list({
+                    customer: freshUser.stripeCustomerId,
+                    status: "all",
+                    limit: 5,
+                });
+                const active = subs.data.find((s) => ["active", "trialing"].includes(s.status));
+                if (active) {
+                    const metaPlan = String(active.metadata?.plan || "").toLowerCase();
+                    const metaInterval = String(active.metadata?.interval || "").toLowerCase();
+                    if (metaPlan === "plus" || metaPlan === "teams") {
+                        freshUser.plan = metaPlan;
+                        if (metaInterval === "monthly" || metaInterval === "yearly" || metaInterval === "quarterly") {
+                            freshUser.planInterval = metaInterval;
+                        }
+                        freshUser.subscriptionStatus = active.status;
+                        freshUser.isSubscribed = true;
+                        freshUser.stripeSubscriptionId = active.id;
+                        if (active.current_period_end) {
+                            freshUser.currentPeriodEnd = new Date(active.current_period_end * 1000);
+                        }
+                        await freshUser.save();
+                        console.log("[getProfile] self-healed plan for user:", freshUser._id.toString(), "→", metaPlan);
+                    }
+                }
+            } catch (syncErr) {
+                console.warn("[getProfile] Stripe self-heal failed:", syncErr?.message || syncErr);
+            }
+        }
 
         return res.json({ data: toSafeUser(freshUser) });
     } catch (err) {
