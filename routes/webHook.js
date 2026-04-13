@@ -37,20 +37,30 @@ const PUBLIC_PROFILE_DOMAIN =
 /**
  * Price mapping (base subscription)
  */
-const PRICE_TO_PLAN = {
-  [process.env.STRIPE_PRICE_PLUS_MONTHLY]: { plan: "plus", interval: "monthly" },
-  [process.env.STRIPE_PRICE_PLUS_QUARTERLY]: { plan: "plus", interval: "quarterly" },
-  [process.env.STRIPE_PRICE_PLUS_YEARLY]: { plan: "plus", interval: "yearly" },
+// Build mapping from BOTH legacy (STRIPE_PRICE_*) and current (NEW_STRIPE_PRICE_*)
+// env vars so the webhook can resolve any price the user is actually subscribed to.
+const PRICE_TO_PLAN = Object.fromEntries(
+  [
+    [process.env.STRIPE_PRICE_PLUS_MONTHLY, { plan: "plus", interval: "monthly" }],
+    [process.env.STRIPE_PRICE_PLUS_QUARTERLY, { plan: "plus", interval: "quarterly" }],
+    [process.env.STRIPE_PRICE_PLUS_YEARLY, { plan: "plus", interval: "yearly" }],
+    [process.env.NEW_STRIPE_PRICE_PLUS_MONTHLY, { plan: "plus", interval: "monthly" }],
+    [process.env.NEW_STRIPE_PRICE_PLUS_YEARLY, { plan: "plus", interval: "yearly" }],
 
-  [process.env.STRIPE_PRICE_TEAMS_MONTHLY]: { plan: "teams", interval: "monthly" },
-  [process.env.STRIPE_PRICE_TEAMS_QUARTERLY]: { plan: "teams", interval: "quarterly" },
-  [process.env.STRIPE_PRICE_TEAMS_YEARLY]: { plan: "teams", interval: "yearly" },
-};
+    [process.env.STRIPE_PRICE_TEAMS_MONTHLY, { plan: "teams", interval: "monthly" }],
+    [process.env.STRIPE_PRICE_TEAMS_QUARTERLY, { plan: "teams", interval: "quarterly" }],
+    [process.env.STRIPE_PRICE_TEAMS_YEARLY, { plan: "teams", interval: "yearly" }],
+    [process.env.NEW_STRIPE_PRICE_TEAMS_MONTHLY, { plan: "teams", interval: "monthly" }],
+    [process.env.NEW_STRIPE_PRICE_TEAMS_YEARLY, { plan: "teams", interval: "yearly" }],
+  ].filter(([priceId]) => !!priceId)
+);
 
 const EXTRA_PROFILE_PRICE_IDS = [
   process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
   process.env.STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY,
   process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY,
+  process.env.NEW_STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
+  process.env.NEW_STRIPE_PRICE_EXTRA_PROFILE_YEARLY,
 ].filter(Boolean);
 
 function isActiveStatus(status) {
@@ -610,6 +620,7 @@ module.exports = async function stripeWebhookHandler(req, res) {
           unset.teamsStripePriceId = "";
         }
 
+        console.log("[webhook] checkout.session.completed set:", { metaUserId, customerId, plan: set.plan, extracted });
         if (metaUserId) await updateUserById(metaUserId, { set, unset });
         else await updateUserByCustomer(customerId, { set, unset });
 
