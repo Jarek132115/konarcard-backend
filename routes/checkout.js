@@ -119,29 +119,63 @@ function getInitialEstimatedDelivery(now = new Date()) {
 // -------------------------
 // Subscription helpers
 // -------------------------
+// IMPORTANT: Teams is NOT a standalone Stripe product.
+// Teams = 1 × Plus Monthly + N × Extra Profile Monthly
+// Always prefer the NEW_ prefixed price IDs (current pricing model)
+// and fall back to legacy price IDs if NEW_ ones aren't set.
 function getTeamsPriceId(interval = "monthly") {
     const i = String(interval || "monthly").toLowerCase();
-    if (i === "monthly") return process.env.STRIPE_PRICE_TEAMS_MONTHLY;
+    if (i === "monthly") {
+        return (
+            process.env.NEW_STRIPE_PRICE_PLUS_MONTHLY ||
+            process.env.STRIPE_PRICE_TEAMS_MONTHLY
+        );
+    }
+    if (i === "yearly") {
+        return (
+            process.env.NEW_STRIPE_PRICE_PLUS_YEARLY ||
+            process.env.STRIPE_PRICE_TEAMS_YEARLY
+        );
+    }
     if (i === "quarterly") return process.env.STRIPE_PRICE_TEAMS_QUARTERLY;
-    if (i === "yearly") return process.env.STRIPE_PRICE_TEAMS_YEARLY;
-    return process.env.STRIPE_PRICE_TEAMS_MONTHLY;
+    return (
+        process.env.NEW_STRIPE_PRICE_PLUS_MONTHLY ||
+        process.env.STRIPE_PRICE_TEAMS_MONTHLY
+    );
 }
 
 function getExtraProfilePriceId(interval = "monthly") {
     const i = String(interval || "monthly").toLowerCase();
-    if (i === "monthly") return process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY;
+    if (i === "monthly") {
+        return (
+            process.env.NEW_STRIPE_PRICE_EXTRA_PROFILE_MONTHLY ||
+            process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY
+        );
+    }
+    if (i === "yearly") {
+        return (
+            process.env.NEW_STRIPE_PRICE_EXTRA_PROFILE_YEARLY ||
+            process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY
+        );
+    }
     if (i === "quarterly") return process.env.STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY;
-    if (i === "yearly") return process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY;
-    return process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY;
+    return (
+        process.env.NEW_STRIPE_PRICE_EXTRA_PROFILE_MONTHLY ||
+        process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY
+    );
 }
 
 const TEAMS_PRICE_IDS = [
+    process.env.NEW_STRIPE_PRICE_PLUS_MONTHLY,
+    process.env.NEW_STRIPE_PRICE_PLUS_YEARLY,
     process.env.STRIPE_PRICE_TEAMS_MONTHLY,
     process.env.STRIPE_PRICE_TEAMS_QUARTERLY,
     process.env.STRIPE_PRICE_TEAMS_YEARLY,
 ].filter(Boolean);
 
 const EXTRA_PROFILE_PRICE_IDS = [
+    process.env.NEW_STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
+    process.env.NEW_STRIPE_PRICE_EXTRA_PROFILE_YEARLY,
     process.env.STRIPE_PRICE_EXTRA_PROFILE_MONTHLY,
     process.env.STRIPE_PRICE_EXTRA_PROFILE_QUARTERLY,
     process.env.STRIPE_PRICE_EXTRA_PROFILE_YEARLY,

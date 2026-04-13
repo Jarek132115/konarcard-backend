@@ -255,6 +255,19 @@ function extractEntitlementsFromSubscription(sub) {
     }
   }
 
+  // Metadata always wins: the checkout session / subscription stores the true
+  // intent (plan="teams") even when Teams is billed as Plus + Extra Profile.
+  const metaPlan = String(sub?.metadata?.plan || "").toLowerCase();
+  const metaInterval = String(sub?.metadata?.interval || "").toLowerCase();
+  if (metaPlan === "plus" || metaPlan === "teams") plan = metaPlan;
+  if (["monthly", "quarterly", "yearly"].includes(metaInterval)) interval = metaInterval;
+
+  // Final fallback: if there's an extra-profile item but no plan yet, it's Teams.
+  if (!plan && extraProfilesQty > 0) {
+    plan = "teams";
+    interval = interval || "monthly";
+  }
+
   const teamsProfilesQty =
     plan === "teams" ? Math.max(1, 1 + Math.max(0, extraProfilesQty)) : 1;
 
