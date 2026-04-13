@@ -2,6 +2,14 @@ const passport = require("passport");
 const GoogleStrategy = require("passport-google-oauth20").Strategy;
 const FacebookStrategy = require("passport-facebook").Strategy;
 const User = require("../models/user");
+const sendEmail = require("../utils/SendEmail");
+const { welcomeEmailTemplate } = require("../utils/emailTemplates");
+
+function fireWelcomeEmail(user) {
+    if (!user?.email) return;
+    sendEmail(user.email, "Welcome to KonarCard!", welcomeEmailTemplate(user.name))
+        .catch((err) => console.error("[OAuth] welcome email failed:", err?.message || err));
+}
 
 module.exports = function configurePassport() {
     // ---------- GOOGLE ----------
@@ -41,6 +49,7 @@ module.exports = function configurePassport() {
                                 googleId,
                                 authProvider: "google",
                             });
+                            fireWelcomeEmail(user);
                         } else {
                             let changed = false;
 
@@ -117,6 +126,7 @@ module.exports = function configurePassport() {
                                 facebookId,
                                 authProvider: "facebook",
                             });
+                            fireWelcomeEmail(user);
                         } else {
                             let changed = false;
 

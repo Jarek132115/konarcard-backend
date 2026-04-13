@@ -646,23 +646,39 @@ module.exports = async function stripeWebhookHandler(req, res) {
           const amountTotal = Number(session.amount_total || 0);
           const amountPaid = amountTotal ? (amountTotal / 100).toFixed(2) : null;
 
+          console.log("[webhook] Sending order emails", { customerEmail, amountPaid, productKey });
+
           if (process.env.EMAIL_USER) {
-            await sendEmail(
-              process.env.EMAIL_USER,
-              amountPaid ? `New Konar Order - £${amountPaid}` : "New Konar Order",
-              orderNotificationAdminTemplate(customerName, customerEmail, productKey, variant, qtyMeta, amountPaid)
-            );
+            try {
+              await sendEmail(
+                process.env.EMAIL_USER,
+                amountPaid ? `New Konar Order - £${amountPaid}` : "New Konar Order",
+                orderNotificationAdminTemplate(customerName, customerEmail, productKey, variant, qtyMeta, amountPaid)
+              );
+              console.log("[webhook] Admin notification email sent to", process.env.EMAIL_USER);
+            } catch (adminErr) {
+              console.error("[webhook] Admin notification email FAILED:", adminErr?.message || adminErr);
+            }
+          } else {
+            console.warn("[webhook] EMAIL_USER not set — skipping admin notification");
           }
 
-          if (customerEmail && amountPaid) {
-            await sendEmail(
-              customerEmail,
-              "Your KonarCard Order Confirmation",
-              orderConfirmationTemplate(customerName || customerEmail, amountPaid)
-            );
+          if (customerEmail) {
+            try {
+              await sendEmail(
+                customerEmail,
+                "Your KonarCard Order Confirmation",
+                orderConfirmationTemplate(customerName || customerEmail, amountPaid || "0.00")
+              );
+              console.log("[webhook] Customer confirmation email sent to", customerEmail);
+            } catch (custErr) {
+              console.error("[webhook] Customer confirmation email FAILED:", custErr?.message || custErr);
+            }
+          } else {
+            console.warn("[webhook] No customer email on session — skipping customer confirmation");
           }
         } catch (e) {
-          console.warn("Email send failed (ignored):", e?.message || e);
+          console.error("[webhook] Email block error:", e?.message || e);
         }
 
         return res.status(200).send("OK");
