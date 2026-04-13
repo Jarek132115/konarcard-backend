@@ -55,28 +55,41 @@ async function getTransporter() {
 const sendEmail = async (to, subject, html) => {
     const transporter = await getTransporter();
 
-    const fromAddress =
-        (process.env.EMAIL_FROM || process.env.EMAIL_USER || "").trim();
+    // Office365 requires the "from" to match the authenticated user (EMAIL_USER).
+    // EMAIL_FROM is only used as a display-only reply-to fallback.
+    const authUser = (process.env.EMAIL_USER || "").trim();
+    const replyAddr = (process.env.EMAIL_FROM || authUser).trim();
 
-    const info = await transporter.sendMail({
-        from: `KonarCard <${fromAddress}>`,
-        to,
-        subject,
-        html,
-        replyTo: fromAddress,
-    });
+    try {
+        const info = await transporter.sendMail({
+            from: `KonarCard <${authUser}>`,
+            to,
+            subject,
+            html,
+            replyTo: replyAddr,
+        });
 
-    // This is IMPORTANT for debugging delivery
-    console.log("[SendEmail] sent:", {
-        to,
-        subject,
-        messageId: info?.messageId,
-        accepted: info?.accepted,
-        rejected: info?.rejected,
-        response: info?.response,
-    });
+        console.log("[SendEmail] sent:", {
+            to,
+            subject,
+            messageId: info?.messageId,
+            accepted: info?.accepted,
+            rejected: info?.rejected,
+            response: info?.response,
+        });
 
-    return info;
+        return info;
+    } catch (err) {
+        console.error("[SendEmail] FAILED:", {
+            to,
+            subject,
+            error: err?.message || err,
+            code: err?.code,
+            command: err?.command,
+            responseCode: err?.responseCode,
+        });
+        throw err;
+    }
 };
 
 module.exports = sendEmail;
