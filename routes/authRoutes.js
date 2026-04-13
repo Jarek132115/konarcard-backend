@@ -186,46 +186,4 @@ router.get(
     }
 );
 
-// ==============================
-// APPLE OAUTH (Passport)
-// Apple uses POST form_post response mode — the callback MUST accept POST.
-// Body needs to be parsed as x-www-form-urlencoded, which server.js
-// configures globally with express.urlencoded.
-// ==============================
-router.get(
-    "/auth/apple",
-    passport.authenticate("apple", {
-        session: false,
-        scope: ["name", "email"],
-    })
-);
-
-const appleCallbackHandler = (req, res, next) => {
-    passport.authenticate("apple", { session: false }, (err, user, info) => {
-        if (err) {
-            console.error("Apple OAuth callback error:", err);
-            return res.redirect(`${FRONTEND_URL}/login?oauth=apple_failed`);
-        }
-        if (!user) {
-            const reason = info?.message ? encodeURIComponent(info.message) : "apple_failed";
-            return res.redirect(`${FRONTEND_URL}/login?oauth=${reason}`);
-        }
-
-        try {
-            const token = signToken(user);
-            if (!token) {
-                return res.redirect(`${FRONTEND_URL}/login?oauth=missing_jwt_secret`);
-            }
-            return res.redirect(`${FRONTEND_URL}/oauth?token=${encodeURIComponent(token)}`);
-        } catch (e) {
-            console.error("Apple OAuth signToken error:", e);
-            return res.redirect(`${FRONTEND_URL}/login?oauth=apple_failed`);
-        }
-    })(req, res, next);
-};
-
-// Apple posts back via form_post by default, and will sometimes GET if response_mode=query.
-router.post("/auth/apple/callback", appleCallbackHandler);
-router.get("/auth/apple/callback", appleCallbackHandler);
-
 module.exports = router;
