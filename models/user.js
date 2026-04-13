@@ -30,6 +30,7 @@ const userSchema = new Schema(
         // social auth
         googleId: { type: String, default: undefined, trim: true },
         facebookId: { type: String, default: undefined, trim: true },
+        appleId: { type: String, default: undefined, trim: true },
 
         authProvider: {
             type: String,
@@ -166,6 +167,11 @@ userSchema.index(
 userSchema.index(
     { facebookId: 1 },
     { unique: true, partialFilterExpression: { facebookId: { $type: "string" } } }
+);
+
+userSchema.index(
+    { appleId: 1 },
+    { unique: true, partialFilterExpression: { appleId: { $type: "string" } } }
 );
 
 userSchema.index(
