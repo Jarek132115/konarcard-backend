@@ -504,7 +504,15 @@ router.post("/teams", requireAuth, async (req, res) => {
 
         const stripeCustomerId = await ensureStripeCustomer(user);
 
-        if (String(user.plan || "").toLowerCase() === "teams" && user.stripeSubscriptionId) {
+        // If the user ALREADY has an active Plus or Teams subscription, don't send them
+        // back through Stripe Checkout. Just add (or update) the Extra Profile line
+        // item on their existing subscription and let Stripe prorate the charge onto
+        // the next invoice — no extra payment step required.
+        const currentPlan = String(user.plan || "").toLowerCase();
+        const isAlreadySubscribed =
+            (currentPlan === "plus" || currentPlan === "teams") && user.stripeSubscriptionId;
+
+        if (isAlreadySubscribed) {
             const sub = await stripe.subscriptions.retrieve(user.stripeSubscriptionId, {
                 expand: ["items.data.price"],
             });
@@ -514,7 +522,7 @@ router.post("/teams", requireAuth, async (req, res) => {
 
                 if (!teamsItem) {
                     return res.status(500).json({
-                        error: "Could not find Teams item on subscription. Check Stripe prices mapping.",
+                        error: "Could not find base plan item on subscription. Check Stripe prices mapping.",
                         code: "TEAMS_ITEM_NOT_FOUND",
                     });
                 }
@@ -524,21 +532,17 @@ router.post("/teams", requireAuth, async (req, res) => {
                 if (extraItem) items.push({ id: extraItem.id, quantity: extraProfilesQty });
                 else items.push({ price: extraPriceId, quantity: extraProfilesQty });
 
+                // Add to NEXT invoice (no immediate payment). Stripe will prorate
+                // the £2 across the remaining days of the current cycle.
                 await stripe.subscriptions.update(sub.id, {
                     items,
                     proration_behavior: "create_prorations",
+                    metadata: {
+                        ...(sub.metadata || {}),
+                        plan: "teams",
+                        interval: sub.metadata?.interval || "monthly",
+                    },
                 });
-
-                let prorationResult = { paid: false };
-                try {
-                    prorationResult = await invoiceAndPayNow({
-                        customerId: stripeCustomerId,
-                        subscriptionId: sub.id,
-                    });
-                } catch (e) {
-                    console.error("Proration invoice/pay failed:", e?.message || e);
-                    prorationResult = { paid: false, error: "proration_charge_failed" };
-                }
 
                 const createdProfile = await createClaimedProfileForUser({
                     user,
@@ -559,7 +563,7 @@ router.post("/teams", requireAuth, async (req, res) => {
                     desiredProfiles,
                     extraProfilesQty,
                     profile: createdProfile,
-                    proration: prorationResult,
+                    proration: { paid: false, deferredToNextInvoice: true, amount: 2 },
                 });
             }
         }
