@@ -48,6 +48,11 @@ const toSafeUser = (userDoc) => {
  * - Global: https://www.konarcard.com/u/:slug
  * - Must be a-z 0-9 hyphen
  */
+const RESERVED_SLUGS = new Set([
+    "admin", "test", "null", "undefined", "api", "www", "mail",
+    "support", "help", "billing", "dashboard", "login", "register",
+]);
+
 const safeProfileSlug = (raw) => {
     const s = String(raw || "").trim().toLowerCase();
     if (!s) return "";
@@ -56,6 +61,9 @@ const safeProfileSlug = (raw) => {
         .replace(/[^a-z0-9-]/g, "-")
         .replace(/-+/g, "-")
         .replace(/^-+|-+$/g, "");
+    if (cleaned.length < 3) return "";
+    if (!/[a-z]/.test(cleaned)) return "";
+    if (RESERVED_SLUGS.has(cleaned)) return "";
     return cleaned;
 };
 
@@ -122,10 +130,10 @@ const claimLink = async (req, res) => {
         if (!raw) return res.status(400).json({ error: "Username is required" });
 
         const profileSlug = safeProfileSlug(raw);
-        if (!profileSlug || profileSlug.length < 3) {
+        if (!profileSlug) {
             return res
                 .status(400)
-                .json({ error: "Link name must be at least 3 characters" });
+                .json({ error: "Link name must be at least 3 characters, contain a letter, and not be a reserved word." });
         }
 
         const takenCard = await BusinessCard.findOne({ profile_slug: profileSlug }).select(
@@ -207,10 +215,10 @@ const registerUser = async (req, res) => {
         const cleanEmail = String(email || "").trim().toLowerCase();
 
         const desiredSlug = safeProfileSlug(username);
-        if (!desiredSlug || desiredSlug.length < 3) {
+        if (!desiredSlug) {
             return res
                 .status(400)
-                .json({ error: "Username must be at least 3 characters." });
+                .json({ error: "Username must be at least 3 characters, contain a letter, and not be a reserved word." });
         }
 
         const existingEmail = await User.findOne({ email: cleanEmail });
